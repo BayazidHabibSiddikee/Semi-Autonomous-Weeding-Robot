@@ -1,0 +1,26 @@
+# AI / ML
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.1.0
+transformers>=4.35.0
+timm>=0.9.0
+clip @ git+https://github.com/openai/CLIP.git
+
+# Computer Vision
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Data & Config
+pyyaml>=6.0
+roboflow>=1.1.0
+
+# Hardware (Raspberry Pi)
+pyserial>=3.5
+RPi.GPIO>=0.7.0
+
+# Utilities
+tqdm>=4.65.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0

@@ -1,0 +1,52 @@
+# Robot / Gantry Configuration
+
+gantry:
+  # Physical dimensions (mm)
+  x_travel: 600      # X-axis travel range
+  y_travel: 400      # Y-axis travel range
+
+  # Stepper settings
+  x_steps_per_mm: 80   # steps per mm (depends on belt/pulley)
+  y_steps_per_mm: 80
+  max_speed: 3000       # mm/min
+  acceleration: 500     # mm/s^2
+
+  # Home position
+  home_x: 0
+  home_y: 0
+
+laser:
+  # Laser specs
+  wavelength_nm: 450        # blue diode
+  max_power_watts: 100
+  height_above_ground_mm: 30  # FIXED at 3cm above ground
+
+  # Firing parameters
+  dwell_time_ms: 300        # time to burn one weed (ms)
+  min_weed_size_mm: 5       # ignore weeds smaller than this
+  max_weed_size_mm: 50      # ignore weeds larger than this
+
+  # Safety
+  interlock_enabled: true
+  max_continuous_fire_s: 5  # max seconds laser can stay on
+  cooldown_s: 1             # cooldown between firings
+
+camera:
+  # USB camera settings (2D RGB only)
+  device_id: 0
+  resolution:
+    width: 1280
+    height: 720
+  fps: 30
+
+  # Mounting — camera looks down at field
+  height_mm: 500            # camera height above ground
+
+  # Calibration
+  checkerboard_size: [9, 6]  # inner corners
+  aruco_markers: 12          # number of calibration markers
+
+serial:
+  port: "/dev/ttyUSB0"
+  baudrate: 115200
+  timeout: 1

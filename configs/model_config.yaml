@@ -1,0 +1,57 @@
+# Model Training Configuration
+
+# Classes
+classes:
+  - crop_tomato
+  - crop_chili
+  - crop_flower
+  - weed_grass
+  - weed_dandelion
+  - weed_purslane
+  - weed_amaranth
+  - weed_other
+
+num_classes: 8
+
+# EfficientNet Config
+efficientnet:
+  backbone: "efficientnet_b0"
+  input_size: 224
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  pretrained: true
+  early_stopping_patience: 10
+
+# YOLOv8 Config
+yolo:
+  model: "yolov8n.pt"  # nano — fastest on Pi
+  input_size: 640
+  batch_size: 16
+  epochs: 100
+  learning_rate: 0.01
+  augment: true
+  export_format: "ncnn"  # for Raspberry Pi deployment
+
+# DINOv2 Config
+dinov2:
+  model: "facebook/dinov2-small"
+  input_size: 518
+  feature_dim: 384
+  frozen: true  # don't train the backbone
+
+# CLIP Config
+clip:
+  model: "ViT-B/32"
+  input_size: 224
+  text_prompts:
+    - "a photo of a tomato plant"
+    - "a photo of a chili pepper plant"
+    - "a photo of a flower plant"
+    - "a photo of grass weed"
+    - "a photo of dandelion weed"
+    - "a photo of purslane weed"
+    - "a photo of amaranth weed"
+    - "bare soil"
+    - "rock or debris"
