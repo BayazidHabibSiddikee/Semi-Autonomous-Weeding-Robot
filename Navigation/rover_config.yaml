@@ -1,0 +1,59 @@
+# Rover Configuration
+
+rover:
+  # Motor settings
+  motor:
+    left_pin_fwd: 26      # ESP32 GPIO (via L298N)
+    left_pin_bwd: 27
+    right_pin_fwd: 14
+    right_pin_bwd: 12
+    pwm_freq: 1000        # Hz
+    speed_default: 200    # 0-255 duty cycle
+    speed_turn: 180       # slower for rotation
+    step_forward_ms: 500  # move forward for 500ms per step
+
+  # Servo gimbal settings
+  servo:
+    pan_pin: 18           # ESP32 GPIO
+    tilt_pin: 19          # ESP32 GPIO
+    pan_range: [0, 180]   # degrees
+    tilt_range: [30, 90]  # degrees (limited by arm geometry)
+    pan_center: 90        # center position
+    tilt_center: 60       # looking ~45deg down
+    settle_ms: 300        # wait after moving servo
+
+  # Ultrasonic / ToF sensor
+  ultrasonic:
+    type: "vl53l0x"       # or "hc-sr04"
+    pin_trig: 23          # HC-SR04 only
+    pin_echo: 22          # HC-SR04 only
+    i2c_addr: 0x29        # VL53L0X I2C address
+    max_distance_mm: 2000 # max readable distance
+    min_distance_mm: 50   # too close — ignore
+    fire_distance_mm: 100 # ideal laser firing distance
+
+  # Navigation
+  navigation:
+    row_width_cm: 60      # distance between crop rows
+    step_forward_cm: 20   # distance per forward step
+    row_end_threshold: 1000  # mm — ultrasonic sees no ground = row end
+    obstacle_threshold: 300  # mm — something ahead, stop
+
+  # Laser
+  laser:
+    fire_pin: 25          # ESP32 GPIO (MOSFET gate)
+    dwell_time_ms: 300
+    cooldown_s: 1.0
+
+serial:
+  esp32_port: "/dev/ttyUSB0"
+  esp32_baud: 115200
+  esp32_timeout: 2
+
+camera:
+  device_id: 0
+  resolution:
+    width: 1280
+    height: 720
+  fps: 30
+  height_mm: 500          # camera mount height above ground

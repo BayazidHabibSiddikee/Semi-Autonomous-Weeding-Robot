@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+*.egg-info/
+dist/
+build/
+.obsidian/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Project-RIPRA/
