@@ -106,6 +106,18 @@ def main():
     rows, projection = find_row_centers(plants)
     path = plan_coverage(rows, w, h)
 
+    # detect field corners from the plant mask: min-area bounding rect
+    contours, _ = cv2.findContours(plants, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    corners = np.array([])
+    if contours:
+        all_pts = np.vstack(contours)
+        rect = cv2.minAreaRect(all_pts)
+        corners = cv2.boxPoints(rect).astype(np.int32)
+        print(f"field corners (min-area rect): {corners.tolist()}")
+        print(f"field rect center={rect[0]}, size={rect[1]}, angle={rect[2]}")
+    else:
+        print("no field contour found — using full image")
+
     vis = bgr.copy()
     # green plant mask overlay
     overlay = np.zeros_like(bgr)
@@ -114,6 +126,10 @@ def main():
 
     for x in rows:
         cv2.line(vis, (int(x), 0), (int(x), h), (0, 255, 255), 2)
+    if len(corners) == 4:
+        cv2.polylines(vis, [corners], True, (255, 0, 255), 3)
+        for c in corners:
+            cv2.circle(vis, tuple(c), 8, (255, 0, 255), -1)
     pts = np.array(path, dtype=np.int32)
     if len(pts) >= 2:
         cv2.polylines(vis, [pts], False, (0, 0, 255), 4)
