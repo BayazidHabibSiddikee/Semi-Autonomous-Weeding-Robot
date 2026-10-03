@@ -298,6 +298,7 @@ def main():
     sm.running = True
     t = threading.Thread(target=sm.start, daemon=True)
     t.start()
+    save_tick = 0
     print("[SIM] GUI view — press 'q' to quit")
     while sm.running:
         frame = field.get_frame()
@@ -313,7 +314,12 @@ def main():
         if cv2.waitKey(30) & 0xFF == ord("q"):
             sm.stop()
             break
+        save_tick += 1
+        if save_tick % 5 == 0:
+            cv2.imwrite(os.path.join(REPO, "Navigation", "sim", "live_frame.png"), canvas)
+    cv2.imwrite(os.path.join(REPO, "Navigation", "sim", "live_frame.png"), canvas)
     cv2.destroyAllWindows()
+    print(f"[SIM] Last live view saved → {os.path.join(REPO, 'Navigation', 'sim', 'live_frame.png')}")
 
 
 if __name__ == "__main__":
