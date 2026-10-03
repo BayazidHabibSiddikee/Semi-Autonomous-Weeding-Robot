@@ -66,3 +66,17 @@
   you want it to detect edges, sweep the sensor or mount it on a servo and
   use the readings to build a tiny 1-2D point cloud. For weeding, it's used
   as a "last-2cm check" before the laser fires, not for mapping.
+
+## Sensor upgrade decision
+
+We settle on:
+
+- Camera (phone or Pi cam) for global field map, rows, corners and weeds
+- 1 × VL53L0X for the close-range "is the weed at the right distance?" check
+- 1 × HC-SR04 as a backup / safety stop
+- No LiDAR, no true VSLAM: pose comes from the phone-image plan plus simple
+  rover-frame transforms
+
+This gives us local safety while keeping the hardware inexpensive: map from
+photo, waypoints from boustrophedon, one small VL53 + one sonar for the
+last-second distance check.
