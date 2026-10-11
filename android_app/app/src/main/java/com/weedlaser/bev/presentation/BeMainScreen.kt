@@ -73,7 +73,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
         }
     }
 
-    MaterialTheme {
+    WeedLaserTheme {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -81,11 +81,20 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("BEV Mission Planner", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "নিড়ানি রোবট পথ পরিকল্পক",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "BEV Homography & Path Planner",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
                 Column(Modifier.padding(12.dp)) {
-                    Text("1. Photo & Corners", style = MaterialTheme.typography.titleMedium)
+                    Text("১. জমির ছবি ও চার কোণা নির্বাচন", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
                     CornerSelectionCard(
                         imagePath = imagePath,
@@ -100,9 +109,9 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                 }
             }
 
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
                 Column(Modifier.padding(12.dp)) {
-                    Text("2. Field Config", style = MaterialTheme.typography.titleMedium)
+                    Text("২. জমির পরিমাপ ও বিন্যাস", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
                     FieldConfigInputs(field) { field = it }
                 }
@@ -118,7 +127,10 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                 enabled = imagePath != null && corners != null && !viewModel.isProcessing,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (viewModel.isProcessing) "Generating..." else "3. Generate Mission")
+                Text(
+                    if (viewModel.isProcessing) "প্রসেসিং চলছে (Generating...)" else "৩. স্বয়ংক্রিয় পথ পরিকল্পনা তৈরি করুন",
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
 
             when (val o = viewModel.outcome) {
@@ -131,7 +143,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                             val jsonStr = viewModel.missionToJson(o.mission)
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
-                            Toast.makeText(context, "Mission JSON copied to clipboard", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "মিশন JSON ক্লিপবোর্ডে কপি হয়েছে!", Toast.LENGTH_SHORT).show()
                         }
                     )
                 is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)

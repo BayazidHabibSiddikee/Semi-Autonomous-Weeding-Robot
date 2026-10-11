@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -51,14 +53,14 @@ internal fun CornerSelectionCard(
     Column {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onPickPhotoClick) {
-                Text(if (imagePath == null) "Take / Pick Photo" else "Change Photo")
+                Text(if (imagePath == null) "ছবি নির্বাচন করুন (Pick Photo)" else "ছবি পরিবর্তন করুন (Change Photo)")
             }
         }
         imagePath?.let { p ->
             CornerCanvas(p, corners, onCornersChanged)
         } ?: run {
             Text(
-                "No photo selected.",
+                "কোনো ছবি নির্বাচন করা হয়নি (গ্যালারি থেকে জমির ছবি নিন)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -84,19 +86,28 @@ private fun CornerCanvas(
         corners ?: defaultCorners(imgW, imgH)
     }
 
+    var liveCorners by remember(path) { mutableStateOf(currentCorners) }
+    // Sync external updates when not actively dragging
     var draggedIndex by remember { mutableStateOf<Int?>(null) }
+    androidx.compose.runtime.LaunchedEffect(corners) {
+        if (draggedIndex == null && corners != null) {
+            liveCorners = corners
+        }
+    }
+
+    val latestCornersChanged by androidx.compose.runtime.rememberUpdatedState(onCornersChanged)
     val measurer = rememberTextMeasurer()
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(320.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .height(340.dp)
+            .clip(RoundedCornerShape(12.dp))
     ) {
         Canvas(
             modifier = Modifier
                 .matchParentSize()
-                .pointerInput(path, currentCorners) {
+                .pointerInput(path, imgW, imgH) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             val aspect = imgW / imgH
@@ -106,14 +117,21 @@ private fun CornerCanvas(
                             val dx = (size.width - drawW) / 2
                             val dy = (size.height - drawH) / 2
 
-                            val pts = currentCorners.toList()
-                            val hitRadius = 50f
-                            draggedIndex = pts.indexOfFirst { pt ->
+                            val pts = liveCorners.toList()
+                            val hitRadius = 120f // Generous touch target for finger/thumb
+
+                            var closestIdx = -1
+                            var minDist = Float.MAX_VALUE
+                            pts.forEachIndexed { idx, pt ->
                                 val screenX = (pt.x / imgW) * drawW + dx
                                 val screenY = (pt.y / imgH) * drawH + dy
                                 val dist = sqrt((offset.x - screenX) * (offset.x - screenX) + (offset.y - screenY) * (offset.y - screenY))
-                                dist <= hitRadius
-                            }.takeIf { it != -1 }
+                                if (dist <= hitRadius && dist < minDist) {
+                                    minDist = dist
+                                    closestIdx = idx
+                                }
+                            }
+                            draggedIndex = if (closestIdx != -1) closestIdx else null
                         },
                         onDrag = { change, dragAmount ->
                             change.consume()
@@ -126,17 +144,23 @@ private fun CornerCanvas(
                             val dxImg = (dragAmount.x / drawW) * imgW
                             val dyImg = (dragAmount.y / drawH) * imgH
 
-                            val pts = currentCorners.toList().toMutableList()
+                            val pts = liveCorners.toList().toMutableList()
                             val old = pts[idx]
                             val newX = (old.x + dxImg).coerceIn(0f, imgW)
                             val newY = (old.y + dyImg).coerceIn(0f, imgH)
                             pts[idx] = ImagePoint(newX, newY)
 
                             val updated = FieldCorners(pts[0], pts[1], pts[2], pts[3])
-                            onCornersChanged(updated)
+                            liveCorners = updated
+                            latestCornersChanged(updated)
                         },
-                        onDragEnd = { draggedIndex = null },
-                        onDragCancel = { draggedIndex = null },
+                        onDragEnd = {
+                            draggedIndex = null
+                            latestCornersChanged(liveCorners)
+                        },
+                        onDragCancel = {
+                            draggedIndex = null
+                        },
                     )
                 }
         ) {
@@ -158,12 +182,13 @@ private fun CornerCanvas(
                 )
             }
 
-            val pts = currentCorners.toList()
+            val pts = liveCorners.toList()
             val offsets = pts.map { p ->
                 Offset((p.x / imgW) * drawW + dx, (p.y / imgH) * drawH + dy)
             }
 
             if (offsets.size == 4) {
+                // Polygon boundary line
                 drawPath(
                     path = Path().apply {
                         moveTo(offsets[0].x, offsets[0].y)
@@ -172,39 +197,69 @@ private fun CornerCanvas(
                         lineTo(offsets[3].x, offsets[3].y)
                         close()
                     },
-                    color = Color.Cyan,
-                    style = Stroke(width = 3f),
+                    color = Color(0xFF00E5FF),
+                    style = Stroke(width = 4f),
+                )
+                // Semi-transparent field fill
+                drawPath(
+                    path = Path().apply {
+                        moveTo(offsets[0].x, offsets[0].y)
+                        lineTo(offsets[1].x, offsets[1].y)
+                        lineTo(offsets[2].x, offsets[2].y)
+                        lineTo(offsets[3].x, offsets[3].y)
+                        close()
+                    },
+                    color = Color(0x2200E5FF),
                 )
             }
 
             cornerLabels.forEachIndexed { i, label ->
                 val center = offsets.getOrNull(i) ?: return@forEachIndexed
                 val isDragged = (i == draggedIndex)
+
+                // Large touch target halo if dragged or hovered
+                if (isDragged) {
+                    drawCircle(
+                        color = Color(0x55FFEB3B),
+                        radius = 42f,
+                        center = center,
+                    )
+                }
+
+                // Outer circle
                 drawCircle(
-                    color = if (isDragged) Color.Yellow else Color.Cyan,
-                    radius = if (isDragged) 22f else 18f,
+                    color = if (isDragged) Color(0xFFFFEB3B) else Color(0xFF00E5FF),
+                    radius = if (isDragged) 24f else 18f,
                     center = center,
-                    style = Stroke(width = 4f),
+                    style = Stroke(width = 5f),
                 )
+                // Inner center dot
                 drawCircle(
                     color = Color.White,
-                    radius = 8f,
+                    radius = if (isDragged) 10f else 7f,
                     center = center,
                 )
+                // Label badge
                 drawText(
                     textMeasurer = measurer,
                     text = label,
-                    style = TextStyle(fontSize = 13.sp, color = Color.White),
-                    topLeft = Offset(center.x - 12f, center.y - 32f),
+                    style = TextStyle(
+                        fontSize = 13.sp,
+                        color = Color.White,
+                        fontFamily = BengaliFontFamily,
+                        fontWeight = FontWeight.Bold
+                    ),
+                    topLeft = Offset(center.x - 12f, center.y - 36f),
                 )
             }
         }
     }
 
     Text(
-        "Drag the 4 handles to the field corners.",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        "চারটি বৃত্তাকার পিন স্পর্শ করে জমির ৪টি কোণায় টেনে আনুন (TL, TR, BR, BL)",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 4.dp),
     )
 }
 

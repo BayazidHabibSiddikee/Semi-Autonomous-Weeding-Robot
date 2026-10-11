@@ -14,7 +14,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            WeedLaserTheme {
                 Surface(modifier = Modifier) {
                     BeMainScreen()
                 }

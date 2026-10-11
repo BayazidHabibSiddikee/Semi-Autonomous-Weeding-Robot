@@ -43,7 +43,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(widthM = s.toDoubleOrNull() ?: field.widthM))
                 },
-                label = { Text("Width (m)") },
+                label = { Text("প্রস্থ (Width m)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -52,7 +52,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(lengthM = s.toDoubleOrNull() ?: field.lengthM))
                 },
-                label = { Text("Length (m)") },
+                label = { Text("দৈর্ঘ্য (Length m)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -63,7 +63,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(totalRows = s.toIntOrNull() ?: field.totalRows))
                 },
-                label = { Text("Rows") },
+                label = { Text("মোট সারি (Rows)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -74,7 +74,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                         field.copy(rowSpacingM = s.toDoubleOrNull() ?: field.rowSpacingM)
                     )
                 },
-                label = { Text("Row spacing (m)") },
+                label = { Text("সারির দূরত্ব (Spacing m)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -96,13 +96,13 @@ internal fun BeSuccessPanel(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text("Mission Ready", style = MaterialTheme.typography.titleMedium)
+            Text("মিশন প্রস্তুত (Mission Ready)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                "${o.mission.field.totalRows} rows · " +
-                        "${o.mission.field.lengthM}m × ${o.mission.field.widthM}m · " +
-                        "≈${"%.1f".format(o.mission.totalDistanceM)}m total · " +
-                        "Confidence: ${(o.rows.confidence * 100).toInt()}%",
+                "${o.mission.field.totalRows} টি সারি · " +
+                        "${o.mission.field.lengthM}মি × ${o.mission.field.widthM}মি · " +
+                        "মোট দূরত্ব ≈${"%.1f".format(o.mission.totalDistanceM)}মি · " +
+                        "শনাক্তকরণ আত্মবিশ্বাস: ${(o.rows.confidence * 100).toInt()}%",
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(8.dp))
@@ -119,13 +119,13 @@ internal fun BeSuccessPanel(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 OutlinedButton(onClick = onSend, modifier = Modifier.weight(1f)) {
-                    Text("Send to $piIp")
+                    Text("রোবটে পাঠান ($piIp)")
                 }
                 OutlinedButton(
                     onClick = onCopyJson,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Copy JSON")
+                    Text("JSON কপি করুন")
                 }
             }
         }
@@ -230,9 +230,9 @@ internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text(message, style = MaterialTheme.typography.bodyMedium)
+            Text("ত্রুটি: $message", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onRetry) { Text("Retry") }
+            TextButton(onClick = onRetry) { Text("পুনরায় চেষ্টা করুন (Retry)") }
         }
     }
 }
@@ -240,7 +240,7 @@ internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
 @Composable
 internal fun BeIdleHint() {
     Text(
-        "No mission yet. Capture a photo and select the 4 corners.",
+        "এখনো কোনো মিশন তৈরি হয়নি। উপরে জমির ছবি নিয়ে ৪টি কোণা চিহ্নিত করুন।",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
