@@ -307,11 +307,15 @@ def build_robot_chassis():
         set_color(panel_obj, WOOD_LEG)
 
     # Clamping M3 bolts in bridge
+    # Left plates: Y=45.5 to 67.5 (screw head on outside Y=67.5, bolt extends in -Y to Y=43.0)
+    # Right plates: Y=-67.5 to -45.5 (screw head on outside Y=-67.5, bolt extends in +Y to Y=-43.0)
     for side_sign in [1, -1]:
-        sy = 45.0 if side_sign > 0 else -68.0
+        outer_y = 67.5 if side_sign > 0 else -67.5
+        bolt_dir = Vector(0, -1, 0) if side_sign > 0 else Vector(0, 1, 0)
+        head_dir = Vector(0, 1, 0) if side_sign > 0 else Vector(0, -1, 0)
         for bx in [-30.0, 30.0]:
-            bolt = Part.makeCylinder(1.5, 23.5, Vector(bx, sy, 121.0), Vector(0, side_sign, 0))
-            head = Part.makeCylinder(3.0, 2.0, Vector(bx, sy if side_sign > 0 else sy + 23.5, 121.0), Vector(0, -side_sign, 0))
+            bolt = Part.makeCylinder(1.5, 26.0, Vector(bx, outer_y, 121.0), bolt_dir)
+            head = Part.makeCylinder(3.0, 2.0, Vector(bx, outer_y, 121.0), head_dir)
             b_obj = doc.addObject('Part::Feature', f'Bridge_Clamp_Bolt_{"L" if side_sign>0 else "R"}_{bx:+0.0f}')
             b_obj.Shape = bolt.fuse(head)
             set_color(b_obj, BOLT_STEEL)
@@ -358,12 +362,17 @@ def build_robot_chassis():
         set_color(ax_obj, AXLE_WHITE)
 
         # Mounting M3 bolts through motor and wood plates
+        # Spans from outer face to inner face
         bolt_pitch = 17.5
         bolt_x = wx - (dir_x * bolt_pitch * math.cos(math.pi/4.0))
         bolt_z = 35.0 + (bolt_pitch * math.sin(math.pi/4.0))
-        bolt_m = Part.makeCylinder(1.5, 24.0, Vector(bolt_x, motor_y - (side_sign * 12.0), bolt_z), Vector(0, side_sign, 0))
+        m_outer_y = 67.5 if side_sign > 0 else -67.5
+        m_bolt_dir = Vector(0, -1, 0) if side_sign > 0 else Vector(0, 1, 0)
+        m_head_dir = Vector(0, 1, 0) if side_sign > 0 else Vector(0, -1, 0)
+        bolt_m = Part.makeCylinder(1.5, 26.0, Vector(bolt_x, m_outer_y, bolt_z), m_bolt_dir)
+        head_m = Part.makeCylinder(3.0, 2.0, Vector(bolt_x, m_outer_y, bolt_z), m_head_dir)
         b_motor_obj = doc.addObject('Part::Feature', f'Motor_Mount_Bolt_{name}')
-        b_motor_obj.Shape = bolt_m
+        b_motor_obj.Shape = bolt_m.fuse(head_m)
         set_color(b_motor_obj, BOLT_STEEL)
 
         # Wheel assembly (rim starts at wy_hub)
