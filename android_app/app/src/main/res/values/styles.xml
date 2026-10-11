@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light theme for the camera/field UI. Compose controls colors at runtime,
+         so the platform theme only sets window/status-bar. -->
+    <style name="Theme.BEVPlanner" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#2E7D32</item>
+        <item name="android:colorAccent">#1B5E20</item>
+    </style>
+</resources>

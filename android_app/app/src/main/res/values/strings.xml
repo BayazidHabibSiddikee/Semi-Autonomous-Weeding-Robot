@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BEV Mission Planner</string>
+    <string name="be_field_captured">Field photo saved</string>
+    <string name="be_corners_selected">Corners selected</string>
+    <string name="be_mission_generated">Mission ready</string>
+    <string name="be_mission_sent">Mission sent to %1$s</string>
+    <string name="be_error_cannot_process">Could not process: %1$s</string>
+    <string name="be_error_no_openCV">OpenCV not available</string>
+</resources>
