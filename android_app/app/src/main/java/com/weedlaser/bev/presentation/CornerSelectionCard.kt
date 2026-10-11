@@ -77,7 +77,24 @@ private fun CornerCanvas(
 ) {
     val bitmap = remember(path) {
         val file = File(path)
-        if (file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
+        if (!file.exists()) return@remember null
+        try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            val maxPreview = 1400
+            var sample = 1
+            while ((bounds.outWidth / sample) > maxPreview || (bounds.outHeight / sample) > maxPreview) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+            }
+            BitmapFactory.decodeFile(file.absolutePath, opts)
+        } catch (e: Throwable) {
+            android.util.Log.e("CornerCanvas", "Failed to decode preview bitmap: ${e.message}", e)
+            null
+        }
     }
 
     val imgW = (bitmap?.width ?: 800).toFloat()

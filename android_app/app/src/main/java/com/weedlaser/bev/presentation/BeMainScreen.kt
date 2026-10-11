@@ -264,13 +264,42 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
 
 private fun copyUriToInternalFile(context: Context, uri: Uri): String? {
     return try {
-        val inputStream = context.contentResolver.openInputStream(uri) ?: return null
+        // Read image bounds first
+        val boundsOptions = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            android.graphics.BitmapFactory.decodeStream(stream, null, boundsOptions)
+        }
+
+        val origW = boundsOptions.outWidth
+        val origH = boundsOptions.outHeight
+        if (origW <= 0 || origH <= 0) return null
+
+        // Calculate sample size to limit dimensions to max 2048x2048 (safeguards high-megapixel phone cameras)
+        val maxDim = 2048
+        var sampleSize = 1
+        while ((origW / sampleSize) > maxDim || (origH / sampleSize) > maxDim) {
+            sampleSize *= 2
+        }
+
+        val decodeOptions = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        }
+
+        val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+            android.graphics.BitmapFactory.decodeStream(stream, null, decodeOptions)
+        } ?: return null
+
         val target = File(context.filesDir, "field_input_${System.currentTimeMillis()}.jpg")
         FileOutputStream(target).use { out ->
-            inputStream.copyTo(out)
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
         }
+        bitmap.recycle()
         target.absolutePath
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
+        android.util.Log.e("BeMainScreen", "Error saving photo: ${e.message}", e)
         null
     }
 }

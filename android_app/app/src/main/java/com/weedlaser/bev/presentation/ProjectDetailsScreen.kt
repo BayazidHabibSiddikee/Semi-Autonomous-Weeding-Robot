@@ -84,6 +84,9 @@ fun ProjectDetailsScreen() {
             }
         }
 
+        // 3D Chassis Viewer Component
+        Chassis3DViewerCard()
+
         // Demo Videos Section
         Card(
             modifier = Modifier.fillMaxWidth(),
