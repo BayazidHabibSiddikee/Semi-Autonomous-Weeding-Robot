@@ -1,0 +1,176 @@
+<?xml version="1.0"?>
+<robot name="weed_laser_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ========================================== -->
+  <!-- Materials & Colors                         -->
+  <!-- ========================================== -->
+  <material name="wood_brown">
+    <color rgba="0.72 0.50 0.30 1.0"/>
+  </material>
+
+  <material name="yellow_plastic">
+    <color rgba="0.95 0.82 0.08 1.0"/>
+  </material>
+
+  <material name="tire_black">
+    <color rgba="0.15 0.15 0.15 1.0"/>
+  </material>
+
+  <material name="silver_metal">
+    <color rgba="0.80 0.82 0.85 1.0"/>
+  </material>
+
+  <!-- ========================================== -->
+  <!-- Base Footprint (Ground Projection Z = 0)   -->
+  <!-- ========================================== -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ========================================== -->
+  <!-- Base Link (Chassis Frame + Fixed Actuators)-->
+  <!-- ========================================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- Mass of wooden deck, arch legs, hardware, and 4 TT motor gearboxes (~0.65 kg) -->
+      <mass value="0.650"/>
+      <origin xyz="0.0 0.0 0.095" rpy="0 0 0"/>
+      <!-- Ixx, Iyy, Izz for box approx 0.256 x 0.155 x 0.125 -->
+      <inertia ixx="0.0021" ixy="0.0" ixz="0.0"
+               iyy="0.0042" iyz="0.0"
+               izz="0.0051"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+      <geometry>
+        <!-- STL mesh in millimeters scaled to meters -->
+        <mesh filename="package://weed_laser_robot/meshes/chassis_base.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="wood_brown"/>
+    </visual>
+
+    <!-- Collision geometry: Top chassis deck + leg bounds -->
+    <collision>
+      <origin xyz="0.0 0.0 0.12675" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.256 0.155 0.0035"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.0 0.0565 0.080" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.255 0.022 0.090"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.0 -0.0565 0.080" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.255 0.022 0.090"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ========================================== -->
+  <!-- Wheel Macro                                -->
+  <!-- ========================================== -->
+  <xacro:macro name="rover_wheel" params="prefix x_pos y_pos z_pos flip_y">
+    <link name="${prefix}_wheel_link">
+      <inertial>
+        <!-- Mass of yellow rim + rubber tire (~0.045 kg) -->
+        <mass value="0.045"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <!-- Cylinder inertia: r=0.035, h=0.026 -->
+        <inertia ixx="0.000016" ixy="0.0" ixz="0.0"
+                 iyy="0.000027" iyz="0.0"
+                 izz="0.000016"/>
+      </inertial>
+
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 ${3.14159 if flip_y else 0}"/>
+        <geometry>
+          <mesh filename="package://weed_laser_robot/meshes/wheel.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="yellow_plastic"/>
+      </visual>
+
+      <collision>
+        <origin xyz="0 0 0" rpy="1.570796 0 0"/>
+        <geometry>
+          <cylinder radius="0.035" length="0.026"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin xyz="${x_pos} ${y_pos} ${z_pos}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="1.5" velocity="25.0"/>
+      <dynamics damping="0.01" friction="0.05"/>
+    </joint>
+
+    <!-- Gazebo surface friction parameters for differential traction -->
+    <gazebo reference="${prefix}_wheel_link">
+      <mu1>1.2</mu1>
+      <mu2>0.8</mu2>
+      <kp>1000000.0</kp>
+      <kd>100.0</kd>
+      <minDepth>0.001</minDepth>
+      <material>Gazebo/Yellow</material>
+    </gazebo>
+  </xacro:macro>
+
+  <!-- ========================================== -->
+  <!-- Wheel Joint Instantiations                 -->
+  <!-- ========================================== -->
+  <!-- Dimensions matching CAD exactly:           -->
+  <!-- Front: X = +0.1275, Rear: X = -0.1275      -->
+  <!-- Left: Y = +0.087,   Right: Y = -0.087      -->
+  <!-- Ground clearance:   Z = 0.035 (R = 3.5cm)  -->
+  <xacro:rover_wheel prefix="front_left"  x_pos="0.1275"  y_pos="0.087"  z_pos="0.035" flip_y="false"/>
+  <xacro:rover_wheel prefix="rear_left"   x_pos="-0.1275" y_pos="0.087"  z_pos="0.035" flip_y="false"/>
+  <xacro:rover_wheel prefix="front_right" x_pos="0.1275"  y_pos="-0.087" z_pos="0.035" flip_y="true"/>
+  <xacro:rover_wheel prefix="rear_right"  x_pos="-0.1275" y_pos="-0.087" z_pos="0.035" flip_y="true"/>
+
+  <!-- ========================================== -->
+  <!-- Gazebo Skid-Steer / Diff-Drive Plugin      -->
+  <!-- ========================================== -->
+  <gazebo>
+    <plugin name="skid_steer_drive_controller" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <update_rate>50</update_rate>
+      <!-- 4-Wheel differential configuration -->
+      <num_wheel_pairs>2</num_wheel_pairs>
+      <left_joint>front_left_wheel_joint</left_joint>
+      <left_joint>rear_left_wheel_joint</left_joint>
+      <right_joint>front_right_wheel_joint</right_joint>
+      <right_joint>rear_right_wheel_joint</right_joint>
+
+      <!-- Kinematics -->
+      <wheel_separation>0.174</wheel_separation>
+      <wheel_diameter>0.070</wheel_diameter>
+
+      <!-- Limits -->
+      <max_wheel_torque>2.0</max_wheel_torque>
+      <max_wheel_acceleration>1.5</max_wheel_acceleration>
+
+      <!-- Output -->
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+</robot>
