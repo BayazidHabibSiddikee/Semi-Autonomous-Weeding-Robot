@@ -257,17 +257,34 @@ private fun CornerCanvas(
                     radius = if (isDragged) 10f else 7f,
                     center = center,
                 )
-                // Label badge
-                drawText(
-                    textMeasurer = measurer,
+
+                // Label badge with safe clamped coordinates inside canvas bounds
+                val textLayoutResult = measurer.measure(
                     text = label,
                     style = TextStyle(
-                        fontSize = 13.sp,
-                        color = Color.White,
+                        fontSize = 12.sp,
+                        color = Color.Black,
                         fontFamily = BengaliFontFamily,
                         fontWeight = FontWeight.Bold
-                    ),
-                    topLeft = Offset(center.x - 12f, center.y - 36f),
+                    )
+                )
+                val badgeW = textLayoutResult.size.width + 16f
+                val badgeH = textLayoutResult.size.height + 8f
+
+                val badgeLeft = (center.x - badgeW / 2f).coerceIn(4f, size.width - badgeW - 4f)
+                val badgeTop = (center.y - 38f).coerceIn(4f, size.height - badgeH - 4f)
+
+                // Rounded badge background
+                drawRoundRect(
+                    color = if (isDragged) Color(0xFFFFEB3B) else Color(0xCC00E5FF),
+                    topLeft = Offset(badgeLeft, badgeTop),
+                    size = androidx.compose.ui.geometry.Size(badgeW, badgeH),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+                )
+
+                drawText(
+                    textLayoutResult = textLayoutResult,
+                    topLeft = Offset(badgeLeft + 8f, badgeTop + 4f),
                 )
             }
         }
