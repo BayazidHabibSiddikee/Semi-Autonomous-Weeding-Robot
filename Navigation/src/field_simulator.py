@@ -176,6 +176,37 @@ class FieldSimulator:
             return 1400  # open space — row end
         return 150 + int(self.rng.uniform(-8, 8))
 
+    def sonar(self, body_deg, max_range=250.0):
+        """Distance (cm) from the rover to the nearest field boundary along a
+        ray at `body_deg` degrees relative to the current heading. Returns
+        None if no wall is within `max_range`."""
+        deg = self.heading + body_deg
+        rad = math.radians(deg)
+        c, s = math.cos(rad), math.sin(rad)
+        if abs(c) < 1e-9 and abs(s) < 1e-9:
+            return None
+        x, y = self.rover_x, self.rover_y
+        t = float("inf")
+        for edge in (0.0, float(self.field_w_cm)):   # vertical walls x = const
+            if abs(c) < 1e-9:
+                continue
+            tt = (edge - x) / c
+            if tt > 0.5:
+                yy = y + s * tt
+                if 0 <= yy <= self.field_h_cm and tt < t:
+                    t = tt
+        for edge in (0.0, float(self.field_h_cm)):   # horizontal walls y = const
+            if abs(s) < 1e-9:
+                continue
+            tt = (edge - y) / s
+            if tt > 0.5:
+                xx = x + c * tt
+                if 0 <= xx <= self.field_w_cm and tt < t:
+                    t = tt
+        if math.isinf(t) or t > max_range:
+            return None
+        return t + self.rng.uniform(-1.5, 1.5)   # sonar noise
+
     # ---------------------- weed interaction ------------------------ #
     def weeds_in_frame(self):
         """Return weeds currently visible in the camera footprint."""
