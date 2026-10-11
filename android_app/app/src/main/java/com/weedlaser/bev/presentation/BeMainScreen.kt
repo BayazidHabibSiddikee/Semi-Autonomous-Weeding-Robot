@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,8 +51,8 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
     val scope = rememberCoroutineScope()
 
     var imagePath by rememberSaveable { mutableStateOf<String?>(null) }
-    var corners by rememberSaveable { mutableStateOf<FieldCorners?>(null) }
-    var field by rememberSaveable {
+    var corners by remember { mutableStateOf<FieldCorners?>(null) }
+    var field by remember {
         mutableStateOf(Field(widthM = 6.0, lengthM = 8.0, totalRows = 10, rowSpacingM = 0.6))
     }
     var piIp by rememberSaveable { mutableStateOf("192.168.4.1") }

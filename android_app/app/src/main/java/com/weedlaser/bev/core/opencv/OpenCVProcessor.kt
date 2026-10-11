@@ -25,7 +25,30 @@ class OpenCVProcessor {
      */
     fun init(): Boolean {
         if (initialized) return true
-        val loaded = OpenCVLoader.initLocal()
+        try {
+            System.loadLibrary("c++_shared")
+        } catch (e: Throwable) {
+            android.util.Log.w("OpenCVProcessor", "Could not pre-load c++_shared: ${e.message}")
+        }
+        val loaded = try {
+            if (OpenCVLoader.initLocal()) {
+                true
+            } else if (OpenCVLoader.initDebug()) {
+                true
+            } else {
+                System.loadLibrary("opencv_java4")
+                true
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("OpenCVProcessor", "OpenCVLoader failed, trying System.loadLibrary: ${e.message}")
+            try {
+                System.loadLibrary("opencv_java4")
+                true
+            } catch (err: Throwable) {
+                android.util.Log.e("OpenCVProcessor", "Direct System.loadLibrary failed: ${err.message}", err)
+                false
+            }
+        }
         initialized = loaded
         return loaded
     }
