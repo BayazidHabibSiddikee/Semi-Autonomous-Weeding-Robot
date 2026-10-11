@@ -50,17 +50,18 @@ internal fun CornerSelectionCard(
     onPickPhotoClick: () -> Unit = {},
     onCornersChanged: (FieldCorners) -> Unit,
 ) {
+    val lang = LocalAppLanguage.current
     Column {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onPickPhotoClick) {
-                Text(if (imagePath == null) "ছবি নির্বাচন করুন (Pick Photo)" else "ছবি পরিবর্তন করুন (Change Photo)")
+                Text(Strings.pickPhoto(lang, imagePath != null))
             }
         }
         imagePath?.let { p ->
             CornerCanvas(p, corners, onCornersChanged)
         } ?: run {
             Text(
-                "কোনো ছবি নির্বাচন করা হয়নি (গ্যালারি থেকে জমির ছবি নিন)",
+                Strings.noPhotoSelected(lang),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -255,8 +256,9 @@ private fun CornerCanvas(
         }
     }
 
+    val lang = LocalAppLanguage.current
     Text(
-        "চারটি বৃত্তাকার পিন স্পর্শ করে জমির ৪টি কোণায় টেনে আনুন (TL, TR, BR, BL)",
+        Strings.dragHandleHint(lang),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(top = 4.dp),

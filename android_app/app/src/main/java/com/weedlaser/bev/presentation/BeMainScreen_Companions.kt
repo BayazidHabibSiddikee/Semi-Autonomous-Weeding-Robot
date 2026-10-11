@@ -36,6 +36,7 @@ import java.io.File
 
 @Composable
 internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
+    val lang = LocalAppLanguage.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
@@ -43,7 +44,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(widthM = s.toDoubleOrNull() ?: field.widthM))
                 },
-                label = { Text("প্রস্থ (Width m)") },
+                label = { Text(Strings.widthLabel(lang)) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -52,7 +53,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(lengthM = s.toDoubleOrNull() ?: field.lengthM))
                 },
-                label = { Text("দৈর্ঘ্য (Length m)") },
+                label = { Text(Strings.lengthLabel(lang)) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -63,7 +64,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onValueChange = { s ->
                     onFieldChanged(field.copy(totalRows = s.toIntOrNull() ?: field.totalRows))
                 },
-                label = { Text("মোট সারি (Rows)") },
+                label = { Text(Strings.totalRowsLabel(lang)) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -74,7 +75,7 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                         field.copy(rowSpacingM = s.toDoubleOrNull() ?: field.rowSpacingM)
                     )
                 },
-                label = { Text("সারির দূরত্ব (Spacing m)") },
+                label = { Text(Strings.rowSpacingLabel(lang)) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -89,6 +90,7 @@ internal fun BeSuccessPanel(
     onSend: () -> Unit,
     onCopyJson: () -> Unit,
 ) {
+    val lang = LocalAppLanguage.current
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -96,15 +98,20 @@ internal fun BeSuccessPanel(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text("মিশন প্রস্তুত (Mission Ready)", style = MaterialTheme.typography.titleMedium)
+            Text(Strings.missionReady(lang), style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
-            Text(
+            val summaryText = if (lang == AppLanguage.BN) {
                 "${o.mission.field.totalRows} টি সারি · " +
                         "${o.mission.field.lengthM}মি × ${o.mission.field.widthM}মি · " +
                         "মোট দূরত্ব ≈${"%.1f".format(o.mission.totalDistanceM)}মি · " +
-                        "শনাক্তকরণ আত্মবিশ্বাস: ${(o.rows.confidence * 100).toInt()}%",
-                style = MaterialTheme.typography.bodySmall,
-            )
+                        "শনাক্তকরণ আত্মবিশ্বাস: ${(o.rows.confidence * 100).toInt()}%"
+            } else {
+                "${o.mission.field.totalRows} rows · " +
+                        "${o.mission.field.lengthM}m × ${o.mission.field.widthM}m · " +
+                        "≈${"%.1f".format(o.mission.totalDistanceM)}m total · " +
+                        "Confidence: ${(o.rows.confidence * 100).toInt()}%"
+            }
+            Text(summaryText, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
 
             // BEV and Path Overlay Preview
@@ -119,13 +126,13 @@ internal fun BeSuccessPanel(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 OutlinedButton(onClick = onSend, modifier = Modifier.weight(1f)) {
-                    Text("রোবটে পাঠান ($piIp)")
+                    Text(Strings.sendToPi(lang, piIp))
                 }
                 OutlinedButton(
                     onClick = onCopyJson,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("JSON কপি করুন")
+                    Text(Strings.copyJson(lang))
                 }
             }
         }
@@ -223,6 +230,7 @@ private fun BevPathVisualizer(
 
 @Composable
 internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
+    val lang = LocalAppLanguage.current
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
@@ -230,17 +238,19 @@ internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text("ত্রুটি: $message", style = MaterialTheme.typography.bodyMedium)
+            val errPrefix = if (lang == AppLanguage.BN) "ত্রুটি: " else "Error: "
+            Text("$errPrefix$message", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onRetry) { Text("পুনরায় চেষ্টা করুন (Retry)") }
+            TextButton(onClick = onRetry) { Text(Strings.retry(lang)) }
         }
     }
 }
 
 @Composable
 internal fun BeIdleHint() {
+    val lang = LocalAppLanguage.current
     Text(
-        "এখনো কোনো মিশন তৈরি হয়নি। উপরে জমির ছবি নিয়ে ৪টি কোণা চিহ্নিত করুন।",
+        Strings.idleHint(lang),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

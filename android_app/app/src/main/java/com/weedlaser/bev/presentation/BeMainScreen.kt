@@ -10,6 +10,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,20 +19,40 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.weedlaser.bev.domain.model.Field
 import com.weedlaser.bev.domain.model.FieldCorners
 import kotlinx.coroutines.Dispatchers
@@ -41,12 +62,113 @@ import org.koin.androidx.compose.koinViewModel
 import java.io.File
 import java.io.FileOutputStream
 
+enum class AppTab {
+    PLANNER, PROJECT, ABOUT
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
+    var selectedLanguage by rememberSaveable { mutableStateOf(AppLanguage.BN) }
+    var currentTab by rememberSaveable { mutableStateOf(AppTab.PLANNER) }
+
+    CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
+        WeedLaserTheme {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text(
+                                    text = Strings.appTitle(selectedLanguage),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Semi-Autonomous Weeding Robot",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        actions = {
+                            // EN / BN Language Switcher
+                            Row(
+                                modifier = Modifier.padding(end = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = selectedLanguage == AppLanguage.BN,
+                                    onClick = { selectedLanguage = AppLanguage.BN },
+                                    label = { Text("বাং", fontWeight = FontWeight.Bold) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                )
+                                FilterChip(
+                                    selected = selectedLanguage == AppLanguage.EN,
+                                    onClick = { selectedLanguage = AppLanguage.EN },
+                                    label = { Text("EN", fontWeight = FontWeight.Bold) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    )
+                },
+                bottomBar = {
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.PLANNER,
+                            onClick = { currentTab = AppTab.PLANNER },
+                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Planner") },
+                            label = { Text(Strings.navPlanner(selectedLanguage), fontSize = 11.sp) }
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.PROJECT,
+                            onClick = { currentTab = AppTab.PROJECT },
+                            icon = { Icon(Icons.Default.Info, contentDescription = "Project") },
+                            label = { Text(Strings.navProject(selectedLanguage), fontSize = 11.sp) }
+                        )
+                        NavigationBarItem(
+                            selected = currentTab == AppTab.ABOUT,
+                            onClick = { currentTab = AppTab.ABOUT },
+                            icon = { Icon(Icons.Default.Person, contentDescription = "About") },
+                            label = { Text(Strings.navAbout(selectedLanguage), fontSize = 11.sp) }
+                        )
+                    }
+                }
+            ) { innerPadding ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    when (currentTab) {
+                        AppTab.PLANNER -> BeMainScreen(viewModel = viewModel)
+                        AppTab.PROJECT -> ProjectDetailsScreen()
+                        AppTab.ABOUT -> AboutDeveloperScreen()
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
- * Entry screen for the BEV pipeline.
- * Steps: 1) photo + corners, 2) field config, 3) generate, 4) send / export.
+ * BEV Planner screen: photo + corners, field config, generate, send / export.
  */
 @Composable
 fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
+    val lang = LocalAppLanguage.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -73,82 +195,69 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
         }
     }
 
-    WeedLaserTheme {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                "নিড়ানি রোবট পথ পরিকল্পক",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                "BEV Homography & Path Planner",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("১. জমির ছবি ও চার কোণা নির্বাচন", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    CornerSelectionCard(
-                        imagePath = imagePath,
-                        corners = corners,
-                        onPickPhotoClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
-                        onCornersChanged = { corners = it },
-                    )
-                }
-            }
-
-            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("২. জমির পরিমাপ ও বিন্যাস", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    FieldConfigInputs(field) { field = it }
-                }
-            }
-
-            Button(
-                onClick = {
-                    val img = imagePath ?: return@Button
-                    val c = corners ?: return@Button
-                    if (!c.isValid()) return@Button
-                    viewModel.processAndGenerate(img, c, field)
-                },
-                enabled = imagePath != null && corners != null && !viewModel.isProcessing,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    if (viewModel.isProcessing) "প্রসেসিং চলছে (Generating...)" else "৩. স্বয়ংক্রিয় পথ পরিকল্পনা তৈরি করুন",
-                    style = MaterialTheme.typography.labelLarge,
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Text(Strings.step1Title(lang), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                CornerSelectionCard(
+                    imagePath = imagePath,
+                    corners = corners,
+                    onPickPhotoClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onCornersChanged = { corners = it },
                 )
             }
+        }
 
-            when (val o = viewModel.outcome) {
-                is BevOutcome.Success ->
-                    BeSuccessPanel(
-                        o = o,
-                        piIp = piIp,
-                        onSend = { viewModel.sendToPi(o.mission, piIp) },
-                        onCopyJson = {
-                            val jsonStr = viewModel.missionToJson(o.mission)
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
-                            Toast.makeText(context, "মিশন JSON ক্লিপবোর্ডে কপি হয়েছে!", Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)
-                BevOutcome.Idle -> BeIdleHint()
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Text(Strings.step2Title(lang), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                FieldConfigInputs(field) { field = it }
             }
+        }
+
+        Button(
+            onClick = {
+                val img = imagePath ?: return@Button
+                val c = corners ?: return@Button
+                if (!c.isValid()) return@Button
+                viewModel.processAndGenerate(img, c, field)
+            },
+            enabled = imagePath != null && corners != null && !viewModel.isProcessing,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                Strings.generateMission(lang, viewModel.isProcessing),
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
+
+        when (val o = viewModel.outcome) {
+            is BevOutcome.Success ->
+                BeSuccessPanel(
+                    o = o,
+                    piIp = piIp,
+                    onSend = { viewModel.sendToPi(o.mission, piIp) },
+                    onCopyJson = {
+                        val jsonStr = viewModel.missionToJson(o.mission)
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
+                        Toast.makeText(context, Strings.jsonCopied(lang), Toast.LENGTH_SHORT).show()
+                    }
+                )
+            is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)
+            BevOutcome.Idle -> BeIdleHint()
         }
     }
 }
