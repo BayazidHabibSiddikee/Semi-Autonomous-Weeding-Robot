@@ -72,7 +72,12 @@ class BeViewModel(
                 this@BeViewModel.field = field
                 saveField(field)
 
-                val bev = generateBEV(imagePath, corners).getOrThrow()
+                val targetW = 800
+                val targetH = if (field.widthM > 0 && field.lengthM > 0) {
+                    ((targetW * field.lengthM / field.widthM).toInt()).coerceIn(400, 1600)
+                } else 600
+
+                val bev = generateBEV(imagePath, corners, targetW, targetH).getOrThrow()
 
                 val rows = detectRows(bev.bevImagePath, field.totalRows)
                     .getOrThrow()

@@ -178,6 +178,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
         mutableStateOf(Field(widthM = 6.0, lengthM = 8.0, totalRows = 10, rowSpacingM = 0.6))
     }
     var piIp by rememberSaveable { mutableStateOf("192.168.4.1") }
+    var isDraggingCorner by remember { mutableStateOf(false) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -198,7 +199,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(rememberScrollState(), enabled = !isDraggingCorner)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -215,6 +216,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                         )
                     },
                     onCornersChanged = { corners = it },
+                    onDraggingChanged = { isDraggingCorner = it },
                 )
             }
         }

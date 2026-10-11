@@ -48,6 +48,7 @@ internal fun CornerSelectionCard(
     imagePath: String?,
     corners: FieldCorners?,
     onPickPhotoClick: () -> Unit = {},
+    onDraggingChanged: (Boolean) -> Unit = {},
     onCornersChanged: (FieldCorners) -> Unit,
 ) {
     val lang = LocalAppLanguage.current
@@ -58,7 +59,7 @@ internal fun CornerSelectionCard(
             }
         }
         imagePath?.let { p ->
-            CornerCanvas(p, corners, onCornersChanged)
+            CornerCanvas(p, corners, onDraggingChanged, onCornersChanged)
         } ?: run {
             Text(
                 Strings.noPhotoSelected(lang),
@@ -73,17 +74,29 @@ internal fun CornerSelectionCard(
 private fun CornerCanvas(
     path: String,
     corners: FieldCorners?,
+    onDraggingChanged: (Boolean) -> Unit,
     onCornersChanged: (FieldCorners) -> Unit,
 ) {
+    val fullBounds = remember(path) {
+        val file = File(path)
+        if (!file.exists()) {
+            IntSize(800, 600)
+        } else {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            IntSize(bounds.outWidth.coerceAtLeast(1), bounds.outHeight.coerceAtLeast(1))
+        }
+    }
+    val fullW = fullBounds.width.toFloat()
+    val fullH = fullBounds.height.toFloat()
+
     val bitmap = remember(path) {
         val file = File(path)
         if (!file.exists()) return@remember null
         try {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, bounds)
             val maxPreview = 1400
             var sample = 1
-            while ((bounds.outWidth / sample) > maxPreview || (bounds.outHeight / sample) > maxPreview) {
+            while ((fullBounds.width / sample) > maxPreview || (fullBounds.height / sample) > maxPreview) {
                 sample *= 2
             }
             val opts = BitmapFactory.Options().apply {
@@ -97,15 +110,11 @@ private fun CornerCanvas(
         }
     }
 
-    val imgW = (bitmap?.width ?: 800).toFloat()
-    val imgH = (bitmap?.height ?: 600).toFloat()
-
-    val currentCorners = remember(corners, imgW, imgH) {
-        corners ?: defaultCorners(imgW, imgH)
+    val currentCorners = remember(corners, fullW, fullH) {
+        corners ?: defaultCorners(fullW, fullH)
     }
 
     var liveCorners by remember(path) { mutableStateOf(currentCorners) }
-    // Sync external updates when not actively dragging
     var draggedIndex by remember { mutableStateOf<Int?>(null) }
     androidx.compose.runtime.LaunchedEffect(corners) {
         if (draggedIndex == null && corners != null) {
@@ -114,6 +123,7 @@ private fun CornerCanvas(
     }
 
     val latestCornersChanged by androidx.compose.runtime.rememberUpdatedState(onCornersChanged)
+    val latestDraggingChanged by androidx.compose.runtime.rememberUpdatedState(onDraggingChanged)
     val measurer = rememberTextMeasurer()
 
     Box(
@@ -125,10 +135,13 @@ private fun CornerCanvas(
         Canvas(
             modifier = Modifier
                 .matchParentSize()
-                .pointerInput(path, imgW, imgH) {
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            val aspect = imgW / imgH
+                .pointerInput(path, fullW, fullH) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val downEvent = awaitPointerEvent()
+                            val down = downEvent.changes.firstOrNull { it.pressed } ?: continue
+
+                            val aspect = fullW / fullH
                             var drawW = size.width.toFloat()
                             var drawH = size.height.toFloat()
                             if (drawW / drawH > aspect) drawW = drawH * aspect else drawH = drawW / aspect
@@ -136,53 +149,63 @@ private fun CornerCanvas(
                             val dy = (size.height - drawH) / 2
 
                             val pts = liveCorners.toList()
-                            val hitRadius = 120f // Generous touch target for finger/thumb
+                            val hitRadius = 180f // Generous touch target
 
                             var closestIdx = -1
                             var minDist = Float.MAX_VALUE
                             pts.forEachIndexed { idx, pt ->
-                                val screenX = (pt.x / imgW) * drawW + dx
-                                val screenY = (pt.y / imgH) * drawH + dy
-                                val dist = sqrt((offset.x - screenX) * (offset.x - screenX) + (offset.y - screenY) * (offset.y - screenY))
+                                val screenX = (pt.x / fullW) * drawW + dx
+                                val screenY = (pt.y / fullH) * drawH + dy
+                                val dist = kotlin.math.hypot(
+                                    (down.position.x - screenX).toDouble(),
+                                    (down.position.y - screenY).toDouble()
+                                ).toFloat()
                                 if (dist <= hitRadius && dist < minDist) {
                                     minDist = dist
                                     closestIdx = idx
                                 }
                             }
-                            draggedIndex = if (closestIdx != -1) closestIdx else null
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            val idx = draggedIndex ?: return@detectDragGestures
-                            val aspect = imgW / imgH
-                            var drawW = size.width.toFloat()
-                            var drawH = size.height.toFloat()
-                            if (drawW / drawH > aspect) drawW = drawH * aspect else drawH = drawW / aspect
 
-                            val dxImg = (dragAmount.x / drawW) * imgW
-                            val dyImg = (dragAmount.y / drawH) * imgH
+                            if (closestIdx != -1) {
+                                draggedIndex = closestIdx
+                                latestDraggingChanged(true)
+                                down.consume()
 
-                            val pts = liveCorners.toList().toMutableList()
-                            val old = pts[idx]
-                            val newX = (old.x + dxImg).coerceIn(0f, imgW)
-                            val newY = (old.y + dyImg).coerceIn(0f, imgH)
-                            pts[idx] = ImagePoint(newX, newY)
+                                val initialScreenX = (pts[closestIdx].x / fullW) * drawW + dx
+                                val initialScreenY = (pts[closestIdx].y / fullH) * drawH + dy
+                                val touchOffsetX = initialScreenX - down.position.x
+                                val touchOffsetY = initialScreenY - down.position.y
 
-                            val updated = FieldCorners(pts[0], pts[1], pts[2], pts[3])
-                            liveCorners = updated
-                            latestCornersChanged(updated)
-                        },
-                        onDragEnd = {
-                            draggedIndex = null
-                            latestCornersChanged(liveCorners)
-                        },
-                        onDragCancel = {
-                            draggedIndex = null
-                        },
-                    )
+                                try {
+                                    while (true) {
+                                        val moveEvent = awaitPointerEvent()
+                                        val change = moveEvent.changes.firstOrNull { it.id == down.id } ?: break
+                                        if (!change.pressed) {
+                                            change.consume()
+                                            break
+                                        }
+                                        change.consume()
+
+                                        val currentPinScreenX = change.position.x + touchOffsetX
+                                        val currentPinScreenY = change.position.y + touchOffsetY
+                                        val curImgX = ((currentPinScreenX - dx) / drawW * fullW).coerceIn(0f, fullW)
+                                        val curImgY = ((currentPinScreenY - dy) / drawH * fullH).coerceIn(0f, fullH)
+                                        val curList = liveCorners.toList().toMutableList()
+                                        curList[closestIdx] = ImagePoint(curImgX, curImgY)
+                                        val movedCorners = FieldCorners(curList[0], curList[1], curList[2], curList[3])
+                                        liveCorners = movedCorners
+                                        latestCornersChanged(movedCorners)
+                                    }
+                                } finally {
+                                    draggedIndex = null
+                                    latestDraggingChanged(false)
+                                }
+                            }
+                        }
+                    }
                 }
         ) {
-            val aspect = imgW / imgH
+            val aspect = fullW / fullH
             var drawW = size.width
             var drawH = size.height
             if (drawW / drawH > aspect) drawH = drawW / aspect else drawW = drawH * aspect
@@ -202,7 +225,7 @@ private fun CornerCanvas(
 
             val pts = liveCorners.toList()
             val offsets = pts.map { p ->
-                Offset((p.x / imgW) * drawW + dx, (p.y / imgH) * drawH + dy)
+                Offset((p.x / fullW) * drawW + dx, (p.y / fullH) * drawH + dy)
             }
 
             if (offsets.size == 4) {

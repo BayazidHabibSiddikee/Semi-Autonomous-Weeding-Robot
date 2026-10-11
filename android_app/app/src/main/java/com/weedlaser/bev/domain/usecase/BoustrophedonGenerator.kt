@@ -103,27 +103,33 @@ class BoustrophedonGenerator {
     }
 
     /**
-     * If detection returned fewer rows than expected, fill in evenly spaced rows.
+     * If detection returned fewer rows than expected, fill in evenly spaced rows
+     * with centered agricultural slots and alignment to detected crop rows.
      */
     private fun generateEvenSpacing(
         detected: List<Double>,
         totalRows: Int,
         widthM: Double,
     ): List<Double> {
+        if (totalRows <= 0) return emptyList()
+        val nominalStep = widthM / totalRows
         if (detected.isEmpty()) {
-            val step = widthM / totalRows
-            return (0 until totalRows).map { step * (it + 0.5) }
+            return (0 until totalRows).map { (it + 0.5) * nominalStep }
         }
-        // Use detected positions where available, fill gaps evenly
-        val result = mutableListOf(detected.first())
-        var last = detected.first()
-        val expectedStep = if (totalRows > 1) widthM / (totalRows - 1) else widthM
-        for (i in 1 until totalRows) {
-            val target = i * expectedStep
-            val nextDetected = detected.firstOrNull { it > last + expectedStep * 0.4 }
-            result.add(if (nextDetected != null) nextDetected else target)
-            last = result.last()
+
+        // Calculate phase shift that best aligns the nominal grid with detected rows
+        val offsets = detected.map { y ->
+            val slot = ((y / nominalStep) - 0.5).toInt().coerceIn(0, totalRows - 1)
+            y - (slot + 0.5) * nominalStep
         }
-        return result
+        val medianOffset = offsets.sorted()[offsets.size / 2]
+            .coerceIn(-nominalStep * 0.35, nominalStep * 0.35)
+
+        return (0 until totalRows).map { i ->
+            val nominal = (i + 0.5) * nominalStep + medianOffset
+            // Snap to detected row if one exists within 40% of slot width
+            val close = detected.firstOrNull { kotlin.math.abs(it - nominal) < nominalStep * 0.4 }
+            (close ?: nominal).coerceIn(0.05, widthM - 0.05)
+        }
     }
 }
