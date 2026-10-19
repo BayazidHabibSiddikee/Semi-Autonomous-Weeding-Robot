@@ -268,6 +268,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                     piIp = viewModel.piInfo?.host ?: piIp,
                     status = viewModel.missionStatus,
                     piResult = viewModel.piResult,
+                    piBaseUrl = viewModel.piInfo?.baseUrl,
                     isUploading = viewModel.isUploading,
                     onSendImage = {
                         val img = imagePath

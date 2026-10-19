@@ -21,8 +21,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -91,6 +96,7 @@ internal fun BeSuccessPanel(
     piIp: String,
     status: com.weedlaser.bev.domain.model.MissionStatus,
     piResult: com.weedlaser.bev.domain.model.PiImageResponse?,
+    piBaseUrl: String?,
     isUploading: Boolean,
     onSendImage: () -> Unit,
     onSend: () -> Unit,
@@ -168,6 +174,10 @@ internal fun BeSuccessPanel(
                 )
                 a?.warnings?.forEach { w ->
                     Text("⚠ $w", style = MaterialTheme.typography.bodySmall)
+                }
+                val base = piBaseUrl
+                if (base != null && piResult.overlayUrl.isNotEmpty()) {
+                    PiPlanPreview(baseUrl = base, url = piResult.overlayUrl)
                 }
             }
 
@@ -306,3 +316,35 @@ internal fun BeIdleHint() {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
+
+
+/**
+ * Shows the BEV / plan overlay the Pi produced from the uploaded photo.
+ */
+@Composable
+private fun PiPlanPreview(baseUrl: String, url: String) {
+    val bitmap by produceState<Bitmap?>(null, baseUrl, url) {
+        value = withContext(Dispatchers.IO) { loadRemoteBitmap("$baseUrl$url") }
+    }
+    if (bitmap != null) {
+        Spacer(Modifier.height(6.dp))
+        Text("Pi's top-down view of your field", style = MaterialTheme.typography.bodySmall)
+        Image(
+            bitmap = bitmap!!,
+            contentDescription = "Pi BEV plan",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp)
+                .clip(RoundedCornerShape(8.dp)),
+        )
+    }
+}
+
+private fun loadRemoteBitmap(url: String): Bitmap? = runCatching {
+    val connection = (java.net.URL(url).openConnection() as java.net.HttpURLConnection)
+    connection.connectTimeout = 10000
+    connection.readTimeout = 30000
+    val bytes = connection.inputStream.use { it.readBytes() }
+    connection.disconnect()
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}.getOrNull()
