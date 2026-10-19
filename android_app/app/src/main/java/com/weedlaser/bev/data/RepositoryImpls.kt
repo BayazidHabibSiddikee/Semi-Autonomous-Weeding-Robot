@@ -1,5 +1,6 @@
 package com.weedlaser.bev.data
 
+import com.weedlaser.bev.core.opencv.FieldAnalyzer
 import com.weedlaser.bev.core.opencv.OpenCVProcessor
 import com.weedlaser.bev.core.opencv.RowDetector
 import com.weedlaser.bev.domain.model.Field
@@ -44,6 +45,7 @@ class InMemoryFieldRepository : FieldRepository {
 class OpenCVImageProcessingRepository(
     private val opencv: OpenCVProcessor,
     private val rowDetector: RowDetector,
+    private val fieldAnalyzer: FieldAnalyzer,
     private val generator: BoustrophedonGenerator,
     private val outputDir: File,
 ) : ImageProcessingRepository {
@@ -91,7 +93,10 @@ class OpenCVImageProcessingRepository(
         expectedRows: Int?,
     ): Result<RowDetectionResult> =
         withContext(Dispatchers.Default) {
-            rowDetector.detect(bevImagePath, expectedRows)
+            // New agricultural analyzer (Otsu-ExG + segment rows + field corners).
+            // Falls back to the previous peak-based detector if it fails.
+            fieldAnalyzer.analyze(bevImagePath, expectedRows)
+                .recoverCatching { rowDetector.detect(bevImagePath, expectedRows).getOrThrow() }
         }
 
     override suspend fun generateMission(

@@ -1,5 +1,6 @@
 package com.weedlaser.bev.di
 
+import com.weedlaser.bev.core.opencv.FieldAnalyzer
 import com.weedlaser.bev.core.opencv.OpenCVProcessor
 import com.weedlaser.bev.core.opencv.RowDetector
 import com.weedlaser.bev.data.InMemoryFieldRepository
@@ -30,6 +31,7 @@ fun bevAppModule(bevOutputDir: File) = module {
     // Core
     single { OpenCVProcessor() }
     single { RowDetector() }
+    single { FieldAnalyzer() }
     single { BoustrophedonGenerator() }
 
     // Data
@@ -38,6 +40,8 @@ fun bevAppModule(bevOutputDir: File) = module {
         OpenCVImageProcessingRepository(
             opencv = get(),
             rowDetector = get(),
+            fieldAnalyzer = get(),
+            fieldAnalyzer = get(),
             generator = get(),
             outputDir = bevOutputDir,
         )

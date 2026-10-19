@@ -98,6 +98,13 @@ data class RowDetectionResult(
     val confidence: Float,         // 0.0 to 1.0
     val bevWidth: Int,
     val bevHeight: Int,
+    // Corners of the detected crop field inside the BEV image (empty if not found).
+    // Order: top-left, top-right, bottom-right, bottom-left.
+    val fieldCorners: List<FieldPoint> = emptyList(),
+    // Fraction of the BEV image covered by vegetation (0..1)
+    val vegetationRatio: Float = 0f,
+    // Threshold actually used on the Excess Green Index (Otsu or fallback)
+    val exgThreshold: Int = 0,
 )
 
 /**
