@@ -108,6 +108,36 @@ data class RowDetectionResult(
 )
 
 /**
+ * Response of the Pi's `/image` endpoint: the Pi ran the CV on the uploaded
+ * photo and returns the plan it computed.
+ */
+@Serializable
+data class PiImageResponse(
+    val accepted: Boolean = false,
+    val rows: Int = 0,
+    val waypoints: Int = 0,
+    val distanceM: Double = 0.0,
+    val analysis: PiAnalysis? = null,
+    val bevUrl: String = "",
+    val overlayUrl: String = "",
+    val error: String? = null,
+)
+
+/**
+ * What the Pi found in the uploaded photo.
+ */
+@Serializable
+data class PiAnalysis(
+    val rowsM: List<Double> = emptyList(),
+    val rowPixels: List<Int> = emptyList(),
+    val vegetationRatio: Double = 0.0,
+    val exgThreshold: Int = 0,
+    val bevWidth: Int = 0,
+    val bevHeight: Int = 0,
+    val warnings: List<String> = emptyList(),
+)
+
+/**
  * Live status of the running mission, polled from the Pi (`GET /status`).
  */
 @Serializable

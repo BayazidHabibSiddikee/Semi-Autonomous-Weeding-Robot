@@ -267,6 +267,15 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                     o = o,
                     piIp = viewModel.piInfo?.host ?: piIp,
                     status = viewModel.missionStatus,
+                    piResult = viewModel.piResult,
+                    isUploading = viewModel.isUploading,
+                    onSendImage = {
+                        val img = imagePath
+                        val c = corners
+                        if (img != null && c != null) {
+                            viewModel.sendImageToPi(img, c, field)
+                        }
+                    },
                     onSend = { viewModel.sendAndTrack(o.mission, viewModel.piInfo?.host ?: piIp) },
                     onCopyJson = {
                         val jsonStr = viewModel.missionToJson(o.mission)

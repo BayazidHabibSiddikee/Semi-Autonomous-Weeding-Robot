@@ -1,9 +1,15 @@
 package com.weedlaser.bev.data.remote
 
+import com.weedlaser.bev.domain.model.ImagePoint
 import com.weedlaser.bev.domain.model.MissionStatus
+import com.weedlaser.bev.domain.model.PiImageResponse
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -99,4 +105,72 @@ class PiNetworkClient(
             json.decodeFromString(MissionStatus.serializer(), body)
         }
     }
+
+    /**
+     * Upload the field photo + the 4 selected corners to the Pi.
+     *
+     * The Pi does the heavy work (BEV warp, vegetation segmentation, row
+     * detection, mission generation) and answers with the plan it computed.
+     *
+     * @param baseUrl Pi base URL, e.g. `http://192.168.43.57:8080`
+     * @param imageBytes the raw JPEG/PNG bytes
+     * @param corners the 4 corner points in *original photo* pixel coordinates
+     */
+    suspend fun uploadPhoto(
+        baseUrl: String,
+        imageBytes: ByteArray,
+        corners: List<ImagePoint>,
+        fieldWidthM: Double,
+        fieldLengthM: Double,
+        expectedRows: Int = 0,
+    ): Result<PiImageResponse> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(corners.size == 4) { "exactly 4 corner points are required" }
+
+            val payload = buildJsonObject {
+                put("image", Base64.encodeToString(imageBytes, Base64.NO_WRAP))
+                put("corners", buildJsonArray {
+                    corners.forEach { c ->
+                        add(buildJsonObject {
+                            put("x", c.x.toDouble())
+                            put("y", c.y.toDouble())
+                        })
+                    }
+                })
+                put("field", buildJsonObject {
+                    put("widthM", fieldWidthM)
+                    put("lengthM", fieldLengthM)
+                    put("totalRows", expectedRows)
+                })
+            }
+
+            val connection = (URL("$baseUrl/image").openConnection() as java.net.HttpURLConnection)
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 15000
+            connection.readTimeout = 120000
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use { it.write(payload.toString().toByteArray()) }
+
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            connection.disconnect()
+            json.decodeFromString(PiImageResponse.serializer(), body)
+        }
+    }
+
+    /**
+     * Download an image artifact (BEV / plan overlay) the Pi produced.
+     */
+    suspend fun fetchArtifact(baseUrl: String, url: String): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val full = if (url.startsWith("http")) url else "$baseUrl$url"
+                val connection = (URL(full).openConnection() as java.net.HttpURLConnection)
+                connection.connectTimeout = 10000
+                connection.readTimeout = 30000
+                val bytes = connection.inputStream.use { it.readBytes() }
+                connection.disconnect()
+                bytes
+            }
+        }
 }

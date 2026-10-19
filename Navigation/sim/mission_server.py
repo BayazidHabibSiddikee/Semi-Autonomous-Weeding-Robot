@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(REPO, "Navigation", "sim"))
 
 from mission_planner import MissionPlan  # noqa: E402
 from pi_discovery import DISCOVERY_PORT  # noqa: E402
+from field_pipeline import analyze_field_photo, decode_image  # noqa: E402
 
 
 class DiscoveryResponder:
@@ -156,6 +157,9 @@ class MissionServer:
         self.seed = seed
         self.log = log
 
+        self.outbox = os.path.join(REPO, "Navigation", "sim", "outbox")
+        os.makedirs(self.outbox, exist_ok=True)
+
         self.plan: Optional[MissionPlan] = None
         self.status: Dict[str, Any] = {
             "state": "IDLE",
@@ -215,6 +219,55 @@ class MissionServer:
     def get_plan(self) -> Dict[str, Any]:
         with self._lock:
             return self.plan.to_dict() if self.plan else {}
+
+    def submit_image(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Receive a field photo + 4 corners from the phone, run the CV on the Pi
+        and return the resulting mission.
+
+        Payload::
+
+            {
+              "image": "<base64 jpeg>",
+              "corners": [{"x":..,"y":..}, ... 4],
+              "field": {"widthM": 6.0, "lengthM": 8.0, "totalRows": 9}
+            }
+        """
+        image_b64 = payload.get("image")
+        if not image_b64:
+            raise ValueError("payload is missing the 'image' field")
+
+        corners_raw = payload.get("corners") or []
+        if len(corners_raw) != 4:
+            raise ValueError("exactly 4 corner points are required")
+        corners = [(float(c["x"]), float(c["y"])) for c in corners_raw]
+
+        fld = payload.get("field") or {}
+        width_m = float(fld.get("widthM", 6.0))
+        length_m = float(fld.get("lengthM", 8.0))
+        expected = fld.get("totalRows")
+        expected = int(expected) if expected else None
+
+        image = decode_image(image_b64)
+        stem = f"field_{int(time.time() * 1000)}"
+        analysis = analyze_field_photo(
+            image=image,
+            corners=corners,
+            width_m=width_m,
+            length_m=length_m,
+            expected_rows=expected,
+            out_dir=self.outbox,
+            stem=stem,
+        )
+
+        # the phone can now just ask the Pi to execute the plan
+        result = self.submit(analysis.mission)
+        result.update({
+            "analysis": analysis.to_dict(),
+            "bevUrl": f"/artifacts/{os.path.basename(analysis.bev_path)}",
+            "overlayUrl": f"/artifacts/{os.path.basename(analysis.overlay_path)}",
+        })
+        return result
 
     # -------------------------------------------------------------- internals
 
@@ -302,6 +355,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802
+        if self.path.startswith("/artifacts/"):
+            name = os.path.basename(self.path.split("/artifacts/")[-1])
+            path = os.path.join(self.server.mission_server.outbox, name)
+            if not os.path.isfile(path):
+                self._send(404, {"error": "not found"})
+                return
+            with open(path, "rb") as fh:
+                body = fh.read()
+            ctype = "image/jpeg" if path.endswith((".jpg", ".jpeg")) else "image/png"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/status"):
             self._send(200, self.server.mission_server.get_status())
         elif self.path.startswith("/plan"):
@@ -312,6 +380,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
+        if self.path.startswith("/image"):
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode())
+                result = self.server.mission_server.submit_image(payload)
+                self._send(200, result)
+            except Exception as exc:
+                self._send(400, {"accepted": False, "error": str(exc)})
+            return
         if self.path.startswith("/mission"):
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length)

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
@@ -88,6 +89,10 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
 internal fun BeSuccessPanel(
     o: BevOutcome.Success,
     piIp: String,
+    status: com.weedlaser.bev.domain.model.MissionStatus,
+    piResult: com.weedlaser.bev.domain.model.PiImageResponse?,
+    isUploading: Boolean,
+    onSendImage: () -> Unit,
     onSend: () -> Unit,
     onCopyJson: () -> Unit,
 ) {
@@ -136,6 +141,35 @@ internal fun BeSuccessPanel(
                 bevPath = o.bevPath,
                 outcome = o,
             )
+
+            Spacer(Modifier.height(8.dp))
+            // Primary action: hand the photo to the Pi, which does the CV
+            // and starts the mission.
+            Button(
+                onClick = onSendImage,
+                enabled = !isUploading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (isUploading) "Uploading to Pi…" else "Send image to Pi (Pi does the CV)")
+            }
+
+            if (piResult != null) {
+                Spacer(Modifier.height(6.dp))
+                val a = piResult.analysis
+                Text(
+                    if (piResult.accepted) {
+                        "Pi plan: ${piResult.rows} rows · ${piResult.waypoints} waypoints · " +
+                            "≈${"%.1f".format(piResult.distanceM)} m" +
+                            (a?.let { " · veg ${(it.vegetationRatio * 100).toInt()}%" } ?: "")
+                    } else {
+                        "Pi error: ${piResult.error ?: "unknown"}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                a?.warnings?.forEach { w ->
+                    Text("⚠ $w", style = MaterialTheme.typography.bodySmall)
+                }
+            }
 
             Spacer(Modifier.height(8.dp))
             Row(

@@ -10,6 +10,7 @@ import com.weedlaser.bev.domain.model.FieldCorners
 import com.weedlaser.bev.domain.model.HomographyCalibration
 import com.weedlaser.bev.domain.model.Mission
 import com.weedlaser.bev.domain.model.MissionStatus
+import com.weedlaser.bev.domain.model.PiImageResponse
 import com.weedlaser.bev.domain.model.RowDetectionResult
 import com.weedlaser.bev.data.remote.PiNetworkClient
 import com.weedlaser.bev.domain.usecase.DetectRowsUseCase
@@ -70,6 +71,14 @@ class BeViewModel(
         private set
 
     var isDiscovering by mutableStateOf(false)
+        private set
+
+    /** Plan the Pi computed from the uploaded photo. */
+    var piResult by mutableStateOf<PiImageResponse?>(null)
+        private set
+
+    /** True while the photo is being uploaded and analysed on the Pi. */
+    var isUploading by mutableStateOf(false)
         private set
 
     private var statusJob: Job? = null
@@ -150,6 +159,54 @@ class BeViewModel(
                     "No rover Pi found. Make sure the Pi is on the same network " +
                         "(phone hotspot) and the mission server is running."
                 )
+            }
+        }
+    }
+
+    /**
+     * Send the field photo + the 4 selected corners to the Pi.
+     *
+     * The Pi warps the image to BEV, detects the crop rows and builds the
+     * coverage mission, then starts executing it. The phone only shows the
+     * result and the live progress.
+     */
+    fun sendImageToPi(
+        imagePath: String,
+        corners: FieldCorners,
+        field: Field,
+        ip: String? = null,
+    ) {
+        if (isUploading) return
+        val target = ip ?: piInfo?.host
+        if (target == null) {
+            outcome = BevOutcome.Error("No Pi known yet - tap Find Pi first.")
+            return
+        }
+        viewModelScope.launch {
+            isUploading = true
+            outcome = BevOutcome.Idle
+            try {
+                val bytes = java.io.File(imagePath).readBytes()
+                val response = piClient.uploadPhoto(
+                    baseUrl = "http://$target:${piInfo?.port ?: 8080}",
+                    imageBytes = bytes,
+                    corners = corners.toList(),
+                    fieldWidthM = field.widthM,
+                    fieldLengthM = field.lengthM,
+                    expectedRows = field.totalRows,
+                ).getOrThrow()
+
+                piResult = response
+                if (response.accepted) {
+                    piInfo = PiNetworkClient.PiInfo(piInfo?.name ?: "rover-pi", target, piInfo?.port ?: 8080)
+                    startStatusPolling(piInfo!!.baseUrl)
+                } else {
+                    outcome = BevOutcome.Error(response.error ?: "The Pi rejected the image")
+                }
+            } catch (e: Exception) {
+                outcome = BevOutcome.Error("Upload failed: ${e.message}")
+            } finally {
+                isUploading = false
             }
         }
     }
