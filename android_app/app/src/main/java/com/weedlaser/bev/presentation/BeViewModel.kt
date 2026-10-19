@@ -9,12 +9,17 @@ import com.weedlaser.bev.domain.model.Field
 import com.weedlaser.bev.domain.model.FieldCorners
 import com.weedlaser.bev.domain.model.HomographyCalibration
 import com.weedlaser.bev.domain.model.Mission
+import com.weedlaser.bev.domain.model.MissionStatus
 import com.weedlaser.bev.domain.model.RowDetectionResult
+import com.weedlaser.bev.data.remote.PiNetworkClient
 import com.weedlaser.bev.domain.usecase.DetectRowsUseCase
 import com.weedlaser.bev.domain.usecase.GenerateBEVUseCase
 import com.weedlaser.bev.domain.usecase.GenerateMissionUseCase
 import com.weedlaser.bev.domain.usecase.SaveFieldUseCase
 import com.weedlaser.bev.domain.usecase.SendMissionUseCase
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
@@ -43,6 +48,7 @@ class BeViewModel(
     private val generateMission: GenerateMissionUseCase,
     private val saveField: SaveFieldUseCase,
     private val sendMission: SendMissionUseCase,
+    private val piClient: PiNetworkClient = PiNetworkClient(),
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) : ViewModel() {
 
@@ -54,6 +60,19 @@ class BeViewModel(
 
     var field by mutableStateOf(Field())
         private set
+
+    /** Pi found over UDP broadcast (hotspot or Wi-Fi). */
+    var piInfo by mutableStateOf<PiNetworkClient.PiInfo?>(null)
+        private set
+
+    /** Live mission status polled from the Pi. */
+    var missionStatus by mutableStateOf(MissionStatus())
+        private set
+
+    var isDiscovering by mutableStateOf(false)
+        private set
+
+    private var statusJob: Job? = null
 
     /**
      * Run the full pipeline: BEV → row detect → mission.
@@ -115,8 +134,64 @@ class BeViewModel(
         }
     }
 
+    /**
+     * Broadcast a discovery probe so the app finds the Pi automatically.
+     * Works when the phone runs the hotspot and the Pi joined it.
+     */
+    fun discoverPi() {
+        if (isDiscovering) return
+        viewModelScope.launch {
+            isDiscovering = true
+            val info = piClient.discover()
+            piInfo = info
+            isDiscovering = false
+            if (info == null) {
+                outcome = BevOutcome.Error(
+                    "No rover Pi found. Make sure the Pi is on the same network " +
+                        "(phone hotspot) and the mission server is running."
+                )
+            }
+        }
+    }
+
+    /**
+     * Send the mission and start polling the Pi for progress.
+     */
+    fun sendAndTrack(mission: Mission, ip: String, port: Int = 8080) {
+        viewModelScope.launch {
+            sendMission(mission, ip, port)
+                .onSuccess {
+                    piInfo = PiNetworkClient.PiInfo("rover-pi", ip, port)
+                    startStatusPolling(piInfo!!.baseUrl)
+                }
+                .onFailure { outcome = BevOutcome.Error("Send failed: ${it.message}") }
+        }
+    }
+
+    /** Poll `GET /status` once a second until the mission finishes. */
+    private fun startStatusPolling(baseUrl: String) {
+        statusJob?.cancel()
+        statusJob = viewModelScope.launch {
+            while (isActive) {
+                piClient.fetchStatus(baseUrl)
+                    .onSuccess { status ->
+                        missionStatus = status
+                        if (status.finished) {
+                            outcome = BevOutcome.Error(
+                                status.error ?: "Mission finished: ${status.weedsKilled} weeds killed"
+                            )
+                            return@launch
+                        }
+                    }
+                delay(1000)
+            }
+        }
+    }
+
     fun reset() {
         outcome = BevOutcome.Idle
         isProcessing = false
+        statusJob?.cancel()
+        missionStatus = MissionStatus()
     }
 }

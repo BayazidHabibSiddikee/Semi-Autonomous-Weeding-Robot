@@ -245,12 +245,29 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
             )
         }
 
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            OutlinedButton(
+                onClick = { viewModel.discoverPi() },
+                enabled = !viewModel.isDiscovering,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    if (viewModel.isDiscovering) "Searching…"
+                    else viewModel.piInfo?.let { "Pi: ${it.name} (${it.host})" } ?: "Find Pi"
+                )
+            }
+        }
+
         when (val o = viewModel.outcome) {
             is BevOutcome.Success ->
                 BeSuccessPanel(
                     o = o,
-                    piIp = piIp,
-                    onSend = { viewModel.sendToPi(o.mission, piIp) },
+                    piIp = viewModel.piInfo?.host ?: piIp,
+                    status = viewModel.missionStatus,
+                    onSend = { viewModel.sendAndTrack(o.mission, viewModel.piInfo?.host ?: piIp) },
                     onCopyJson = {
                         val jsonStr = viewModel.missionToJson(o.mission)
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

@@ -22,6 +22,7 @@ Usage
 import argparse
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -33,6 +34,116 @@ sys.path.insert(0, os.path.join(REPO, "Navigation", "src"))
 sys.path.insert(0, os.path.join(REPO, "Navigation", "sim"))
 
 from mission_planner import MissionPlan  # noqa: E402
+from pi_discovery import DISCOVERY_PORT  # noqa: E402
+
+
+class DiscoveryResponder:
+    """
+    Answers discovery probes from the phone (UDP broadcast, port 9999).
+
+    The phone asks "is there a rover Pi here?" and gets back its address, so
+    nobody has to type an IP address into the app.
+    """
+
+    def __init__(self, mission_port: int = 8080, log=print):
+        self.mission_port = mission_port
+        self.log = log
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+        self.log(f"[DISCOVERY] listening for phone probes on UDP {DISCOVERY_PORT}")
+
+    def stop(self):
+        self._running = False
+
+    def _serve(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", DISCOVERY_PORT))
+        except OSError as exc:
+            self.log(f"[DISCOVERY] cannot bind UDP {DISCOVERY_PORT}: {exc}")
+            return
+
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(2048)
+            except OSError:
+                break
+            if b"WEEDLASER_DISCOVER" not in data.upper():
+                continue
+            reply = self._info()
+            sock.sendto(json.dumps(reply).encode(), addr)
+            self.log(f"[DISCOVERY] answered {addr[0]} with {reply['host']}")
+
+    def _info(self) -> Dict[str, Any]:
+        return {
+            "service": "weedlaser",
+            "name": socket.gethostname(),
+            "host": local_ip(),
+            "port": self.mission_port,
+            "protocol": "http",
+        }
+
+
+def local_ip() -> str:
+    """
+    Best guess of this machine's LAN address (the one the phone can reach).
+
+    Prefers the interface that carries the default route (wlan/eth), and skips
+    VPN/tunnel interfaces, so a hotspot-connected Pi reports its hotspot IP.
+    """
+    import fcntl
+    import struct
+
+    # 1. find the interface used for the default route
+    default_iface = None
+    try:
+        with open("/proc/net/route") as fh:
+            for line in fh.readlines()[1:]:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                iface, dest = parts[0], parts[1]
+                if dest == "00000000" and not iface.startswith(("tun", "tap", "wg")):
+                    default_iface = iface
+                    break
+    except OSError:
+        pass
+
+    candidates = []
+    if default_iface:
+        candidates.append(default_iface)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for name in socket.if_nameindex():
+            candidates.append(name[1])
+    except OSError:
+        pass
+
+    for iface in candidates:
+        if iface.startswith(("lo", "tun", "tap", "wg", "docker", "veth")):
+            continue
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            packed = struct.pack("256s", iface.encode()[:15])
+            addr = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x8915, packed)[20:24])
+            sock.close()
+            if not addr.startswith("127."):
+                return addr
+        except OSError:
+            continue
+
+    # 2. fallback: whatever the OS thinks this host is
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
 
 
 class MissionServer:
@@ -225,10 +336,23 @@ def main():
     args = ap.parse_args()
 
     server = MissionServer(simulate=not args.hardware, seed=args.seed)
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        if exc.errno == 98:
+            print(f"[SERVER] port {args.port} is already in use - another mission "
+                  f"server is running. Stop it with:\n"
+                  f"    pkill -f mission_server.py\n"
+                  f"or start this one on another port: --port {args.port + 1}")
+            return
+        raise
     httpd.mission_server = server  # type: ignore[attr-defined]
+    discovery = DiscoveryResponder(mission_port=args.port)
+    discovery.start()
+
     print(f"[SERVER] listening on http://{args.host}:{args.port}  "
           f"({'simulated' if not args.hardware else 'hardware'} mode)")
+    print(f"[SERVER] reachable from the phone at http://{local_ip()}:{args.port}")
     print("[SERVER] POST a mission to /mission, poll /status")
     try:
         httpd.serve_forever()

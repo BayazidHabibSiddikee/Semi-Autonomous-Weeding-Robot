@@ -1,0 +1,87 @@
+# Phone ↔ Pi Connection (hotspot mode)
+
+The phone is the front end, the Pi is the brain. They talk over one small
+network. Two ways to get there:
+
+- **Phone hotspot** (recommended for the field - no router needed)
+- **Any Wi-Fi** where both are on the same subnet
+
+## 1. Phone creates the hotspot
+
+On the phone:
+
+- Settings → **Personal Hotspot / Tethering** → ON
+- Note the **network name (SSID)** and **password**
+- Android hotspots normally use `192.168.43.1` for the phone, so the Pi gets
+  `192.168.43.x`
+
+## 2. Pi joins the hotspot
+
+```bash
+# see the hotspot in range
+nmcli device wifi list
+
+# connect (use the phone's hotspot SSID + password)
+nmcli device wifi connect "PHONE-HOTSPOT-NAME" password "your-password"
+
+# check the Pi's hotspot IP
+ip -4 addr show wlo1 | grep inet
+# -> inet 192.168.43.57/24 brd 192.168.43.255 ...
+```
+
+Leave the phone hotspot on the whole time - it is the router.
+
+## 3. Start the mission server on the Pi
+
+```bash
+mission-server
+```
+
+It prints the address the phone should use:
+
+```
+[DISCOVERY] listening for phone probes on UDP 9999
+[SERVER] listening on http://0.0.0.0:8080  (simulated mode)
+[SERVER] reachable from the phone at http://192.168.43.57:8080
+```
+
+## 4. App finds the Pi automatically
+
+Tap **Find Pi** in the app. The app broadcasts a UDP probe
+(`WEEDLASER_DISCOVER` on port 9999); the Pi answers with its address, so no
+IP typing is needed. The app then shows:
+
+```
+Pi: Bayazid-HS (192.168.43.57)
+```
+
+Then: generate the mission → **Send to Pi** → the app polls `GET /status`
+every second and shows `rows 5/13 · weeds killed 7 · remaining 2`.
+
+## Same thing from the laptop (no phone)
+
+```bash
+end-to-end-sim          # probes for the Pi automatically, then runs the mission
+python3 Navigation/src/pi_discovery.py 3   # just find the Pi
+```
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| App says "No rover Pi found" | Pi not on the same network, or server not running (`mission-server`) |
+| Discovery works, HTTP fails | Firewall: `sudo ufw allow 8080/tcp` and `sudo ufw allow 9999/udp` |
+| Phone hotspot assigns `192.168.0.x` | fine, the Pi just reports whatever it got - the app uses the discovered address |
+| Discovery works from the laptop but not the phone | Some hotspots enable **AP/client isolation** - both devices must be able to talk to each other |
+| `Address already in use` on the server | Another server holds port 8080: `pkill -f mission_server.py` |
+
+## Protocol summary
+
+| Direction | Transport | Payload |
+|---|---|---|
+| app → Pi | UDP broadcast `:9999` | `WEEDLASER_DISCOVER` |
+| Pi → app | UDP unicast `:9999` | `{"service":"weedlaser","name":"pi","host":"192.168.43.57","port":8080}` |
+| app → Pi | HTTP POST `:8080/mission` | the mission JSON (rows + path) |
+| app → Pi | HTTP GET `:8080/status` | live status (rows done, weeds killed, state) |
+| app → Pi | HTTP GET `:8080/plan` | the parsed plan (debugging) |
+| app → Pi | HTTP GET `:8080/health` | liveness |

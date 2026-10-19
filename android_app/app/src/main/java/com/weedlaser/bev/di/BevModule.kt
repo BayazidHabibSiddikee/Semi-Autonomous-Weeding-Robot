@@ -5,6 +5,7 @@ import com.weedlaser.bev.core.opencv.OpenCVProcessor
 import com.weedlaser.bev.core.opencv.RowDetector
 import com.weedlaser.bev.data.InMemoryFieldRepository
 import com.weedlaser.bev.data.OpenCVImageProcessingRepository
+import com.weedlaser.bev.data.remote.PiNetworkClient
 import com.weedlaser.bev.data.remote.TcpMissionCommunicationRepository
 import com.weedlaser.bev.domain.repository.FieldRepository
 import com.weedlaser.bev.domain.repository.ImageProcessingRepository
@@ -47,6 +48,7 @@ fun bevAppModule(bevOutputDir: File) = module {
         )
     }
     single<MissionCommunicationRepository> { TcpMissionCommunicationRepository() }
+    single { PiNetworkClient() }
     single<com.weedlaser.bev.domain.repository.CameraRepository> { com.weedlaser.bev.data.LocalCameraRepository() }
 
     // UseCases
@@ -61,5 +63,5 @@ fun bevAppModule(bevOutputDir: File) = module {
     factory { DiscoverPiDevicesUseCase(get()) }
 
     // ViewModel
-    viewModel { BeViewModel(get(), get(), get(), get(), get()) }
+    viewModel { BeViewModel(get(), get(), get(), get(), get(), get()) }
 }

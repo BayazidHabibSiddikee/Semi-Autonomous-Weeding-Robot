@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -112,6 +113,22 @@ internal fun BeSuccessPanel(
                         "Confidence: ${(o.rows.confidence * 100).toInt()}%"
             }
             Text(summaryText, style = MaterialTheme.typography.bodySmall)
+
+            if (status.state != "IDLE") {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Mission: ${status.state} · rows ${status.rowsDone}/${status.rowsTotal} · " +
+                        "weeds killed ${status.weedsKilled} · remaining ${status.weedsRemaining} · " +
+                        "${"%.1f".format(status.distanceM)} m",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                LinearProgressIndicator(
+                    progress = { status.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                )
+            }
             Spacer(Modifier.height(8.dp))
 
             // BEV and Path Overlay Preview

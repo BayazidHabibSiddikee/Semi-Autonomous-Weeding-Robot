@@ -32,6 +32,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(REPO, "Navigation", "src"))
 
 from mission_planner import build_mission_json  # noqa: E402
+from pi_discovery import discover_pi, pi_base_url  # noqa: E402
 from field_analyzer_reference import (  # noqa: E402
     vegetation_mask, column_projection, segments_above, merge_segments, detect_corners,
 )
@@ -67,7 +68,8 @@ def get_json(url: str) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default=os.path.join(REPO, "Navigation", "images", "field_topview.jpeg"))
-    ap.add_argument("--server", default="http://127.0.0.1:8080")
+    ap.add_argument("--server", default=None,
+                    help="Pi base URL (default: discover it over UDP broadcast)")
     ap.add_argument("--field-width", type=float, default=6.0, help="field width in meters")
     ap.add_argument("--field-length", type=float, default=8.0, help="field length in meters")
     ap.add_argument("--rows", type=int, default=None, help="expected number of crop rows")
@@ -76,6 +78,17 @@ def main():
 
     if not os.path.exists(args.image):
         raise SystemExit(f"field image not found: {args.image}")
+
+    # 0. find the Pi (broadcast probe) - the phone does the same thing
+    server = args.server
+    if not server:
+        print("[APP] probing for the Pi over UDP broadcast ...")
+        info = discover_pi(timeout=3.0)
+        if info:
+            print(f"[APP] Pi found: {info['name']} at {info['host']}:{info['port']}")
+        else:
+            print("[APP] no Pi answered - falling back to http://127.0.0.1:8080")
+        server = pi_base_url(info)
 
     print("[APP] analysing field photo (Otsu-ExG, as on the phone)...")
     bgr, rows_px, corners, cut = detect_rows(args.image, args.rows)
@@ -94,15 +107,15 @@ def main():
     print(f"[APP] mission: {len(mission['path'])} segments, "
           f"{mission['field']['totalRows']} rows")
 
-    print(f"[APP] POSTing mission to {args.server}/mission ...")
-    result = post_json(f"{args.server}/mission", mission)
+    print(f"[APP] POSTing mission to {server}/mission ...")
+    result = post_json(f"{server}/mission", mission)
     print(f"[APP] server accepted: {result}")
 
     print("[APP] polling status ...")
     start = time.time()
     last_state = None
     while time.time() - start < args.timeout:
-        status = get_json(f"{args.server}/status")
+        status = get_json(f"{server}/status")
         if status.get("state") != last_state:
             last_state = status.get("state")
             print(f"[APP] state={status.get('state')} "

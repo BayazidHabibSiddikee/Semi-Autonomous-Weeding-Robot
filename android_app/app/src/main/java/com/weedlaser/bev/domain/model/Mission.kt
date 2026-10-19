@@ -108,6 +108,26 @@ data class RowDetectionResult(
 )
 
 /**
+ * Live status of the running mission, polled from the Pi (`GET /status`).
+ */
+@Serializable
+data class MissionStatus(
+    val state: String = "IDLE",
+    val rowsDone: Int = 0,
+    val rowsTotal: Int = 0,
+    val weedsFound: Int = 0,
+    val weedsKilled: Int = 0,
+    val weedsRemaining: Int = 0,
+    val distanceM: Double = 0.0,
+    val message: String = "",
+    val finished: Boolean = false,
+    val error: String? = null,
+) {
+    val progress: Float
+        get() = if (rowsTotal > 0) rowsDone.toFloat() / rowsTotal else 0f
+}
+
+/**
  * Homography calibration data
  */
 @Serializable
