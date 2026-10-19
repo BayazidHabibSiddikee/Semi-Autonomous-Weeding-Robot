@@ -45,7 +45,7 @@ It prints the address the phone should use:
 [SERVER] reachable from the phone at http://192.168.43.57:8080
 ```
 
-## 4. App finds the Pi automatically
+## 4. The app finds the Pi automatically
 
 Tap **Find Pi** in the app. The app broadcasts a UDP probe
 (`WEEDLASER_DISCOVER` on port 9999); the Pi answers with its address, so no
@@ -55,8 +55,15 @@ IP typing is needed. The app then shows:
 Pi: Bayazid-HS (192.168.43.57)
 ```
 
-Then: generate the mission → **Send to Pi** → the app polls `GET /status`
-every second and shows `rows 5/13 · weeds killed 7 · remaining 2`.
+Then: tap **Send image to Pi** (the primary button) - the phone uploads the
+photo + the 4 corner points, the Pi does the CV (BEV warp, vegetation
+segmentation, row detection), builds the coverage mission and starts the
+rover. The app then polls `GET /status` every second and shows
+`rows 5/9 · weeds killed 7 · remaining 2`.
+
+There is a second button that sends the mission JSON the phone computed
+itself - useful when the Pi cannot see the photo, but the image flow is the
+one to use in the field.
 
 ## Same thing from the laptop (no phone)
 
@@ -81,6 +88,8 @@ python3 Navigation/src/pi_discovery.py 3   # just find the Pi
 |---|---|---|
 | app → Pi | UDP broadcast `:9999` | `WEEDLASER_DISCOVER` |
 | Pi → app | UDP unicast `:9999` | `{"service":"weedlaser","name":"pi","host":"192.168.43.57","port":8080}` |
+| app → Pi | HTTP POST `:8080/image` | `{image: base64 jpeg, corners: 4 points, field: {...}}` - the Pi answers with the plan it computed |
+| app → Pi | HTTP GET `:8080/artifacts/<file>` | the BEV / plan-overlay images the Pi produced |
 | app → Pi | HTTP POST `:8080/mission` | the mission JSON (rows + path) |
 | app → Pi | HTTP GET `:8080/status` | live status (rows done, weeds killed, state) |
 | app → Pi | HTTP GET `:8080/plan` | the parsed plan (debugging) |
