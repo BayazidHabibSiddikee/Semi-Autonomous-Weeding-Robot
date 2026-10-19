@@ -16,7 +16,7 @@ import numpy as np
 class FieldSimulator:
     """Small procedural field with crop rows and weeds, plus a rover."""
 
-    def __init__(self, config=None, seed=42):
+    def __init__(self, config=None, seed=42, rows_y_cm=None, weeds_per_row=3):
         cfg = (config or {}).get("rover", {})
         nav = cfg.get("navigation", {})
 
@@ -26,6 +26,13 @@ class FieldSimulator:
         self.row_spacing_cm = nav.get("row_width_cm", 60)
         self.cam_view_w_cm = 40.0  # camera footprint (X)
         self.cam_view_h_cm = 30.0  # camera footprint (Y)
+
+        # Optional: build the field around a mission plan. The crop rows are
+        # then placed exactly where the rover will drive and the weeds are
+        # scattered along those rows - exactly like the real field the phone
+        # photographed. None -> generic procedural field.
+        self.rows_y_cm = list(rows_y_cm) if rows_y_cm else None
+        self.weeds_per_row = weeds_per_row
 
         self.rng = random.Random(seed)
         self.frame_w = 640
@@ -50,6 +57,11 @@ class FieldSimulator:
         """Create crop rows along X and scatter weeds between them."""
         self.crops.clear()
         self.weeds.clear()
+
+        if self.rows_y_cm:
+            self._generate_field_from_plan()
+            return
+
         n_rows = int(self.field_h_cm // self.row_spacing_cm) + 1
         for r in range(n_rows):
             y = (r + 0.5) * self.row_spacing_cm
@@ -71,6 +83,32 @@ class FieldSimulator:
                     continue
                 self.weeds.append((wx, wy, self.rng.uniform(3.0, 5.5)))
                 break
+
+    def _generate_field_from_plan(self):
+        """
+        Build the field from a mission plan: crop rows exactly where the plan
+        says the rover will drive, weeds scattered along each row.
+        """
+        for y in self.rows_y_cm:
+            if not (3.0 <= y <= self.field_h_cm - 3.0):
+                continue
+            x = 15.0
+            while x < self.field_w_cm - 10:
+                self.crops.append((x, y, self.rng.uniform(5.0, 7.5)))
+                x += self.rng.uniform(28.0, 38.0)
+
+            for _ in range(self.weeds_per_row):
+                for _attempt in range(40):
+                    wx = self.rng.uniform(12.0, self.field_w_cm - 12.0)
+                    wy = y + self.rng.uniform(-14.0, 14.0)
+                    if not (3.0 <= wy <= self.field_h_cm - 3.0):
+                        continue
+                    if self._near_any(self.crops, wx, wy, min_dist=4.0):
+                        continue
+                    if (wx - self.rover_x) ** 2 + (wy - self.rover_y) ** 2 < 25 ** 2:
+                        continue
+                    self.weeds.append((wx, wy, self.rng.uniform(3.0, 5.5)))
+                    break
 
     @staticmethod
     def _near_any(items, x, y, min_dist):
