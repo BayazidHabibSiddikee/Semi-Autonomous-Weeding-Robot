@@ -36,6 +36,12 @@ FIELD_LENGTH_M = 8.0    # along the rows
 N_ROWS = 9
 ROW_SPACING_M = FIELD_WIDTH_M / N_ROWS
 PLANT_SPACING_M = 0.35
+# The rover (0.33 m long, 0.20 m wide) is much narrower than the crop rows
+# are tall, so it drives in the LANES between the rows - that is also where
+# the weeds grow. Lanes sit half a row spacing away from the plant centres.
+LANE_OFFSET_M = ROW_SPACING_M / 2.0
+WEED_RADIUS_M = 0.022   # small grass-like tufts
+WEEDS_PER_LANE = 14
 FRAME_COUNT = 90
 OUT_DIR = "/tmp/freecad_sim_frames"
 
@@ -109,24 +115,32 @@ def build_field(doc):
     return soil, plants
 
 
-def build_weeds(doc, per_row=3):
-    """Weeds to be eliminated: small red/orange blobs next to the crop rows."""
+def build_weeds(doc, per_lane=WEEDS_PER_LANE):
+    """
+    Weeds to be eliminated: small grass-like tufts growing in the lanes
+    between the crop rows (exactly where the rover drives).
+    """
     import FreeCAD as App
+    import random
 
+    rng = random.Random(7)
     weeds = []
-    for r in range(N_ROWS):
-        y = -FIELD_WIDTH_M / 2 + (r + 0.5) * ROW_SPACING_M
-        for w in range(per_row):
-            x = -FIELD_LENGTH_M / 2 + 1.0 + w * 2.0 + 0.35 * ((r + w) % 3)
-            if x > FIELD_LENGTH_M / 2 - 0.5:
+    lanes = lane_positions()
+    for li, y in enumerate(lanes):
+        for w in range(per_lane):
+            x = -FIELD_LENGTH_M / 2 + 0.25 + (FIELD_LENGTH_M - 0.5) * (
+                (w + rng.uniform(0.15, 0.85)) / per_lane
+            )
+            wy = y + rng.uniform(-0.16, 0.16)
+            if not (-FIELD_WIDTH_M / 2 + 0.05 < wy < FIELD_WIDTH_M / 2 - 0.05):
                 continue
-            weed = doc.addObject("Part::Sphere", f"Weed_{r}_{w}")
-            weed.Radius = 0.07
+            weed = doc.addObject("Part::Sphere", f"Weed_{li}_{w}")
+            weed.Radius = WEED_RADIUS_M
             weed.Placement = App.Placement(
-                App.Vector(x, y + (0.18 if w % 2 == 0 else -0.18), 0.07),
+                App.Vector(x, wy, WEED_RADIUS_M),
                 App.Rotation(),
             )
-            weed.ViewObject.ShapeColor = (0.95, 0.25, 0.05)
+            weed.ViewObject.ShapeColor = (0.95, 0.35, 0.05)
             weeds.append(weed)
     doc.recompute()
     return weeds
@@ -227,14 +241,23 @@ def build_rover_primitives(doc):
     return root, wheels, {}
 
 
+def lane_positions():
+    """Y positions of the driving lanes (between the crop rows)."""
+    return [
+        -FIELD_WIDTH_M / 2 + (r + 1) * ROW_SPACING_M
+        for r in range(N_ROWS)
+        if -FIELD_WIDTH_M / 2 + (r + 1) * ROW_SPACING_M < FIELD_WIDTH_M / 2 - 0.25
+    ]
+
+
 def build_path(doc):
     """The boustrophedon coverage path as a polyline."""
     import FreeCAD as App
     import Part
 
     points = []
-    for r in range(N_ROWS):
-        y = -FIELD_WIDTH_M / 2 + (r + 0.5) * ROW_SPACING_M
+    lanes = lane_positions()
+    for r, y in enumerate(lanes):
         if r % 2 == 0:
             points += [
                 App.Vector(-FIELD_LENGTH_M / 2 + 0.2, y, 0.30),
@@ -298,7 +321,7 @@ def path_poses(points, total_length_m=None):
     return poses
 
 
-def animate(scene, frames=FRAME_COUNT, out_dir=OUT_DIR, laser_range=0.45):
+def animate(scene, frames=FRAME_COUNT, out_dir=OUT_DIR, laser_range=0.30):
     """
     Move the rover along the coverage path, firing the laser at every weed it
     passes, saving one screenshot per frame.
