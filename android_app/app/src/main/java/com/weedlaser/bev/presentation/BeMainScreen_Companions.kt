@@ -32,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlin.math.roundToInt
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -93,11 +94,16 @@ private fun SliderRow(
     onChange: (Double) -> Unit,
 ) {
     Column {
+        val shown = if (value == value.roundToInt().toDouble()) {
+            value.roundToInt().toString()
+        } else {
+            "%.2f".format(value)
+        }
         Row {
             Text(label, style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f))
             Text(
-                "${"%.2f".format(value)}$unit",
+                "$shown$unit",
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
             )
