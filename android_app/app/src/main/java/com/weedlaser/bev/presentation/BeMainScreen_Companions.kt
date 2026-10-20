@@ -50,79 +50,64 @@ import java.io.File
 
 @Composable
 internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
-    val lang = LocalAppLanguage.current
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = field.widthM.toString(),
-                onValueChange = { s ->
-                    onFieldChanged(field.copy(widthM = s.toDoubleOrNull() ?: field.widthM))
-                },
-                label = { Text(Strings.widthLabel(lang)) },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
-            OutlinedTextField(
-                value = field.lengthM.toString(),
-                onValueChange = { s ->
-                    onFieldChanged(field.copy(lengthM = s.toDoubleOrNull() ?: field.lengthM))
-                },
-                label = { Text(Strings.lengthLabel(lang)) },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("FIELD DIMENSIONS", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary)
+        SliderRow("Field width", "m", 2.0..20.0, 39, field.widthM) { v ->
+            onFieldChanged(field.copy(widthM = v)) }
+        SliderRow("Field length", "m", 2.0..30.0, 55, field.lengthM) { v ->
+            onFieldChanged(field.copy(lengthM = v)) }
+        SliderRow("Crop rows", "", 2.0..20.0, 17, field.totalRows.toDouble()) { v ->
+            onFieldChanged(field.copy(totalRows = v.toInt())) }
+        SliderRow("Row spacing", "m", 0.3..1.5, 23, field.rowSpacingM) { v ->
+            onFieldChanged(field.copy(rowSpacingM = v)) }
+
+        Spacer(Modifier.height(4.dp))
+        Text("ROBOT & WEEDING", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary)
+        SliderRow("Robot speed", "m/s", 0.2..2.0, 35, field.speedMps) { v ->
+            onFieldChanged(field.copy(speedMps = v)) }
+        SliderRow("Laser range", "m", 0.1..0.8, 13, field.laserRangeM) { v ->
+            onFieldChanged(field.copy(laserRangeM = v)) }
+        SliderRow("Weed threshold", "%", 0.0..100.0, 20, field.weedThreshold) { v ->
+            onFieldChanged(field.copy(weedThreshold = v)) }
+
+        Spacer(Modifier.height(4.dp))
+        Text("ADVANCED", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SliderRow("Headland margin", "m", 0.1..1.0, 17, field.headlandMarginM) { v ->
+            onFieldChanged(field.copy(headlandMarginM = v)) }
+        SliderRow("Max weeds modelled", "", 10.0..120.0, 21, field.maxWeeds) { v ->
+            onFieldChanged(field.copy(maxWeeds = v)) }
+    }
+}
+
+/** Label + material slider + live value display. */
+@Composable
+private fun SliderRow(
+    label: String,
+    unit: String,
+    range: ClosedFloatingPointRange<Double>,
+    steps: Int,
+    value: Double,
+    onChange: (Double) -> Unit,
+) {
+    Column {
+        Row {
+            Text(label, style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f))
+            Text(
+                "${"%.2f".format(value)}$unit",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = field.totalRows.toString(),
-                onValueChange = { s ->
-                    onFieldChanged(field.copy(totalRows = s.toIntOrNull() ?: field.totalRows))
-                },
-                label = { Text(Strings.totalRowsLabel(lang)) },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
-            OutlinedTextField(
-                value = field.rowSpacingM.toString(),
-                onValueChange = { s ->
-                    onFieldChanged(
-                        field.copy(rowSpacingM = s.toDoubleOrNull() ?: field.rowSpacingM)
-                    )
-                },
-                label = { Text(Strings.rowSpacingLabel(lang)) },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = field.speedMps.toString(),
-                    onValueChange = { s ->
-                        onFieldChanged(field.copy(speedMps = s.toDoubleOrNull() ?: field.speedMps))
-                    },
-                    label = { Text("Speed (m/s)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = field.laserRangeM.toString(),
-                    onValueChange = { s ->
-                        onFieldChanged(field.copy(laserRangeM = s.toDoubleOrNull() ?: field.laserRangeM))
-                    },
-                    label = { Text("Laser (m)") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = field.weedThreshold.toString(),
-                    onValueChange = { s ->
-                        onFieldChanged(field.copy(weedThreshold = s.toDoubleOrNull() ?: field.weedThreshold))
-                    },
-                    label = { Text("Weed %") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
+        androidx.compose.material3.Slider(
+            value = value.toFloat().coerceIn(range.start.toFloat(), range.endInclusive.toFloat()),
+            onValueChange = { onChange(it.toDouble()) },
+            valueRange = range.start.toFloat()..range.endInclusive.toFloat(),
+            steps = steps,
+        )
     }
 }
 

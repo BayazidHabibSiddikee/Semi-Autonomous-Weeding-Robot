@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,6 +38,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -180,6 +183,7 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
     }
     var piIp by rememberSaveable { mutableStateOf("192.168.4.1") }
     var isDraggingCorner by remember { mutableStateOf(false) }
+    var step by rememberSaveable { mutableStateOf(0) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -197,98 +201,209 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
         }
     }
 
+    val photoReady = imagePath != null
+    val cornersReady = corners?.isValid() == true
+    val resultsVisible = viewModel.outcome !is BevOutcome.Idle
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState(), enabled = !isDraggingCorner)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-            Column(Modifier.padding(12.dp)) {
-                Text(Strings.step1Title(lang), style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                CornerSelectionCard(
-                    imagePath = imagePath,
-                    corners = corners,
-                    onPickPhotoClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    onCornersChanged = { corners = it },
-                    onDraggingChanged = { isDraggingCorner = it },
-                )
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-            Column(Modifier.padding(12.dp)) {
-                Text(Strings.step2Title(lang), style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                FieldConfigInputs(field) { field = it }
-            }
-        }
-
-        Button(
-            onClick = {
-                val img = imagePath ?: return@Button
-                val c = corners ?: return@Button
-                if (!c.isValid()) return@Button
-                viewModel.processAndGenerate(img, c, field)
-            },
-            enabled = imagePath != null && corners != null && !viewModel.isProcessing,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                Strings.generateMission(lang, viewModel.isProcessing),
-                style = MaterialTheme.typography.labelLarge,
+        // ---- status checklist: always visible so you always know where you are
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusChip("1 Photo", photoReady, Modifier.weight(1f))
+            StatusChip("2 Corners", cornersReady, Modifier.weight(1f))
+            StatusChip(
+                "Pi " + (viewModel.piInfo?.host?.let { "✓" } ?: "?"),
+                viewModel.piInfo != null,
+                Modifier.weight(1f),
             )
         }
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth(),
+        // ---- step tabs
+        TabRow(
+            selectedTabIndex = step,
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
         ) {
-            OutlinedButton(
-                onClick = { viewModel.discoverPi() },
-                enabled = !viewModel.isDiscovering,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text(
-                    if (viewModel.isDiscovering) "Searching…"
-                    else viewModel.piInfo?.let { "Pi: ${it.name} (${it.host})" } ?: "Find Pi"
+            listOf("① Photo", "② Settings", "③ Mission").forEachIndexed { i, title ->
+                Tab(
+                    selected = step == i,
+                    onClick = { step = i },
+                    text = { Text(title, style = MaterialTheme.typography.labelLarge) },
                 )
             }
         }
 
-        when (val o = viewModel.outcome) {
-            is BevOutcome.Success ->
-                BeSuccessPanel(
-                    o = o,
-                    piIp = viewModel.piInfo?.host ?: piIp,
-                    status = viewModel.missionStatus,
-                    piResult = viewModel.piResult,
-                    piBaseUrl = viewModel.piInfo?.baseUrl,
-                    isUploading = viewModel.isUploading,
-                    simStatus = viewModel.simStatus,
-                    onSendImage = {
-                        val img = imagePath
-                        val c = corners
-                        if (img != null && c != null) {
-                            viewModel.sendImageToPi(img, c, field)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false),
+        ) {
+            when (step) {
+                0 -> Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(
+                            rememberScrollState(), enabled = !isDraggingCorner,
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(Strings.step1Title(lang), style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(8.dp))
+                            CornerSelectionCard(
+                                imagePath = imagePath,
+                                corners = corners,
+                                onPickPhotoClick = {
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                onCornersChanged = { corners = it },
+                                onDraggingChanged = { isDraggingCorner = it },
+                            )
                         }
-                    },
-                    onSend = { viewModel.sendAndTrack(o.mission, viewModel.piInfo?.host ?: piIp) },
-                    onCopyJson = {
-                        val jsonStr = viewModel.missionToJson(o.mission)
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
-                        Toast.makeText(context, Strings.jsonCopied(lang), Toast.LENGTH_SHORT).show()
                     }
-                )
-            is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)
-            BevOutcome.Idle -> BeIdleHint()
+                    WizardNav(
+                        nextEnabled = cornersReady,
+                        onNext = { step = 1 },
+                    )
+                }
+
+                1 -> Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(Strings.step2Title(lang), style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(8.dp))
+                            FieldConfigInputs(field) { field = it }
+                        }
+                    }
+                    WizardNav(
+                        backEnabled = true,
+                        nextEnabled = true,
+                        onBack = { step = 0 },
+                        onNext = { step = 2 },
+                    )
+                }
+
+                else -> Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            val img = imagePath ?: return@Button
+                            val c = corners ?: return@Button
+                            if (!c.isValid()) return@Button
+                            viewModel.processAndGenerate(img, c, field)
+                        },
+                        enabled = imagePath != null && corners != null && !viewModel.isProcessing,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            Strings.generateMission(lang, viewModel.isProcessing),
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = { viewModel.discoverPi() },
+                        enabled = !viewModel.isDiscovering,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            if (viewModel.isDiscovering) "Searching…"
+                            else viewModel.piInfo?.let { "Pi: ${it.name} (${it.host})" } ?: "Find Pi"
+                        )
+                    }
+
+                    when (val o = viewModel.outcome) {
+                        is BevOutcome.Success ->
+                            BeSuccessPanel(
+                                o = o,
+                                piIp = viewModel.piInfo?.host ?: piIp,
+                                status = viewModel.missionStatus,
+                                piResult = viewModel.piResult,
+                                piBaseUrl = viewModel.piInfo?.baseUrl,
+                                isUploading = viewModel.isUploading,
+                                simStatus = viewModel.simStatus,
+                                onSendImage = {
+                                    val img = imagePath
+                                    val c = corners
+                                    if (img != null && c != null) {
+                                        viewModel.sendImageToPi(img, c, field)
+                                    }
+                                },
+                                onSend = { viewModel.sendAndTrack(o.mission, viewModel.piInfo?.host ?: piIp) },
+                                onCopyJson = {
+                                    val jsonStr = viewModel.missionToJson(o.mission)
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
+                                    Toast.makeText(context, Strings.jsonCopied(lang), Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)
+                        BevOutcome.Idle -> BeIdleHint()
+                    }
+
+                    WizardNav(
+                        backEnabled = true,
+                        nextEnabled = false,
+                        onBack = { step = 1 },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Small colored chip showing a completed step. */
+@Composable
+private fun StatusChip(label: String, ready: Boolean, modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(20),
+        color = if (ready) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier,
+    ) {
+        Text(
+            if (ready) "✓ $label" else label,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        )
+    }
+}
+
+/** Back / Next navigation row for the wizard steps. */
+@Composable
+private fun WizardNav(
+    backEnabled: Boolean = false,
+    nextEnabled: Boolean,
+    onBack: (() -> Unit)? = null,
+    onNext: (() -> Unit)? = null,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { onBack?.invoke() },
+            enabled = backEnabled && onBack != null,
+            modifier = Modifier.weight(1f),
+        ) { Text("← Back") }
+        if (onNext != null) {
+            Button(
+                onClick = onNext,
+                enabled = nextEnabled,
+                modifier = Modifier.weight(1f),
+            ) { Text("Next →") }
         }
     }
 }

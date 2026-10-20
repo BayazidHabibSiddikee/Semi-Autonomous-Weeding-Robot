@@ -15,6 +15,8 @@ data class Field(
     val speedMps: Double = 0.5,         // Rover driving speed in the simulated run
     val laserRangeM: Double = 0.30,     // How far the laser can zap a weed
     val weedThreshold: Double = 50.0,   // 0..100 - how small a weed is still targeted
+    val headlandMarginM: Double = 0.2,  // Distance kept from the field edges
+    val maxWeeds: Double = 60.0,        // Cap on weeds modelled in the sim
 ) {
     /**
      * Calculate row spacing from field width and row count

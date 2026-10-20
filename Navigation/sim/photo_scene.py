@@ -91,17 +91,19 @@ def build_path_from_spec(doc, spec):
 
     W = spec["width_m"]
     L = spec["length_m"]
+    margin = float(spec.get("headland_m", 0.2))
+    ends = L / 2.0 - margin
     points = []
     for r, y in enumerate(spec["lanes_y_m"]):
         if r % 2 == 0:
             points += [
-                App.Vector(-L / 2 + 0.2, y, 0.30),
-                App.Vector(L / 2 - 0.2, y, 0.30),
+                App.Vector(-ends, y, 0.30),
+                App.Vector(ends, y, 0.30),
             ]
         else:
             points += [
-                App.Vector(L / 2 - 0.2, y, 0.30),
-                App.Vector(-L / 2 + 0.2, y, 0.30),
+                App.Vector(ends, y, 0.30),
+                App.Vector(-ends, y, 0.30),
             ]
 
     wire = Part.makePolygon(points)
@@ -122,6 +124,7 @@ def build_scene_from_spec(doc_name="PhotoFieldSim", spec_path=DEFAULT_SPEC):
         raise ValueError(f"scene spec not found: run scene_spec.py first ({spec_path})")
     with open(spec_path) as fh:
         spec = json.load(fh)
+    spec.setdefault("headland_m", 0.2)
 
     if doc_name in App.listDocuments():
         App.closeDocument(doc_name)

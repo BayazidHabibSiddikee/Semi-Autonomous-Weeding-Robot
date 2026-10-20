@@ -99,6 +99,8 @@ def build_spec(
     expected_rows: int | None = None,
     band_frac: float = 0.25,
     weed_min_area: int = 18,
+    headland_m: float = 0.2,
+    max_weeds: int = 60,
     out_path: str | None = None,
 ) -> Dict:
     """Full photo -> scene spec conversion."""
@@ -131,14 +133,21 @@ def build_spec(
     ]
 
     weeds = []
-    for px, py, _area in weed_clusters(veg, rows_px, bev_w, min_area_px=weed_min_area):
+    x_limit = length_m / 2.0 - headland_m - 0.1
+    for px, py, _area in weed_clusters(
+        veg, rows_px, bev_w, min_area_px=weed_min_area, max_weeds=max_weeds * 2,
+    ):
         wx = pxh_to_x_px(py)
         wy = pxw_to_y(px)
+        if abs(wx) > x_limit:
+            continue  # respects the headland margin
         # keep weeds only inside the driving corridors (never on plants)
         for lane in lanes_y:
             if abs(wy - lane) < 0.18:
                 weeds.append((round(wx, 3), round(wy, 3)))
                 break
+        if len(weeds) >= max_weeds:
+            break
 
     spec = {
         "width_m": round(width_m, 3),
@@ -150,6 +159,7 @@ def build_spec(
         ),
         "lanes_y_m": [round(y, 3) for y in lanes_y],
         "plant_spacing_m": 0.35,
+        "headland_m": round(headland_m, 3),
         "weeds": weeds,
         "bev": os.path.basename(bev_path),
     }

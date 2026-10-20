@@ -205,6 +205,8 @@ class BeViewModel(
                     speedMps = field.speedMps,
                     laserRangeM = field.laserRangeM,
                     weedThreshold = field.weedThreshold,
+                    headlandMarginM = field.headlandMarginM,
+                    maxWeeds = field.maxWeeds,
                 ).getOrThrow()
 
                 piResult = response

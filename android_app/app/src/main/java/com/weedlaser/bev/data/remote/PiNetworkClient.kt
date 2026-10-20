@@ -127,6 +127,8 @@ class PiNetworkClient(
         speedMps: Double = 0.5,
         laserRangeM: Double = 0.30,
         weedThreshold: Double = 50.0,
+        headlandMarginM: Double = 0.2,
+        maxWeeds: Double = 60.0,
     ): Result<PiImageResponse> = withContext(Dispatchers.IO) {
         runCatching {
             require(corners.size == 4) { "exactly 4 corner points are required" }
@@ -148,6 +150,8 @@ class PiNetworkClient(
                     put("speedMps", speedMps)
                     put("laserRangeM", laserRangeM)
                     put("weedThreshold", weedThreshold)
+                    put("headlandMarginM", headlandMarginM)
+                    put("maxWeeds", maxWeeds)
                 })
             }
 

@@ -90,6 +90,8 @@ class Sim3dJob:
         laser_range_m: float = 0.30,
         weed_threshold: float = 50.0,
         speed_mps: float = 0.5,
+        headland_m: float = 0.2,
+        max_weeds: int = 60,
         force: bool = False,
     ) -> Optional[bool]:
         """Kick off the render; returns False if one is already running."""
@@ -105,6 +107,8 @@ class Sim3dJob:
                 "laser": laser_range_m,
                 "threshold": weed_threshold,
                 "speed": speed_mps,
+                "headland": headland_m,
+                "max_weeds": max_weeds,
             }
         bev = getattr(self._analysis, "bev_path", None) if self._analysis else None
         if not bev or not os.path.isfile(bev):
@@ -150,10 +154,15 @@ class Sim3dJob:
                 bev_path, p.get("width", 6.0), p.get("length", 8.0),
                 band_frac=band_frac,
                 weed_min_area=weed_min_area,
+                headland_m=p.get("headland", 0.2),
+                max_weeds=p.get("max_weeds", 60),
                 out_path=SPEC_FILE,
             )
             # animation density from the requested rover speed
-            path_len = 2.0 * len(spec["lanes_y_m"]) * (p.get("length", 8.0) - 0.4)
+            margin = p.get("headland", 0.2)
+            path_len = 2.0 * len(spec["lanes_y_m"]) * (
+                p.get("length", 8.0) - 2.0 * margin
+            )
             frames = int(path_len / max(p.get("speed", 0.5) * 0.6, 0.05))
             frames = max(60, min(frames, 400))
             self._put(state="render", frames=frames,

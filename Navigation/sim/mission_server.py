@@ -250,6 +250,8 @@ class MissionServer:
         speed_mps = float(fld.get("speedMps", 0.5) or 0.5)
         laser_range = float(fld.get("laserRangeM", 0.30) or 0.30)
         weed_threshold = float(fld.get("weedThreshold", 50.0) or 50.0)
+        headland_m = float(fld.get("headlandMarginM", 0.2) or 0.2)
+        max_weeds = int(float(fld.get("maxWeeds", 60.0) or 60.0))
 
         image = decode_image(image_b64)
         stem = f"field_{int(time.time() * 1000)}"
@@ -298,6 +300,8 @@ class MissionServer:
                 laser_range_m=laser_range,
                 weed_threshold=weed_threshold,
                 speed_mps=speed_mps,
+                headland_m=headland_m,
+                max_weeds=max_weeds,
             )
             result["simStatusUrl"] = "/sim3d"
         except Exception as exc:  # render must never break the mission flow
