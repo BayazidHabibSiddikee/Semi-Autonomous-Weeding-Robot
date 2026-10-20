@@ -190,6 +190,7 @@ class PiNetworkClient(
         weedThreshold: Double = 50.0,
         headlandMarginM: Double = 0.2,
         maxWeeds: Double = 60.0,
+        renderer: String = "freecad",
     ): Result<PiImageResponse> = withContext(Dispatchers.IO) {
         runCatching {
             require(corners.size == 4) { "exactly 4 corner points are required" }
@@ -213,6 +214,7 @@ class PiNetworkClient(
                     put("weedThreshold", weedThreshold)
                     put("headlandMarginM", headlandMarginM)
                     put("maxWeeds", maxWeeds)
+                    put("renderer", renderer)
                 })
             }
 

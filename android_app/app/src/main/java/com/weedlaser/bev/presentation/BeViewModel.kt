@@ -207,6 +207,7 @@ class BeViewModel(
                     weedThreshold = field.weedThreshold,
                     headlandMarginM = field.headlandMarginM,
                     maxWeeds = field.maxWeeds,
+                    renderer = field.renderer,
                 ).getOrThrow()
 
                 piResult = response

@@ -20,13 +20,13 @@ W, L = SPEC["width_m"], SPEC["length_m"]
 MARGIN = float(SPEC.get("headland_m", 0.2))
 ENDS = L / 2.0 - MARGIN           # rover lane half-length
 
-Lfps = fps = 24
-V = 6.0                            # visual m/s
+fps = 24
+V = float(os.environ.get("TWIN_SPEED", "6.0"))   # visual m/s
+LASER_RANGE = float(os.environ.get("TWIN_LASER", "0.35"))
 LEGS = len(LANES)
 LEG_LEN = 2.0 * ENDS
 TOTAL_S = LEGS * LEG_LEN
 FRAMES = int(TOTAL_S / V * fps) + 14
-LASER_RANGE = 0.35
 ROVER_TGT_LEN = 0.5               # metres, rover length in scene
 
 print(f"[build] field {L}x{W}, {len(ROWS)} rows, {LEGS} lanes, {len(WEEDS)} weeds")
@@ -192,6 +192,14 @@ k = ROVER_TGT_LEN / (xmax - xmin)
 rover.scale = (k, k, k)
 rover.location = (-(xmin + xmax) / 2 * k, -(ymin + ymax) / 2 * k, -zmin * k)
 TURRET_Z = (zmax - zmin) * k           # tallest point above the ground
+paint = bpy.data.materials.new("roverPaint")
+paint.use_nodes = True
+rb = paint.node_tree.nodes["Principled BSDF"]
+rb.inputs["Base Color"].default_value = (0.55, 0.17, 0.03, 1)  # field-robot orange
+rb.inputs["Roughness"].default_value = 0.45
+rb.inputs["Metallic"].default_value = 0.25
+rover.data.materials.clear()
+rover.data.materials.append(paint)
 root = bpy.data.objects.new("RoverRoot", None)
 bpy.context.scene.collection.objects.link(root)
 rover.parent = root

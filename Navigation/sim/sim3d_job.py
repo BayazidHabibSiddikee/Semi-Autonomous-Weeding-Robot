@@ -92,6 +92,7 @@ class Sim3dJob:
         speed_mps: float = 0.5,
         headland_m: float = 0.2,
         max_weeds: int = 60,
+        renderer: str = "freecad",
         force: bool = False,
     ) -> Optional[bool]:
         """Kick off the render; returns False if one is already running."""
@@ -109,6 +110,7 @@ class Sim3dJob:
                 "speed": speed_mps,
                 "headland": headland_m,
                 "max_weeds": max_weeds,
+                "renderer": renderer,
             }
         bev = getattr(self._analysis, "bev_path", None) if self._analysis else None
         if not bev or not os.path.isfile(bev):
@@ -137,6 +139,41 @@ class Sim3dJob:
         import glob
         files = sorted(glob.glob(os.path.join(OUTBOX, "*_bev.jpg")))
         return files[-1] if files else ""
+
+    def _run_blender(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        """Photoreal twin: drive blender_field_sim.py headless in this machine."""
+        import shutil
+        blender = shutil.which("blender")
+        if not blender:
+            raise RuntimeError("blender is not installed on this machine")
+        assets = os.environ.get(
+            "TWIN_ASSETS", os.path.expanduser("~/Downloads/plant_assets"))
+        script = os.path.join(HERE, "blender_field_sim.py")
+        if not os.path.isfile(script):
+            raise RuntimeError(f"missing blender builder: {script}")
+        if not os.path.isfile("/tmp/rover_field.stl"):
+            raise RuntimeError("missing rover mesh /tmp/rover_field.stl")
+
+        # the requested (slow) real speed would take hours: scale it up for the
+        # animation, roughly 8x, clamped so a run stays under ~20 minutes
+        visual = max(4.0, min(float(p.get("speed", 0.5)) * 8.0, 10.0))
+        laser = max(0.1, min(float(p.get("laser", 0.30)), 0.8))
+        env = dict(os.environ)
+        env["TWIN_SPEED"] = f"{visual:.2f}"
+        env["TWIN_LASER"] = f"{laser:.2f}"
+        self._put(state="render", error=None)   # progress = framesDone via /sim3d
+        proc = subprocess.run(
+            [blender, "-b", "--factory-startup", "--python", script, "--",
+             SPEC_FILE, assets, FRAMES_DIR],
+            capture_output=True, text=True, timeout=5400, env=env)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-400:]
+            raise RuntimeError(f"blender failed: {tail}")
+        with open("/tmp/blender_stats.json") as fh:
+            stats = json.load(fh)
+        self._put(state="render", frames=stats.get("frames", 0),
+                  weeds=stats.get("weeds_total", 0))
+        return stats
 
     def _run(self, bev_path: str) -> None:
         import sys
@@ -172,20 +209,24 @@ class Sim3dJob:
             for f in os.listdir(FRAMES_DIR):
                 os.remove(os.path.join(FRAMES_DIR, f))
 
-            rpc = xmlrpc.client.ServerProxy(FREECAD_RPC_URL, allow_none=True)
-            code = _freecad_code(SPEC_FILE, FRAMES_DIR, frames, p.get("laser", 0.30))
-            rpc.execute_code(code, 1700)
+            if p.get("renderer", "freecad") == "blender":
+                stats = self._run_blender(p)
+            else:
+                rpc = xmlrpc.client.ServerProxy(FREECAD_RPC_URL, allow_none=True)
+                code = _freecad_code(SPEC_FILE, FRAMES_DIR, frames, p.get("laser", 0.30))
+                rpc.execute_code(code, 1700)
+                with open(STATS_FILE) as fh:
+                    stats = json.load(fh)
 
-            with open(STATS_FILE) as fh:
-                stats = json.load(fh)
             self._put(state="encode", killed=stats.get("killed", 0),
                       weeds=stats.get("weeds_total", 0),
                       frames=stats.get("frames", 0))
 
             ts = int(time.time() * 1000)
             out_mp4 = os.path.join(OUTBOX, f"photo_sim_{ts}.mp4")
+            fps_used = 24 if p.get("renderer", "freecad") == "blender" else 15
             cmd = [
-                "ffmpeg", "-y", "-loglevel", "error", "-framerate", "15",
+                "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps_used),
                 "-i", os.path.join(FRAMES_DIR, "frame_%04d.png"),
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", out_mp4,
             ]

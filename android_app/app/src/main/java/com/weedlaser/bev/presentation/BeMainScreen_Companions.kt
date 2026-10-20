@@ -64,6 +64,27 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
             onFieldChanged(field.copy(rowSpacingM = v)) }
 
         Spacer(Modifier.height(4.dp))
+        Text("SIMULATION RENDERER", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { onFieldChanged(field.copy(renderer = "freecad")) },
+                colors = if (field.renderer == "freecad")
+                    androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    ) else androidx.compose.material3.ButtonDefaults.buttonColors(),
+                modifier = Modifier.weight(1f),
+            ) { Text("Fast CAD sim") }
+            OutlinedButton(
+                onClick = { onFieldChanged(field.copy(renderer = "blender")) },
+                colors = if (field.renderer == "blender")
+                    androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    ) else androidx.compose.material3.ButtonDefaults.buttonColors(),
+                modifier = Modifier.weight(1f),
+            ) { Text("Photorealistic (slow)") }
+        }
+        Spacer(Modifier.height(4.dp))
         Text("ROBOT & WEEDING", style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary)
         SliderRow("Robot speed", "m/s", 0.2..2.0, 35, field.speedMps) { v ->
@@ -390,7 +411,10 @@ internal fun Sim3dPanel(baseUrl: String, status: com.weedlaser.bev.domain.model.
         val label = when (status?.state) {
             null -> "3D digital twin: waiting for the Pi…"
             "spec" -> "3D digital twin: building the map from your photo…"
-            "render" -> "3D digital twin: rendering ${status.framesDone}/${status.frames} frames (${status.lanes} lanes, ${status.weeds} weeds)…"
+            "render" -> if (status.frames > 0)
+                "3D digital twin: rendering ${status.framesDone}/${status.frames} frames (${status.lanes} lanes, ${status.weeds} weeds)…"
+            else
+                "3D digital twin: rendering… ${status.framesDone} frames (${status.lanes} lanes, ${status.weeds} weeds) photorealistic render, a few minutes"
             "encode" -> "3D digital twin: encoding the video (${status.killed} weeds zapped)…"
             "done" -> "3D digital twin: (✓) ${status.killed} weeds zapped of ${status.weeds}"
             "error" -> "3D digital twin failed: ${status.error ?: "unknown"}"

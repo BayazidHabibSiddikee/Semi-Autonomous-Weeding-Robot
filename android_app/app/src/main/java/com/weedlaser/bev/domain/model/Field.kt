@@ -17,6 +17,7 @@ data class Field(
     val weedThreshold: Double = 50.0,   // 0..100 - how small a weed is still targeted
     val headlandMarginM: Double = 0.2,  // Distance kept from the field edges
     val maxWeeds: Double = 60.0,        // Cap on weeds modelled in the sim
+    val renderer: String = "freecad",   // freecad = fast CAD sim, blender = photoreal
 ) {
     /**
      * Calculate row spacing from field width and row count
