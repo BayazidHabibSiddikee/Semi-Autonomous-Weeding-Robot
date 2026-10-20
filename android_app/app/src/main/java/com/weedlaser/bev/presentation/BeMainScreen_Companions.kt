@@ -71,16 +71,18 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 onClick = { onFieldChanged(field.copy(renderer = "freecad")) },
                 colors = if (field.renderer == "freecad")
                     androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    ) else androidx.compose.material3.ButtonDefaults.buttonColors(),
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White,
+                    ) else androidx.compose.material3.ButtonDefaults.outlinedButtonColors(),
                 modifier = Modifier.weight(1f),
             ) { Text("Fast CAD sim") }
             OutlinedButton(
                 onClick = { onFieldChanged(field.copy(renderer = "blender")) },
                 colors = if (field.renderer == "blender")
                     androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    ) else androidx.compose.material3.ButtonDefaults.buttonColors(),
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White,
+                    ) else androidx.compose.material3.ButtonDefaults.outlinedButtonColors(),
                 modifier = Modifier.weight(1f),
             ) { Text("Photorealistic (slow)") }
         }
