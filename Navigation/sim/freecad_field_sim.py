@@ -188,22 +188,41 @@ def build_rover(doc):
         if obj.TypeId != "Part::Feature":
             continue
         try:
-            shape = obj.Shape
+            source_shape = obj.Shape
         except Exception:
             continue
-        if shape.isNull():
+        if source_shape.isNull():
             continue
 
-        copied = doc.copyObject(obj, True)
+        # 1. local geometry (undo the object's placement)
+        local = source_shape.copy()
+        local.Placement = App.Placement()
+
+        # 2. scale the local geometry mm -> m
         matrix = App.Matrix()
         matrix.scale(scale)
-        copied.Shape = shape.transformGeometry(matrix)
+        scaled_local = local.transformGeometry(matrix)
+
+        # 3. new object: scaled local geometry + scaled placement
+        copied = doc.addObject("Part::Feature", obj.Name)
+        copied.Shape = scaled_local
+        pl = obj.Placement
+        copied.Placement = App.Placement(
+            App.Vector(pl.Base.x * scale, pl.Base.y * scale, pl.Base.z * scale),
+            pl.Rotation,
+        )
+        copied.Label = obj.Label
+        try:
+            copied.ViewObject.ShapeColor = obj.ViewObject.ShapeColor
+        except Exception:
+            pass
         copied.Visibility = True
         container.addObject(copied)
 
         if obj.Name.startswith(("Wheel_Tire", "Wheel_Rim")):
             wheels.append(copied)
-            wheel_shapes[copied.Name] = copied.Shape.copy()
+            # the wheel geometry is centred on its own origin, axle along Y
+            wheel_shapes[copied.Name] = scaled_local.copy()
 
     App.closeDocument(src.Name)
     doc.recompute()
@@ -387,9 +406,12 @@ def animate(scene, frames=FRAME_COUNT, out_dir=OUT_DIR, laser_range=0.30):
             if base is None:
                 continue
             try:
-                centre = base.BoundBox.Center
-                spun = base.copy().rotate(centre, App.Vector(0, 1, 0), wheel_angle)
+                # the wheel geometry is centred on its origin with the axle
+                # along Y, so spinning it is a rotation about that axis
+                spun = base.copy().rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), wheel_angle)
+                keep = wheel.Placement
                 wheel.Shape = spun
+                wheel.Placement = keep
             except Exception:
                 pass
 
