@@ -42,6 +42,29 @@ Project-RIPRA/          original gantry-era project material
 case_study/             supporting case study material
 ```
 
+## FreeCAD simulation (real CAD rover + field)
+
+`Navigation/sim/freecad_field_sim.py` builds the mission in **FreeCAD** using
+the real chassis model from `weed_robot_chassis.FCStd` (scaled mm -> m):
+
+* 6 x 8 m field, 9 crop rows of plants, 27 weeds
+* the rover: 33 real CAD parts (TT gearboxes, DC motors, 4 wheels, bridges)
+* the boustrophedon coverage path in red
+* the rover drives the rows, spinning its wheels and firing the laser at
+  every weed it passes
+
+```bash
+# inside FreeCAD (GUI) - build + animate + save frames
+freecad                                  # then in the Python console:
+#   import sys; sys.path.append("<repo>/Navigation/sim")
+#   import freecad_field_sim as sim; sim.build_scene_and_animate()
+
+# headless (geometry only)
+./FreeCAD.AppImage --console Navigation/sim/freecad_field_sim.py
+```
+
+Video: `Navigation/sim/freecad_weeding_mission.mp4` (180 frames, top view).
+
 ## Run the virtual mission (no hardware needed)
 
 ```bash
