@@ -279,7 +279,7 @@ for f in range(FRAMES):
 turret_empty = bpy.data.objects.new("Turret", None)
 bpy.context.scene.collection.objects.link(turret_empty)
 turret_empty.parent = root
-turret_empty.location = (0, 0.10, TURRET_Z)
+turret_empty.location = (0, 0.0, TURRET_Z)
 
 # ------------------------------------------------------------ rover add-ons
 def mate(name, col, rough=0.5, metallic=0.0, emis=0.0):
@@ -313,31 +313,54 @@ def prim(kind, name, loc, sx=0.02, sy=0.02, sz=0.02, mat=None, rot=None):
     ob.parent = root
     return ob
 
-M_PI = mate("pcbGreen", (0.05, 0.33, 0.10), rough=0.35)
-M_BLK = mate("mattBlack", (0.03, 0.03, 0.033), rough=0.6)
+PC5 = (0.148, 0.030)                      # Pi 5 centre on the deck
+ESP = (-0.118, -0.098)                    # ESP32 DevKit centre
+CAMPOS = (0.198, -0.090)                  # CSI camera module centre
+M_PI5 = mate("pi5PcbDark", (0.045, 0.048, 0.052), rough=0.45)
+M_SIL = mate("silver", (0.72, 0.73, 0.76), rough=0.28, metallic=0.9)
 M_GLD = mate("gold", (0.85, 0.65, 0.2), rough=0.3, metallic=0.9)
-M_SIL = mate("silver", (0.75, 0.76, 0.78), rough=0.25, metallic=0.9)
+M_BLK = mate("mattBlack", (0.03, 0.03, 0.033), rough=0.6)
 M_STRAP = mate("strap", (0.25, 0.25, 0.28), rough=0.8)
 M_ARM = mate("armGrey", (0.13, 0.13, 0.145), rough=0.42, metallic=0.75)
 M_LED = mate("ledCyan", (0.1, 0.8, 0.9), rough=0.3, emis=3.0)
+M_IMUPCB = mate("imuPcb", (0.05, 0.26, 0.09), rough=0.4)
+M_LENS = mate("lensGlass", (0.07, 0.09, 0.14), rough=0.08)
+M_ESP = mate("espPcb", (0.015, 0.02, 0.09), rough=0.5)
 
 DECK = TURRET_Z
 HULL_X = 0.235                            # front face of the scaled hull
 HULL_Y = 0.150
-pi_board = prim("cube", "pi_pcb", (0.150, 0.028, DECK + 0.001), 0.085, 0.056, 0.0018, M_PI)
-prim("cube", "pi_cpu", (0.150, 0.020, DECK + 0.004), 0.018, 0.018, 0.003, M_BLK)
-prim("cube", "pi_gpio", (0.113, 0.028, DECK + 0.0035), 0.052, 0.0026, 0.005, M_GLD)
-prim("cube", "pi_usb1", (0.195, 0.014, DECK + 0.005), 0.016, 0.015, 0.008, M_SIL)
-prim("cube", "pi_usb2", (0.195, 0.042, DECK + 0.005), 0.016, 0.015, 0.008, M_SIL)
-prim("cube", "pi_eth", (0.195, 0.068, DECK + 0.005), 0.017, 0.016, 0.008, M_SIL)
-prim("cube", "battery_pack", (0.095, -0.098, DECK + 0.026), 0.150, 0.082, 0.050, M_BLK)
-prim("cube", "battery_strap", (0.095, -0.098, DECK + 0.0535), 0.154, 0.020, 0.004, M_STRAP)
-prim("sphere", "battery_led", (0.163, -0.062, DECK + 0.053), 0.004, mat=M_LED)
-prim("cube", "imu_board", (-0.030, -0.112, DECK + 0.006), 0.028, 0.022, 0.010, M_PI)
+# -- Raspberry Pi 5: dark PCB, silver CPU cap, GPIO, USB stack, WiFi shield
+prim("cube", "pi5_pcb", (PC5[0], PC5[1], DECK + 0.0013), 0.085, 0.056, 0.0026, M_PI5)
+prim("cube", "pi5_cpu_bcm2712", (PC5[0] + 0.026, PC5[1] - 0.006, DECK + 0.003), 0.017, 0.017, 0.0026, M_SIL)
+prim("cube", "pi5_gpio_header", (PC5[0] - 0.014, PC5[1] + 0.024, DECK + 0.004), 0.051, 0.005, 0.0045, M_GLD)
+prim("cube", "pi5_usb_a1", (PC5[0] + 0.0435, PC5[1] + 0.017, DECK + 0.006), 0.009, 0.0135, 0.009, M_SIL)
+prim("cube", "pi5_usb_a2", (PC5[0] + 0.0435, PC5[1] + 0.001, DECK + 0.006), 0.009, 0.0135, 0.009, M_SIL)
+prim("cube", "pi5_usb_c_pwr", (PC5[0] + 0.0435, PC5[1] - 0.0145, DECK + 0.005), 0.011, 0.009, 0.007, M_BLK)
+prim("cube", "pi5_wifi_shield", (PC5[0] - 0.031, PC5[1] + 0.002, DECK + 0.0028), 0.013, 0.013, 0.0012, M_SIL)
+prim("cube", "pi5_microsd", (PC5[0] - 0.0285, PC5[1] + 0.039, DECK + 0.002), 0.012, 0.008, 0.0015, M_BLK)
+# -- ESP32 DevKit: blue-black PCB, metal RF shield, USB, boot/EN buttons
+prim("cube", "esp32_pcb", (ESP[0], ESP[1], DECK + 0.0013), 0.055, 0.028, 0.0026, M_ESP)
+prim("cube", "esp32_rf_shield", (ESP[0] - 0.012, ESP[1], DECK + 0.0045), 0.028, 0.021, 0.0032, M_SIL)
+prim("cube", "esp32_usb", (ESP[0] + 0.0245, ESP[1], DECK + 0.005), 0.008, 0.008, 0.006, M_SIL)
+prim("cube", "esp32_btn_boot", (ESP[0] + 0.018, ESP[1] - 0.008, DECK + 0.0035), 0.004, 0.004, 0.004, M_BLK)
+prim("cube", "esp32_btn_en", (ESP[0] + 0.010, ESP[1] - 0.008, DECK + 0.0035), 0.004, 0.004, 0.004, M_BLK)
+# -- battery (rear-left, clears the centered arm)
+prim("cube", "battery_pack", (-0.112, -0.022, DECK + 0.026), 0.150, 0.080, 0.050, M_BLK)
+prim("cube", "battery_strap", (-0.112, -0.022, DECK + 0.0535), 0.154, 0.020, 0.004, M_STRAP)
+prim("sphere", "battery_led", (0.042, -0.054, DECK + 0.053), 0.004, mat=M_LED)
+# -- IMU, CSI camera module with lens facing forward
+prim("cube", "imu_board", (0.068, -0.108, DECK + 0.008), 0.028, 0.022, 0.012, M_IMUPCB)
+prim("cube", "cam_pcb", (CAMPOS[0], CAMPOS[1], DECK + 0.0012), 0.025, 0.025, 0.0024, M_IMUPCB)
+prim("cyl", "cam_lens", (CAMPOS[0] + 0.007, CAMPOS[1], DECK + 0.0035), 0.0085, 0.014, None, M_BLK,
+     rot=(0, math.pi / 2, 0))
+prim("cyl", "cam_glass", (CAMPOS[0] + 0.0125, CAMPOS[1], DECK + 0.0035), 0.007, 0.003, None, M_LENS,
+     rot=(0, math.pi / 2, 0))
+# -- hull sensors stay on the bumper
 prim("sphere", "tof_dome_front", (HULL_X - 0.012, 0.088, DECK * 0.45), 0.018, mat=M_BLK)
 for sgn in (-1, 1):
     prim("cube", f"ultra_{'L' if sgn > 0 else 'R'}",
-         (HULL_X - 0.025, sgn * HULL_Y * 0.93, DECK * 0.45), 0.026, 0.020, 0.014, M_PI)
+         (HULL_X - 0.025, sgn * HULL_Y * 0.93, DECK * 0.45), 0.026, 0.020, 0.014, M_IMUPCB)
     prim("cyl", f"ultra_xducer_{'L' if sgn > 0 else 'R'}",
          (HULL_X - 0.009, sgn * HULL_Y * 0.93, DECK * 0.45), 0.0075, 0.004, None, M_SIL,
          rot=(0, math.pi / 2, 0))
@@ -389,13 +412,13 @@ def tip_world(f):
     x, y, h = rover_frames[f]
     rot = Euler((0, 0, h)).to_matrix()
     rot2 = Euler((0, 0, h + turret_yaw(f))).to_matrix()
-    return (Vector((x, y, 0.0)) + rot @ Vector((0.0, 0.10, TURRET_Z))
+    return (Vector((x, y, 0.0)) + rot @ Vector((0.0, 0.0, TURRET_Z))
             + rot2 @ TIP)
 
 look = bpy.data.objects.new("LookTarget", None)
 bpy.context.scene.collection.objects.link(look)
 cam = bpy.data.cameras.new("cam")
-cam.lens = 30.0
+cam.lens = 34.0
 cam_ob = bpy.data.objects.new("Camera", cam)
 bpy.context.scene.collection.objects.link(cam_ob)
 scene.camera = cam_ob
@@ -404,7 +427,7 @@ cam_constr.target = look
 cam_constr.track_axis = "TRACK_NEGATIVE_Z"
 cam_constr.up_axis = "UP_Y"
 
-CAM_OFF = Vector((-1.35, -1.75, 1.55))
+CAM_OFF = Vector((-1.0, -1.3, 1.15))
 for f in range(FRAMES):
     x, y, h = rover_frames[f]
     root.location = (x, y, 0.0)
