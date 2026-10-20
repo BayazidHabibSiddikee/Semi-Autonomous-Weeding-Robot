@@ -35,3 +35,20 @@ blender -b -P build_field_scene.py        # headless: saves field_scene.blend + 
 
 Builds a 6x4 m field: soil mounds, 3 tomato rows, 18 weeds, and the rover
 (chassis, 4 wheels, control box, camera mast, laser arm + blue beam).
+
+## 3. Photoreal digital twin (14 x 12 m)
+
+```bash
+python3 make_big_spec.py                      # derive big_field_spec.json from the real photo spec
+blender -b --factory-startup --python blender_field_sim.py -- \
+    big_field_spec.json ~/Downloads/plant_assets /tmp/big_field_frames
+ffmpeg -framerate 12 -i /tmp/big_field_frames/frame_%04d.png -c:v libx264 \
+    -pix_fmt yuv420p -crf 20 blender_field.mp4
+```
+
+Real Poly Haven plants, the CAD rover with its add-ons (Pi, battery, IMU,
+ToF dome, ultrasonic pair, 3-DOF laser arm) on proper U-turns over 527
+frames at 12 fps (~44 s). Slow crawl at 3.2 m/s; 106 dry-tinted weeds in
+clusters beside each lane get zapped from the arm tip as it passes.
+Env knobs: `SMOKE=1 SMOKE_FRAME=<n>` (single probe frame), `TWIN_SPEED`,
+`TWIN_LASER`, `TWIN_FPS`.

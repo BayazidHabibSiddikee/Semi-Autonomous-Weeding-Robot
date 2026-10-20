@@ -5,7 +5,7 @@ Usage:
       <spec.json> <assets_dir> <frames_out_dir>
 """
 import bpy, bmesh, json, math, os, random, sys
-from mathutils import Vector
+from mathutils import Vector, Euler
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 SPEC_PATH, ASSETS_DIR, OUT_DIR = argv
@@ -20,12 +20,28 @@ W, L = SPEC["width_m"], SPEC["length_m"]
 MARGIN = float(SPEC.get("headland_m", 0.2))
 ENDS = L / 2.0 - MARGIN           # rover lane half-length
 
-fps = 24
-V = float(os.environ.get("TWIN_SPEED", "6.0"))   # visual m/s
+fps = int(os.environ.get("TWIN_FPS", "12"))
+V = float(os.environ.get("TWIN_SPEED", "3.2"))   # visual m/s (slow rover)
 LASER_RANGE = float(os.environ.get("TWIN_LASER", "0.35"))
 LEGS = len(LANES)
-LEG_LEN = 2.0 * ENDS
-TOTAL_S = LEGS * LEG_LEN
+R_MAX = max((LANES[i + 1] - LANES[i]) / 2.0 for i in range(LEGS - 1)) if LEGS > 1 else 0.0
+X_END = ENDS - R_MAX          # keep the U-turn bulge inside the headland
+LEG_LEN = 2.0 * X_END
+# path model: straight legs + semicircular U-turns between lanes
+SEGMENTS = []
+leg_start_s = []
+def build_path():
+    s = 0.0
+    for i in range(LEGS):
+        leg_start_s.append(s)
+        SEGMENTS.append(("leg", s, s + LEG_LEN, i))
+        s += LEG_LEN
+        if i < LEGS - 1:
+            r = (LANES[i + 1] - LANES[i]) / 2.0
+            SEGMENTS.append(("arc", s, s + math.pi * r, (i, r)))
+            s += math.pi * r
+    return s
+TOTAL_S = build_path()
 FRAMES = int(TOTAL_S / V * fps) + 14
 ROVER_TGT_LEN = 0.5               # metres, rover length in scene
 
@@ -133,9 +149,10 @@ sun_ob.rotation_euler = (math.radians(50), math.radians(8), math.radians(35))
 bpy.context.scene.collection.objects.link(sun_ob)
 
 # ---------------------------------------------------------------- crops
+row_facing = X_END - 0.15                       # rows stop before the turn zone
 for row_y in ROWS:
-    x = -(ENDS - 0.05)
-    while x <= ENDS - 0.05 + 1e-6:
+    x = -(row_facing)
+    while x <= row_facing + 1e-6:
         jitter = random.uniform(-0.04, 0.04)
         instance(
             "shrub_",
@@ -152,20 +169,46 @@ def zap_frame_for(weed):
     lane = min(range(LEGS), key=lambda i: abs(LANES[i] - wy))
     if abs(LANES[lane] - wy) > LASER_RANGE:
         return None
-    if lane % 2 == 0:                    # -ends -> +ends
-        s_local = wx + ENDS
-    else:
-        s_local = ENDS - wx
-    if not (-0.05 <= s_local <= LEG_LEN + 0.05):
+    u = (wx + X_END) if lane % 2 == 0 else (X_END - wx)
+    if not (-0.05 <= u <= LEG_LEN + 0.05):
         return None
-    f = int(round((lane * LEG_LEN + s_local) / V * fps))
+    s = leg_start_s[lane] + u
+    if s > TOTAL_S:
+        return None
+    f = int(round(s / V * fps))
     if 3 <= f <= FRAMES - 5:
         return f
     return None
 
+WEED_DRY = {}                            # src material name -> dried copy
+def dry_tint(ob):
+    """Pale, dry, sun-bleached look so weeds pop against the green crop."""
+    for slot, mat in enumerate(ob.data.materials):
+        if mat is None:
+            continue
+        key = mat.name
+        if key not in WEED_DRY:
+            m2 = mat.copy()
+            nt = m2.node_tree
+            bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+            if bsdf is not None:
+                b_in = bsdf.inputs["Base Color"]
+                hs = nt.nodes.new("ShaderNodeHueSaturation")
+                hs.inputs["Saturation"].default_value = 0.35
+                hs.inputs["Value"].default_value = 1.35
+                if b_in.is_linked:
+                    src = b_in.links[0].from_socket
+                    nt.links.remove(b_in.links[0])
+                    nt.links.new(src, hs.inputs["Color"])
+                else:
+                    hs.inputs["Color"].default_value = tuple(b_in.default_value)
+                nt.links.new(hs.outputs["Color"], b_in)
+            WEED_DRY[key] = m2
+        ob.data.materials[slot] = WEED_DRY[key]
+
 for uid, (wx, wy) in enumerate(WEEDS):
     f = zap_frame_for((wx, wy))
-    scale = random.uniform(1.0, 1.35)
+    scale = random.uniform(1.05, 1.55)
     ob = instance(
         "nettle_" if random.random() < 0.45 else "rosette_",
         loc=(wx + random.uniform(-0.05, 0.05),
@@ -173,6 +216,7 @@ for uid, (wx, wy) in enumerate(WEEDS):
         rot_z=random.uniform(0, math.tau),
         scale=scale,
     )
+    dry_tint(ob)
     weed_obs.append({"ob": ob, "frame": f, "base": scale})
 
 # ---------------------------------------------------------------- rover
@@ -207,15 +251,24 @@ rover.parent = root
 # ---------------------------------------------------------------- path/anim
 def leg_state(s):
     s = max(0.0, min(s, TOTAL_S))
-    lane = min(int(s // LEG_LEN), LEGS - 1)
-    u = s - lane * LEG_LEN
-    if lane % 2 == 0:
-        x = -ENDS + u
-        heading = math.pi if False else 0.0     # +X
-    else:
-        x = ENDS - u
-        heading = math.pi                        # -X
-    return x, LANES[lane], heading
+    for kind, s0, s1, d in SEGMENTS:
+        if s0 <= s <= s1:
+            if kind == "leg":
+                lane = d
+                u = s - s0
+                if lane % 2 == 0:
+                    return -X_END + u, LANES[lane], 0.0
+                return X_END - u, LANES[lane], math.pi
+            i, r = d
+            th = (s - s0) / r          # arc angle 0..pi
+            y0 = LANES[i]
+            sgn = 1.0 if i % 2 == 0 else -1.0
+            cx = X_END if i % 2 == 0 else -X_END
+            x = cx + sgn * r * math.sin(th)
+            y = y0 + r * (1.0 - math.cos(th))
+            h = th if i % 2 == 0 else math.pi - th
+            return x, y, h
+    return -X_END, LANES[0], 0.0
 
 rover_frames = []
 for f in range(FRAMES):
@@ -228,10 +281,121 @@ bpy.context.scene.collection.objects.link(turret_empty)
 turret_empty.parent = root
 turret_empty.location = (0, 0.10, TURRET_Z)
 
+# ------------------------------------------------------------ rover add-ons
+def mate(name, col, rough=0.5, metallic=0.0, emis=0.0):
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    b = m.node_tree.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*col, 1.0)
+    b.inputs["Roughness"].default_value = rough
+    b.inputs["Metallic"].default_value = metallic
+    if emis > 0:
+        b.inputs["Emission Color"].default_value = (*col, 1.0)
+        b.inputs["Emission Strength"].default_value = emis
+    return m
+
+def prim(kind, name, loc, sx=0.02, sy=0.02, sz=0.02, mat=None, rot=None):
+    if kind == "cube":
+        bpy.ops.mesh.primitive_cube_add(size=1, location=loc)
+    elif kind == "sphere":
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=sx, location=loc, segments=12)
+    elif kind == "cyl":
+        bpy.ops.mesh.primitive_cylinder_add(radius=sx, depth=sy, location=loc, vertices=14)
+    ob = bpy.context.object
+    ob.name = name
+    if kind == "cube":
+        ob.scale = (sx, sy, sz)
+    if rot:
+        ob.rotation_euler = rot
+    if mat:
+        ob.data.materials.clear()
+        ob.data.materials.append(mat)
+    ob.parent = root
+    return ob
+
+M_PI = mate("pcbGreen", (0.05, 0.33, 0.10), rough=0.35)
+M_BLK = mate("mattBlack", (0.03, 0.03, 0.033), rough=0.6)
+M_GLD = mate("gold", (0.85, 0.65, 0.2), rough=0.3, metallic=0.9)
+M_SIL = mate("silver", (0.75, 0.76, 0.78), rough=0.25, metallic=0.9)
+M_STRAP = mate("strap", (0.25, 0.25, 0.28), rough=0.8)
+M_ARM = mate("armGrey", (0.13, 0.13, 0.145), rough=0.42, metallic=0.75)
+M_LED = mate("ledCyan", (0.1, 0.8, 0.9), rough=0.3, emis=3.0)
+
+DECK = TURRET_Z
+HULL_X = 0.235                            # front face of the scaled hull
+HULL_Y = 0.150
+pi_board = prim("cube", "pi_pcb", (0.150, 0.028, DECK + 0.001), 0.085, 0.056, 0.0018, M_PI)
+prim("cube", "pi_cpu", (0.150, 0.020, DECK + 0.004), 0.018, 0.018, 0.003, M_BLK)
+prim("cube", "pi_gpio", (0.113, 0.028, DECK + 0.0035), 0.052, 0.0026, 0.005, M_GLD)
+prim("cube", "pi_usb1", (0.195, 0.014, DECK + 0.005), 0.016, 0.015, 0.008, M_SIL)
+prim("cube", "pi_usb2", (0.195, 0.042, DECK + 0.005), 0.016, 0.015, 0.008, M_SIL)
+prim("cube", "pi_eth", (0.195, 0.068, DECK + 0.005), 0.017, 0.016, 0.008, M_SIL)
+prim("cube", "battery_pack", (0.095, -0.098, DECK + 0.026), 0.150, 0.082, 0.050, M_BLK)
+prim("cube", "battery_strap", (0.095, -0.098, DECK + 0.0535), 0.154, 0.020, 0.004, M_STRAP)
+prim("sphere", "battery_led", (0.163, -0.062, DECK + 0.053), 0.004, mat=M_LED)
+prim("cube", "imu_board", (-0.030, -0.112, DECK + 0.006), 0.028, 0.022, 0.010, M_PI)
+prim("sphere", "tof_dome_front", (HULL_X - 0.012, 0.088, DECK * 0.45), 0.018, mat=M_BLK)
+for sgn in (-1, 1):
+    prim("cube", f"ultra_{'L' if sgn > 0 else 'R'}",
+         (HULL_X - 0.025, sgn * HULL_Y * 0.93, DECK * 0.45), 0.026, 0.020, 0.014, M_PI)
+    prim("cyl", f"ultra_xducer_{'L' if sgn > 0 else 'R'}",
+         (HULL_X - 0.009, sgn * HULL_Y * 0.93, DECK * 0.45), 0.0075, 0.004, None, M_SIL,
+         rot=(0, math.pi / 2, 0))
+
+# ------------------------------------------------------------- 3-DOF arm
+def tube(name, r, p0, p1, mat):
+    d = Vector(p1) - Vector(p0)
+    mid = (Vector(p0) + Vector(p1)) / 2
+    bpy.ops.mesh.primitive_cylinder_add(radius=r, depth=d.length,
+                                        location=mid, vertices=14)
+    ob = bpy.context.object
+    ob.name = name
+    ob.rotation_euler = d.to_track_quat("Z", "Y").to_euler()
+    ob.data.materials.clear()
+    ob.data.materials.append(mat)
+    ob.parent = turret_empty
+    return ob
+
+def ball(name, r, p, mat):
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=r, location=p, segments=14)
+    ob = bpy.context.object
+    ob.name = name
+    ob.data.materials.clear()
+    ob.data.materials.append(mat)
+    ob.parent = turret_empty
+    return ob
+
+S = Vector((0.045, 0.0, 0.115))
+DIR1 = Vector((0.766, 0.0, 0.643))            # shoulder raised ~40 deg
+E = S + 0.150 * DIR1
+DIR2 = Vector((0.342, 0.0, -0.940))           # elbow folds down ~70 deg
+W = E + 0.130 * DIR2
+TIP = W + 0.090 * DIR2
+tube("arm_base_pillar", 0.034, (0.014, 0, 0.0), (0.018, 0, 0.10), M_ARM)
+ball("shoulder_hub", 0.032, S, M_ARM)
+tube("upper_arm", 0.020, S, E, M_ARM)
+ball("elbow_hub", 0.027, E, M_ARM)
+tube("forearm", 0.016, E, W, M_ARM)
+ball("wrist_hub", 0.022, W, M_ARM)
+tube("laser_head", 0.0115, W, TIP, M_ARM)
+print(f"[build] arm tip local {TIP.x:.3f},{TIP.z:.3f}")
+
+SWEEP_A = math.radians(12.0)                  # slow turret yaw sweep
+SWEEP_T = 9.0                                 # seconds per cycle
+def turret_yaw(f):
+    return SWEEP_A * math.sin(2.0 * math.pi * (f / fps) / SWEEP_T)
+
+def tip_world(f):
+    x, y, h = rover_frames[f]
+    rot = Euler((0, 0, h)).to_matrix()
+    rot2 = Euler((0, 0, h + turret_yaw(f))).to_matrix()
+    return (Vector((x, y, 0.0)) + rot @ Vector((0.0, 0.10, TURRET_Z))
+            + rot2 @ TIP)
+
 look = bpy.data.objects.new("LookTarget", None)
 bpy.context.scene.collection.objects.link(look)
 cam = bpy.data.cameras.new("cam")
-cam.lens = 35.0
+cam.lens = 30.0
 cam_ob = bpy.data.objects.new("Camera", cam)
 bpy.context.scene.collection.objects.link(cam_ob)
 scene.camera = cam_ob
@@ -240,13 +404,15 @@ cam_constr.target = look
 cam_constr.track_axis = "TRACK_NEGATIVE_Z"
 cam_constr.up_axis = "UP_Y"
 
-CAM_OFF = Vector((-1.9, -2.7, 2.0))
+CAM_OFF = Vector((-1.35, -1.75, 1.55))
 for f in range(FRAMES):
     x, y, h = rover_frames[f]
     root.location = (x, y, 0.0)
     root.rotation_euler = (0, 0, h)
     root.keyframe_insert("location", frame=f)
     root.keyframe_insert("rotation_euler", frame=f)
+    turret_empty.rotation_euler = (0, 0, turret_yaw(f))
+    turret_empty.keyframe_insert("rotation_euler", frame=f)
     look.location = (x, y, 0.12)
     look.keyframe_insert("location", frame=f)
     cam_ob.location = (x + CAM_OFF.x, y + CAM_OFF.y, CAM_OFF.z)
@@ -277,10 +443,8 @@ for z in weed_obs:
     ob.keyframe_insert("scale", frame=fk - 2)
     ob.scale = (0.001, 0.001, 0.001)
     ob.keyframe_insert("scale", frame=fk + 4)
-    # beam position: from the rover turret at the zap frame to the weed top
-    x, y, h = rover_frames[fk]
-    dx = 0.10 if abs(h) < 0.1 else -0.10
-    p1 = Vector((x + dx, y, TURRET_Z * 0.7))
+    # beam: from the ARM TIP (turret + sweep yaw) down to the weed top
+    p1 = tip_world(fk)
     p2 = Vector((ob.location.x, ob.location.y, 0.05))
     mid = (p1 + p2) / 2
     d = (p2 - p1)
@@ -307,15 +471,17 @@ import os as _os
 if _os.environ.get("SMOKE") == "1":
     scene.frame_start = int(_os.environ.get("SMOKE_FRAME", "0"))
     scene.frame_end = scene.frame_start
-scene.render.resolution_x = 960
-scene.render.resolution_y = 540
+scene.render.resolution_x = 840
+scene.render.resolution_y = 470
 scene.render.image_settings.file_format = "PNG"
 scene.render.filepath = os.path.join(OUT_DIR, "frame_")
 
 scene.eevee.use_shadows = True
 
 json.dump({"frames": FRAMES, "fps": fps, "lanes": LEGS, "weeds": len(WEEDS),
-           "killed": killed, "crops_per_row": int((2 * ENDS - 0.1) / 0.34)},
+           "killed": killed, "crops_per_row": int((2 * row_facing) / 0.34),
+           "path_m": round(TOTAL_S, 1), "v_mps": V,
+           "leg_len": round(LEG_LEN, 2), "substance": "big_field"},
           open("/tmp/blender_stats.json", "w"))
 REPO = "/run/media/bayazid/5f064a08-e294-4745-9a41-3920c208ef17/home/sword/Documents/projects/weed-laser-robot"
 os.makedirs(f"{REPO}/Navigation/sim", exist_ok=True)
