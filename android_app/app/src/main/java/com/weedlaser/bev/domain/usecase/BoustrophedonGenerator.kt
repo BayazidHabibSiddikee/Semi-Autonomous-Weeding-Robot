@@ -32,7 +32,14 @@ class BoustrophedonGenerator {
         calibration: HomographyCalibration,
         rowLengthOverrideM: Double? = null,
     ): Mission {
-        val rowLengthM = rowLengthOverrideM ?: field.lengthM
+        // Headland margin keeps the rover clear of the field edges: the first
+        // and last part of every row are not driven. An explicit override is
+        // treated as the exact driving distance and stays as-is.
+        val inset = field.headlandMarginM.coerceAtLeast(0.0)
+        val rowLengthM = rowLengthOverrideM
+            ?: (field.lengthM - 2.0 * inset).coerceAtLeast(0.5)
+        val xEntry = inset
+        val xExit = (field.lengthM - inset).coerceAtLeast(inset)
 
         // Convert detected row centers (BEV pixels) to field Y meters
         val rowYs = rows.rowCentersX.map { px ->
@@ -55,11 +62,11 @@ class BoustrophedonGenerator {
                 val isLastRow = index == effectiveRowYs.size - 1
 
                 // Start point of this row
-                val startLateral = if (index % 2 == 0) 0.0 else field.lengthM
+                val startLateral = if (index % 2 == 0) xEntry else xExit
                 val startPoint = FieldPoint(startLateral, rowY)
 
                 // End point of this row
-                val endLateral = if (index % 2 == 0) field.lengthM else 0.0
+                val endLateral = if (index % 2 == 0) xExit else xEntry
                 val endPoint = FieldPoint(endLateral, rowY)
 
                 // Decide turn direction

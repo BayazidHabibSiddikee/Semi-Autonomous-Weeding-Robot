@@ -139,20 +139,31 @@ def build_mission_json(
     length_m: float,
     row_length_m: Optional[float] = None,
     origin_corner: str = "TOP_LEFT",
+    headland_m: float = 0.2,
 ) -> Dict[str, Any]:
     """
     Build a mission payload identical in shape to the Android app's
     `BoustrophedonGenerator` output (used by the app-side simulator and tests).
+
+    `headland_m` keeps the rover away from the field edges: lane endpoints are
+    inset by that margin at both the start and end of every row. An explicit
+    `row_length_m` override is treated as the exact driving distance and left
+    as-is.
     """
-    row_length = length_m if row_length_m is None else row_length_m
+    headland = max(headland_m, 0.0)
+    row_length = (
+        max(length_m - 2.0 * headland, 0.5) if row_length_m is None else row_length_m
+    )
+    x_lo = headland
+    x_hi = max(length_m - headland, headland)
     rows = sorted(rows_m)
     path: List[Dict[str, Any]] = []
     seq = 1
 
     for index, y in enumerate(rows):
         is_last = index == len(rows) - 1
-        start_x = 0.0 if index % 2 == 0 else row_length
-        end_x = row_length if index % 2 == 0 else 0.0
+        start_x = x_lo if index % 2 == 0 else x_hi
+        end_x = x_hi if index % 2 == 0 else x_lo
         turn = "RIGHT" if index % 2 == 0 else "LEFT"
 
         path.append(

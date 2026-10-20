@@ -193,6 +193,7 @@ def analyze_field_photo(
     expected_rows: Optional[int] = None,
     out_dir: str = ".",
     stem: str = "field",
+    headland_m: float = 0.2,
 ) -> FieldAnalysis:
     """Full pipeline: photo + corners -> BEV -> rows -> mission."""
     result = FieldAnalysis()
@@ -239,5 +240,6 @@ def analyze_field_photo(
         rows_m=rows_m,
         width_m=width_m,
         length_m=length_m,
+        headland_m=headland_m,
     )
     return result

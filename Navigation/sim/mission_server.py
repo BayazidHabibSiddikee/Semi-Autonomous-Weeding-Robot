@@ -264,6 +264,7 @@ class MissionServer:
             expected_rows=expected,
             out_dir=self.outbox,
             stem=stem,
+            headland_m=headland_m,
         )
 
         # never start a rover on a mission with no lanes: the photo did not
