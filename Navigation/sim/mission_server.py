@@ -408,11 +408,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/status"):
             self._send(200, self.server.mission_server.get_status())
+        elif self.path.startswith("/live.jpg"):
+            # LIVE feed: the newest screenshot of the digital-twin render
+            # currently running in FreeCAD (served as PNG bytes)
+            from sim3d_job import get as sim3d
+            frame = sim3d().latest_frame_path()
+            if frame and os.path.isfile(frame):
+                try:
+                    with open(frame, "rb") as fh:
+                        body = fh.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    self._send(500, {"error": f"live frame read failed: {exc}"})
+            else:
+                self._send(404, {"error": "no live frame yet - send a photo first"})
         elif self.path.startswith("/sim3d"):
             from sim3d_job import get as sim3d
             snap = sim3d().snapshot()
             if snap.get("video"):
                 snap["videoUrl"] = f"/artifacts/{snap['video']}"
+            # how far the render got (the animation saves a png per frame)
+            try:
+                import glob
+                snap["framesDone"] = len(
+                    glob.glob(os.path.join("/tmp", "photo_sim_frames", "frame_*.png"))
+                )
+            except Exception:
+                pass
             self._send(200, snap)
         elif self.path.startswith("/plan"):
             self._send(200, self.server.mission_server.get_plan())

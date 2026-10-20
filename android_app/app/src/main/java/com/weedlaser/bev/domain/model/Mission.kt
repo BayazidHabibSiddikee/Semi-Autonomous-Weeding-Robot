@@ -117,6 +117,7 @@ data class Sim3dStatus(
     val weeds: Int = 0,
     val killed: Int = 0,
     val lanes: Int = 0,
+    val framesDone: Int = 0,
     val videoUrl: String? = null,
     val error: String? = null,
 )

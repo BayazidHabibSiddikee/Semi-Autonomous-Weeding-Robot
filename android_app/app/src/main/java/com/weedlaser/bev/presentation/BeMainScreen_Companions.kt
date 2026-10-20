@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,9 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -394,14 +399,33 @@ internal fun Sim3dPanel(baseUrl: String, status: com.weedlaser.bev.domain.model.
         val label = when (status?.state) {
             null -> "3D digital twin: waiting for the Pi…"
             "spec" -> "3D digital twin: building the map from your photo…"
-            "render" -> "3D digital twin: rendering ${status.frames} frames (${status.lanes} lanes, ${status.weeds} weeds)…"
+            "render" -> "3D digital twin: rendering ${status.framesDone}/${status.frames} frames (${status.lanes} lanes, ${status.weeds} weeds)…"
             "encode" -> "3D digital twin: encoding the video (${status.killed} weeds zapped)…"
             "done" -> "3D digital twin: (✓) ${status.killed} weeds zapped of ${status.weeds}"
             "error" -> "3D digital twin failed: ${status.error ?: "unknown"}"
             else -> "3D digital twin: ${status.state}"
         }
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            when (status?.state) {
+                "spec", "render", "encode" -> {
+                    Box(
+                        Modifier
+                            .size(10.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .background(Color(0xFFD32F2F)),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("LIVE", color = Color(0xFFD32F2F), style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.width(8.dp))
+                }
+                else -> {}
+            }
+        }
         Text(label, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(6.dp))
+        if (status?.state == "render" && baseUrl.isNotBlank()) {
+            Sim3dLiveView(baseUrl)
+        }
         if (status?.state == "done" && status.videoUrl != null) {
             Sim3dVideo(url = "$baseUrl${status.videoUrl}")
         }
@@ -432,4 +456,50 @@ private fun Sim3dVideo(url: String) {
     )
     Spacer(Modifier.height(4.dp))
     Text("live 3D simulation video streamed from the Pi", style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
+private fun Sim3dLiveView(baseUrl: String) {
+    var latest by remember { mutableStateOf<Long>(0L) }
+    var bmp by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(baseUrl) {
+        while (true) {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                runCatching {
+                    val t = System.currentTimeMillis()
+                    val connection = (java.net.URL("$baseUrl/live.jpg?t=$t")
+                        .openConnection() as java.net.HttpURLConnection)
+                    connection.connectTimeout = 4000
+                    connection.readTimeout = 4000
+                    connection.inputStream.use { stream ->
+                        val newBmp = android.graphics.BitmapFactory.decodeStream(stream)
+                        if (newBmp != null) {
+                            latest = t
+                            bmp = newBmp
+                        }
+                    }
+                    connection.disconnect()
+                }
+            }
+            kotlinx.coroutines.delay(500L)
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(220.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black),
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        bmp?.let {
+            androidx.compose.foundation.Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = "live 3D sim from the Pi",
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            )
+        } ?: Text("connecting to the live feed…", color = Color.White)
+    }
+    Spacer(Modifier.height(4.dp))
+    Text("live: the 3D twin renders faster than the video encodes, so this is what the Pi sees RIGHT NOW", style = MaterialTheme.typography.bodySmall)
 }

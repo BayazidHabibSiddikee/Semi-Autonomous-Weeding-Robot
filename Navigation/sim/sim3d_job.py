@@ -72,7 +72,6 @@ class Sim3dJob:
         }
         self._analysis = None
         self._params = {}
-
     # ---------------------------------------------------------------- api
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -119,6 +118,16 @@ class Sim3dJob:
         return True
 
     # ------------------------------------------------------------ internals
+    @staticmethod
+    def latest_frame_path() -> Optional[str]:
+        """Newest screenshot of the run in progress (the LIVE feed)."""
+        import glob
+        files = sorted(glob.glob(os.path.join(FRAMES_DIR, "frame_*.png")))
+        if not files:
+            return None
+        # prefer the second-newest: the newest may be mid-write in FreeCAD
+        return files[-2] if len(files) > 1 else files[-1]
+
     @staticmethod
     def _latest_bev() -> str:
         import glob
