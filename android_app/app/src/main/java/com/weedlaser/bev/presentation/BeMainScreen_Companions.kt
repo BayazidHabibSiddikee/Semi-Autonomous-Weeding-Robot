@@ -1,5 +1,6 @@
 package com.weedlaser.bev.presentation
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -26,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
@@ -86,6 +88,35 @@ internal fun FieldConfigInputs(field: Field, onFieldChanged: (Field) -> Unit) {
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = field.speedMps.toString(),
+                    onValueChange = { s ->
+                        onFieldChanged(field.copy(speedMps = s.toDoubleOrNull() ?: field.speedMps))
+                    },
+                    label = { Text("Speed (m/s)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = field.laserRangeM.toString(),
+                    onValueChange = { s ->
+                        onFieldChanged(field.copy(laserRangeM = s.toDoubleOrNull() ?: field.laserRangeM))
+                    },
+                    label = { Text("Laser (m)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = field.weedThreshold.toString(),
+                    onValueChange = { s ->
+                        onFieldChanged(field.copy(weedThreshold = s.toDoubleOrNull() ?: field.weedThreshold))
+                    },
+                    label = { Text("Weed %") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }
@@ -101,6 +132,7 @@ internal fun BeSuccessPanel(
     onSendImage: () -> Unit,
     onSend: () -> Unit,
     onCopyJson: () -> Unit,
+    simStatus: com.weedlaser.bev.domain.model.Sim3dStatus? = null,
 ) {
     val lang = LocalAppLanguage.current
     Card(
@@ -179,6 +211,13 @@ internal fun BeSuccessPanel(
                 if (base != null && piResult.overlayUrl.isNotEmpty()) {
                     PiPlanPreview(baseUrl = base, url = piResult.overlayUrl)
                 }
+            }
+
+            // --- 3D digital twin (Pi renders it right after every upload) ---
+            val sim = simStatus
+            if (piBaseUrl != null && (piResult?.simStatusUrl != null || sim != null)) {
+                Spacer(Modifier.height(8.dp))
+                Sim3dPanel(baseUrl = piBaseUrl, status = sim)
             }
 
             Spacer(Modifier.height(8.dp))
@@ -330,7 +369,7 @@ private fun PiPlanPreview(baseUrl: String, url: String) {
         Spacer(Modifier.height(6.dp))
         Text("Pi's top-down view of your field", style = MaterialTheme.typography.bodySmall)
         Image(
-            bitmap = bitmap!!,
+            bitmap = bitmap!!.asImageBitmap(),
             contentDescription = "Pi BEV plan",
             modifier = Modifier
                 .fillMaxWidth()
@@ -348,3 +387,49 @@ private fun loadRemoteBitmap(url: String): Bitmap? = runCatching {
     connection.disconnect()
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
 }.getOrNull()
+
+@Composable
+internal fun Sim3dPanel(baseUrl: String, status: com.weedlaser.bev.domain.model.Sim3dStatus?) {
+    Column(Modifier.fillMaxWidth()) {
+        val label = when (status?.state) {
+            null -> "3D digital twin: waiting for the Pi…"
+            "spec" -> "3D digital twin: building the map from your photo…"
+            "render" -> "3D digital twin: rendering ${status.frames} frames (${status.lanes} lanes, ${status.weeds} weeds)…"
+            "encode" -> "3D digital twin: encoding the video (${status.killed} weeds zapped)…"
+            "done" -> "3D digital twin: (✓) ${status.killed} weeds zapped of ${status.weeds}"
+            "error" -> "3D digital twin failed: ${status.error ?: "unknown"}"
+            else -> "3D digital twin: ${status.state}"
+        }
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(6.dp))
+        if (status?.state == "done" && status.videoUrl != null) {
+            Sim3dVideo(url = "$baseUrl${status.videoUrl}")
+        }
+    }
+}
+
+@Composable
+private fun Sim3dVideo(url: String) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    AndroidView(
+        factory = {
+            android.widget.VideoView(it).apply {
+                val controller = android.widget.MediaController(it)
+                controller.setAnchorView(this)
+                this.setMediaController(controller)
+                setVideoURI(android.net.Uri.parse(url))
+                setOnPreparedListener { mp -> mp.isLooping = true; start() }
+            }
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(220.dp),
+        update = {
+            if (it.currentPosition == 0 && !it.isPlaying) {
+                try { it.setVideoURI(android.net.Uri.parse(url)); it.start() } catch (_: Exception) {}
+            }
+        }
+    )
+    Spacer(Modifier.height(4.dp))
+    Text("live 3D simulation video streamed from the Pi", style = MaterialTheme.typography.bodySmall)
+}

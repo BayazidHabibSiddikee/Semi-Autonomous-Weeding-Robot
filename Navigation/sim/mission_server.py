@@ -247,6 +247,9 @@ class MissionServer:
         length_m = float(fld.get("lengthM", 8.0))
         expected = fld.get("totalRows")
         expected = int(expected) if expected else None
+        speed_mps = float(fld.get("speedMps", 0.5) or 0.5)
+        laser_range = float(fld.get("laserRangeM", 0.30) or 0.30)
+        weed_threshold = float(fld.get("weedThreshold", 50.0) or 50.0)
 
         image = decode_image(image_b64)
         stem = f"field_{int(time.time() * 1000)}"
@@ -260,6 +263,22 @@ class MissionServer:
             stem=stem,
         )
 
+        # never start a rover on a mission with no lanes: the photo did not
+        # cover the field (wrong angle, night shot...) - let the app know.
+        if not analysis.rows_m:
+            raise ValueError(
+                "No crop rows detected in the photo. The photo is likely too "
+                "dark or was not taken from directly above the field - "
+                "retake it in daylight, camera pointing straight down, and "
+                "pick the 4 field corners."
+            )
+        if expected and len(analysis.rows_m) < max(1, expected // 3):
+            raise ValueError(
+                f"only {len(analysis.rows_m)} of ~{expected} rows detected. "
+                "The photo probably does not cover the whole field or is too "
+                "dark - retake it in daylight from directly above."
+            )
+
         # the phone can now just ask the Pi to execute the plan
         result = self.submit(analysis.mission)
         result.update({
@@ -267,6 +286,22 @@ class MissionServer:
             "bevUrl": f"/artifacts/{os.path.basename(analysis.bev_path)}",
             "overlayUrl": f"/artifacts/{os.path.basename(analysis.overlay_path)}",
         })
+
+        # auto-run the 3D digital-twin sim in the background: the phone can
+        # poll GET /sim3d and stream the finished video
+        try:
+            from sim3d_job import get as sim3d
+            sim3d().start(
+                analysis,
+                width_m=width_m,
+                length_m=length_m,
+                laser_range_m=laser_range,
+                weed_threshold=weed_threshold,
+                speed_mps=speed_mps,
+            )
+            result["simStatusUrl"] = "/sim3d"
+        except Exception as exc:  # render must never break the mission flow
+            self.log(f"[SIM3D] failed to start: {exc}")
         return result
 
     # -------------------------------------------------------------- internals
@@ -363,7 +398,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with open(path, "rb") as fh:
                 body = fh.read()
-            ctype = "image/jpeg" if path.endswith((".jpg", ".jpeg")) else "image/png"
+            ctype = "image/jpeg" if path.endswith((".jpg", ".jpeg")) else (
+                "video/mp4" if path.endswith(".mp4") else "image/png")
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -372,6 +408,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/status"):
             self._send(200, self.server.mission_server.get_status())
+        elif self.path.startswith("/sim3d"):
+            from sim3d_job import get as sim3d
+            snap = sim3d().snapshot()
+            if snap.get("video"):
+                snap["videoUrl"] = f"/artifacts/{snap['video']}"
+            self._send(200, snap)
         elif self.path.startswith("/plan"):
             self._send(200, self.server.mission_server.get_plan())
         elif self.path.startswith("/health"):
@@ -380,8 +422,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.server.mission_server.log(
+            f"[HTTP] POST {self.path} from {self.client_address[0]} ({length} bytes)"
+        )
         if self.path.startswith("/image"):
-            length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length)
             try:
                 payload = json.loads(raw.decode())

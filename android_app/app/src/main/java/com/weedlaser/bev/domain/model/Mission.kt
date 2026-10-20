@@ -108,6 +108,20 @@ data class RowDetectionResult(
 )
 
 /**
+ * Live status of the Pi's 3D digital-twin render job (`GET /sim3d`).
+ */
+@Serializable
+data class Sim3dStatus(
+    val state: String = "idle",
+    val frames: Int = 0,
+    val weeds: Int = 0,
+    val killed: Int = 0,
+    val lanes: Int = 0,
+    val videoUrl: String? = null,
+    val error: String? = null,
+)
+
+/**
  * Response of the Pi's `/image` endpoint: the Pi ran the CV on the uploaded
  * photo and returns the plan it computed.
  */
@@ -120,6 +134,7 @@ data class PiImageResponse(
     val analysis: PiAnalysis? = null,
     val bevUrl: String = "",
     val overlayUrl: String = "",
+    val simStatusUrl: String? = null,
     val error: String? = null,
 )
 

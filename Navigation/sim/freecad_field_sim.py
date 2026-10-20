@@ -415,14 +415,27 @@ def animate(scene, frames=FRAME_COUNT, out_dir=OUT_DIR, laser_range=0.30):
             except Exception:
                 pass
 
-        # fire at any weed within range
+        # fire at any weed within the swept corridor of this frame's segment
         target = None
+        prev_px, prev_py = (poses[pose_i - 1][0], poses[pose_i - 1][1]) \
+            if pose_i > 0 else (nx, ny)
         for weed in weeds:
             if not weed.Visibility:
                 continue
             wx = weed.Placement.Base.x
             wy = weed.Placement.Base.y
-            if math.hypot(wx - nx, wy - ny) < laser_range:
+            # distance to the segment travelled THIS frame (rover can move
+            # several metres per saved frame; the laser sweeps that gap too)
+            ax, ay = prev_px, prev_py
+            bx, by = nx, ny
+            abx, aby = bx - ax, by - ay
+            seg_len2 = abx * abx + aby * aby
+            if seg_len2 < 1e-9:
+                dist = math.hypot(wx - ax, wy - ay)
+            else:
+                t = max(0.0, min(1.0, ((wx - ax) * abx + (wy - ay) * aby) / seg_len2))
+                dist = math.hypot(wx - (ax + t * abx), wy - (ay + t * aby))
+            if dist < laser_range:
                 target = (wx, wy, weed)
                 break
 

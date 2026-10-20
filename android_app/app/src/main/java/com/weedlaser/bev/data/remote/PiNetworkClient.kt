@@ -3,6 +3,7 @@ package com.weedlaser.bev.data.remote
 import com.weedlaser.bev.domain.model.ImagePoint
 import com.weedlaser.bev.domain.model.MissionStatus
 import com.weedlaser.bev.domain.model.PiImageResponse
+import com.weedlaser.bev.domain.model.Sim3dStatus
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -123,6 +124,9 @@ class PiNetworkClient(
         fieldWidthM: Double,
         fieldLengthM: Double,
         expectedRows: Int = 0,
+        speedMps: Double = 0.5,
+        laserRangeM: Double = 0.30,
+        weedThreshold: Double = 50.0,
     ): Result<PiImageResponse> = withContext(Dispatchers.IO) {
         runCatching {
             require(corners.size == 4) { "exactly 4 corner points are required" }
@@ -141,6 +145,9 @@ class PiNetworkClient(
                     put("widthM", fieldWidthM)
                     put("lengthM", fieldLengthM)
                     put("totalRows", expectedRows)
+                    put("speedMps", speedMps)
+                    put("laserRangeM", laserRangeM)
+                    put("weedThreshold", weedThreshold)
                 })
             }
 
@@ -152,8 +159,22 @@ class PiNetworkClient(
             connection.setRequestProperty("Content-Type", "application/json")
             connection.outputStream.use { it.write(payload.toString().toByteArray()) }
 
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
             connection.disconnect()
+
+            if (code !in 200..299) {
+                // surface the Pi's real rejection message (e.g. "no crop rows
+                // detected") instead of a generic FileNotFound IOException
+                val detail = try {
+                    json.decodeFromString(PiImageResponse.serializer(), body).error
+                } catch (_: Exception) {
+                    null
+                }
+                throw IllegalStateException(detail ?: "HTTP $code from the Pi")
+            }
+
             json.decodeFromString(PiImageResponse.serializer(), body)
         }
     }
@@ -171,6 +192,23 @@ class PiNetworkClient(
                 val bytes = connection.inputStream.use { it.readBytes() }
                 connection.disconnect()
                 bytes
+            }
+        }
+
+    /**
+     * Poll the Pi's 3D digital-twin render job (started automatically after
+     * every photo upload). `GET /sim3d` returns the render state and, once
+     * finished, the path of the finished weeding video.
+     */
+    suspend fun fetchSimStatus(baseUrl: String): Result<Sim3dStatus> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val connection = (URL("$baseUrl/sim3d").openConnection() as java.net.HttpURLConnection)
+                connection.connectTimeout = 8000
+                connection.readTimeout = 15000
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                connection.disconnect()
+                json.decodeFromString(Sim3dStatus.serializer(), body)
             }
         }
 }

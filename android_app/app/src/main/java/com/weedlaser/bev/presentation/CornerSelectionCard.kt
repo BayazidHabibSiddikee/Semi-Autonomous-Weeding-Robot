@@ -126,6 +126,15 @@ private fun CornerCanvas(
     val latestDraggingChanged by androidx.compose.runtime.rememberUpdatedState(onDraggingChanged)
     val measurer = rememberTextMeasurer()
 
+    // Push the default corners into the screen state as soon as the photo is
+    // loaded, so the "Generate" button is enabled without requiring a manual
+    // pin drag first (the pins are already visible at the field corners).
+    androidx.compose.runtime.LaunchedEffect(path, fullW, fullH) {
+        if (corners == null && fullW > 1f && fullH > 1f && !path.endsWith("/dev/null")) {
+            latestCornersChanged(defaultCorners(fullW, fullH))
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()

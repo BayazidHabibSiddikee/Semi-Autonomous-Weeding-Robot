@@ -42,7 +42,6 @@ fun bevAppModule(bevOutputDir: File) = module {
             opencv = get(),
             rowDetector = get(),
             fieldAnalyzer = get(),
-            fieldAnalyzer = get(),
             generator = get(),
             outputDir = bevOutputDir,
         )

@@ -96,6 +96,7 @@ class BeViewModel(
         viewModelScope.launch {
             isProcessing = true
             outcome = BevOutcome.Idle
+            var step = "image/BGV setup"
             try {
                 this@BeViewModel.field = field
                 saveField(field)
@@ -105,16 +106,20 @@ class BeViewModel(
                     ((targetW * field.lengthM / field.widthM).toInt()).coerceIn(400, 1600)
                 } else 600
 
+                step = "BEV warp"
                 val bev = generateBEV(imagePath, corners, targetW, targetH).getOrThrow()
 
+                step = "crop-row detection"
                 val rows = detectRows(bev.bevImagePath, field.totalRows)
                     .getOrThrow()
 
+                step = "boustrophedon path planning"
                 val calibr = bev.calibration.copy(
                     fieldWidthM = field.widthM,
                     fieldLengthM = field.lengthM,
                 )
                 val mission = generateMission(field, rows, calibr).getOrThrow()
+                step = "done"
 
                 outcome = BevOutcome.Success(
                     bevPath = bev.bevImagePath,
@@ -123,7 +128,10 @@ class BeViewModel(
                     mission = mission,
                 )
             } catch (e: Exception) {
-                outcome = BevOutcome.Error(e.message ?: "Unknown error")
+                android.util.Log.e("BeViewModel", "generate failed at [$step]", e)
+                outcome = BevOutcome.Error(
+                    "$step failed: ${e.message ?: e.javaClass.simpleName}"
+                )
             } finally {
                 isProcessing = false
             }
@@ -194,16 +202,21 @@ class BeViewModel(
                     fieldWidthM = field.widthM,
                     fieldLengthM = field.lengthM,
                     expectedRows = field.totalRows,
+                    speedMps = field.speedMps,
+                    laserRangeM = field.laserRangeM,
+                    weedThreshold = field.weedThreshold,
                 ).getOrThrow()
 
                 piResult = response
                 if (response.accepted) {
                     piInfo = PiNetworkClient.PiInfo(piInfo?.name ?: "rover-pi", target, piInfo?.port ?: 8080)
                     startStatusPolling(piInfo!!.baseUrl)
+                    startSimStatusPolling(piInfo!!.baseUrl)
                 } else {
                     outcome = BevOutcome.Error(response.error ?: "The Pi rejected the image")
                 }
             } catch (e: Exception) {
+                android.util.Log.e("BeViewModel", "upload failed", e)
                 outcome = BevOutcome.Error("Upload failed: ${e.message}")
             } finally {
                 isUploading = false
@@ -225,6 +238,29 @@ class BeViewModel(
         }
     }
 
+    /** Live 3D digital-twin render status (the Pi starts it after every upload). */
+    var simStatus by mutableStateOf<com.weedlaser.bev.domain.model.Sim3dStatus?>(null)
+        private set
+    private var simJob: kotlinx.coroutines.Job? = null
+
+    /** Poll `GET /sim3d` every 2 s until the render finishes. */
+    private fun startSimStatusPolling(baseUrl: String) {
+        simJob?.cancel()
+        simStatus = null
+        simJob = viewModelScope.launch {
+            while (isActive) {
+                piClient.fetchSimStatus(baseUrl)
+                    .onSuccess { st ->
+                        simStatus = st
+                        if (st.state == "done" || st.state == "error") {
+                            return@launch
+                        }
+                    }
+                delay(2000)
+            }
+        }
+    }
+
     /** Poll `GET /status` once a second until the mission finishes. */
     private fun startStatusPolling(baseUrl: String) {
         statusJob?.cancel()
@@ -234,9 +270,14 @@ class BeViewModel(
                     .onSuccess { status ->
                         missionStatus = status
                         if (status.finished) {
-                            outcome = BevOutcome.Error(
-                                status.error ?: "Mission finished: ${status.weedsKilled} weeds killed"
-                            )
+                            // a finished mission is the normal end of the
+                            // flow - the Success panel already renders the
+                            // DONE line. Only real errors open the error view.
+                            if (status.error != null) {
+                                outcome = BevOutcome.Error(status.error)
+                            } else {
+                                statusJob?.cancel()
+                            }
                             return@launch
                         }
                     }
@@ -249,6 +290,8 @@ class BeViewModel(
         outcome = BevOutcome.Idle
         isProcessing = false
         statusJob?.cancel()
+        simJob?.cancel()
         missionStatus = MissionStatus()
+        simStatus = null
     }
 }

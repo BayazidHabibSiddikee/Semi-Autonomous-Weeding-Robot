@@ -8,6 +8,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfInt
 import org.opencv.core.MatOfPoint
+import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.core.Size
@@ -261,32 +262,43 @@ class FieldAnalyzer {
      * Returns the four corners ordered top-left, top-right, bottom-right, bottom-left.
      */
     private fun detectCorners(vegMask: Mat): List<FieldPoint> {
-        val contours = mutableListOf<MatOfPoint>()
+        val contours = ArrayList<MatOfPoint>()
         val hierarchy = Mat()
         Imgproc.findContours(
             vegMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
         )
-        if (contours.isEmpty()) return emptyList()
+        if (contours.isEmpty()) {
+            hierarchy.release()
+            return emptyList()
+        }
 
-        val all = MatOfPoint()
-        all.fromList(contours.flatMap { it.toList() })
+        // every contour point in one MatOfPoint2f
+        val all = MatOfPoint2f()
+        val flat = ArrayList<Point>()
+        for (c in contours) {
+            for (p in c.toList()) flat.add(Point(p.x, p.y))
+        }
+        all.fromList(flat)
 
+        // RotatedRect -> 4 corner points (boxPoints writes into a Mat)
         val rect = Imgproc.minAreaRect(all)
-        val box = Imgproc.boxPoints(rect)
-        if (box.rows() != 4) return emptyList()
-
-        val pts = (0 until 4).map { i -> Point(box.get(i, 0), box.get(i, 1)) }
-        val ordered = orderCorners(pts)
+        all.release()
         hierarchy.release()
-        return ordered.map { FieldPoint(it.x.toFloat(), it.y.toFloat()) }
+
+        val box = Mat()
+        Imgproc.boxPoints(rect, box)
+        val pts = ArrayList<Point>(4)
+        for (i in 0 until 4) {
+            pts.add(Point(box.get(i, 0)[0], box.get(i, 1)[0]))
+        }
+        box.release()
+
+        val ordered = orderCorners(pts)
+        return ordered.map { FieldPoint(it.x, it.y) }
     }
 
     /** Order 4 points as top-left, top-right, bottom-right, bottom-left. */
     private fun orderCorners(pts: List<Point>): List<Point> {
-        val center = Point(
-            pts.sumOf { it.x } / pts.size,
-            pts.sumOf { it.y } / pts.size
-        )
         val sorted = pts.sortedBy { it.y }
         val top = sorted.take(2).sortedBy { it.x }
         val bottom = sorted.takeLast(2).sortedBy { it.x }

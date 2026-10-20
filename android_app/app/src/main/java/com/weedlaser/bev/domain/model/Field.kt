@@ -12,6 +12,9 @@ data class Field(
     val totalRows: Int = 10,            // Number of crop rows
     val rowSpacingM: Double = 0.6,      // Distance between row centers in meters
     val originCorner: OriginCorner = OriginCorner.TOP_LEFT,  // Reference corner for coordinate system
+    val speedMps: Double = 0.5,         // Rover driving speed in the simulated run
+    val laserRangeM: Double = 0.30,     // How far the laser can zap a weed
+    val weedThreshold: Double = 50.0,   // 0..100 - how small a weed is still targeted
 ) {
     /**
      * Calculate row spacing from field width and row count

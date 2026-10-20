@@ -134,12 +134,26 @@ def warp_to_bev(
     return bev, matrix
 
 
+def enhance_for_analysis(bev: np.ndarray) -> np.ndarray:
+    """Lift very dark photos (dusk / shade) before segmentation.
+
+    CLAHE on the L channel only, so the colour relationship between
+    vegetation and soil stays intact (that is what ExG relies on).
+    """
+    if float(bev.mean()) >= 70.0:
+        return bev
+    lab = cv2.cvtColor(bev, cv2.COLOR_BGR2LAB)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
 def analyze_bev(bev: np.ndarray, expected_rows: Optional[int] = None) -> Dict[str, Any]:
     """Run the agricultural CV on a BEV image."""
     if not _HAVE_CV:
         raise RuntimeError("OpenCV pipeline unavailable on the Pi")
 
-    veg, exg_cut = vegetation_mask(bev)
+    veg, exg_cut = vegetation_mask(enhance_for_analysis(bev))
     projection = column_projection(veg)
     threshold = float(projection.max()) * 0.25 if projection.max() > 0 else 0.0
     segments = segments_above(projection, threshold)
@@ -186,6 +200,13 @@ def analyze_field_photo(
     bev, _matrix = warp_to_bev(image, corners, width_m, length_m)
     result.bev_width = bev.shape[1]
     result.bev_height = bev.shape[0]
+
+    brightness = float(np.mean(cv2.cvtColor(bev, cv2.COLOR_BGR2GRAY)))
+    if brightness < 55.0:
+        result.warnings.append(
+            f"photo is very dark (brightness {brightness:.0f}/255) - "
+            "retake it in daylight from directly above for a reliable map"
+        )
 
     bev_path = os.path.join(out_dir, f"{stem}_bev.jpg")
     os.makedirs(out_dir, exist_ok=True)
