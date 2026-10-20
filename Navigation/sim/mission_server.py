@@ -448,7 +448,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/plan"):
             self._send(200, self.server.mission_server.get_plan())
         elif self.path.startswith("/health"):
-            self._send(200, {"ok": True, "service": "mission_server"})
+            self._send(200, {
+                "ok": True,
+                "service": "mission_server",
+                "name": socket.gethostname(),
+            })
         else:
             self._send(404, {"error": "not found"})
 

@@ -6,6 +6,9 @@ import com.weedlaser.bev.domain.model.PiImageResponse
 import com.weedlaser.bev.domain.model.Sim3dStatus
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
@@ -49,7 +52,10 @@ class PiNetworkClient(
      * @param timeoutMs how long to wait for replies
      * @return the Pi's address, or null when nothing answered
      */
-    suspend fun discover(timeoutMs: Int = 3000): PiInfo? = withContext(Dispatchers.IO) {
+    suspend fun discover(timeoutMs: Int = 3000): PiInfo? =
+        discoverUdp(timeoutMs) ?: discoverHttp(timeoutMs)
+
+    private suspend fun discoverUdp(timeoutMs: Int): PiInfo? = withContext(Dispatchers.IO) {
         DatagramSocket().use { socket ->
             socket.broadcast = true
             socket.soTimeout = timeoutMs
@@ -81,6 +87,61 @@ class PiNetworkClient(
             null
         }
     }
+
+    /**
+     * Fallback for routers that drop UDP broadcasts (very common): ask every
+     * address in the phone's own subnet for GET /health on port 8080.
+     */
+    private suspend fun discoverHttp(timeoutMs: Int = 9000): PiInfo? = withContext(Dispatchers.IO) {
+        val prefix = localSubnetPrefix() ?: return@withContext null
+        val probeTimeout = (timeoutMs / 4).coerceIn(300, 1500)
+        val hosts = (1..254).map { "$prefix.$it" }
+        runCatching {
+            coroutineScope {
+                hosts.map { host ->
+                    async(Dispatchers.IO) { probeHttp(host, probeTimeout) }
+                }.awaitAll().firstNotNullOfOrNull { it }
+            }
+        }.getOrNull()
+    }
+
+    /** One subnet address: is there a mission server on port 8080? */
+    private fun probeHttp(host: String, timeoutMs: Int): PiInfo? = runCatching {
+        java.net.Socket().use { socket ->
+            socket.connect(
+                java.net.InetSocketAddress(host, DEFAULT_MISSION_PORT),
+                timeoutMs,
+            )
+        }
+        val connection = (URL("http://$host:$DEFAULT_MISSION_PORT/health")
+            .openConnection() as java.net.HttpURLConnection)
+        connection.connectTimeout = timeoutMs
+        connection.readTimeout = timeoutMs
+        val body = connection.inputStream.use { stream -> stream.readBytes().decodeToString() }
+        connection.disconnect()
+        if (!"weedlaser".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(body) &&
+            !"mission".toRegex(RegexOption.IGNORE_CASE).containsMatchIn(body)
+        ) {
+            return null
+        }
+        val name = runCatching {
+            (json.parseToJsonElement(body)
+                as kotlinx.serialization.json.JsonObject)["name"]
+                ?.toString()?.removeSurrounding("\"")
+        }.getOrNull() ?: "Rover Pi"
+        PiInfo(name = name, host = host, port = DEFAULT_MISSION_PORT)
+    }.getOrNull()
+
+    /** The phone's own IPv4 subnet prefix, e.g. "192.168.0". */
+    private fun localSubnetPrefix(): String? = runCatching {
+        val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+        val local = interfaces.asSequence()
+            .flatMap { nif -> java.util.Collections.list(nif.inetAddresses).asSequence() }
+            .filter { !it.isLoopbackAddress && it.isSiteLocalAddress && !it.isMulticastAddress }
+            .map { it.hostAddress ?: "" }
+            .first { it.contains('.') && !it.contains(':') }
+        local.substringBeforeLast('.')
+    }.getOrNull()
 
     private fun parseInfo(payload: String): PiInfo? = runCatching {
         val obj = json.parseToJsonElement(payload).let { it as kotlinx.serialization.json.JsonObject }
