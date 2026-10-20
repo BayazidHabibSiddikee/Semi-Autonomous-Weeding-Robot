@@ -356,13 +356,24 @@ prim("cyl", "cam_lens", (CAMPOS[0] + 0.007, CAMPOS[1], DECK + 0.0035), 0.0085, 0
      rot=(0, math.pi / 2, 0))
 prim("cyl", "cam_glass", (CAMPOS[0] + 0.0125, CAMPOS[1], DECK + 0.0035), 0.007, 0.003, None, M_LENS,
      rot=(0, math.pi / 2, 0))
-# -- hull sensors stay on the bumper
-prim("sphere", "tof_dome_front", (HULL_X - 0.012, 0.088, DECK * 0.45), 0.018, mat=M_BLK)
+# -- hull sensors on the bumper
+TOFZ = DECK * 0.45
+prim("cyl", "vl53_post", (HULL_X - 0.014, 0.088, TOFZ + 0.012), 0.004, 0.018, None, M_SIL,
+     rot=(0, math.pi / 2, 0))
+# VL53L0X ToF breakout: thin board facing forward, black sensor aperture, gold pads
+prim("cube", "vl53_pcb", (HULL_X - 0.004, 0.088, TOFZ + 0.012), 0.0022, 0.026, 0.014, M_IMUPCB)
+prim("cube", "vl53_aperture", (HULL_X - 0.002, 0.088, TOFZ + 0.016), 0.004, 0.006, 0.005, M_BLK)
+prim("cube", "vl53_pads", (HULL_X - 0.004, 0.088, TOFZ + 0.006), 0.002, 0.016, 0.002, M_GLD)
+# upper-front ultrasonic pair: bigger casings, visible transducers
 for sgn in (-1, 1):
-    prim("cube", f"ultra_{'L' if sgn > 0 else 'R'}",
-         (HULL_X - 0.025, sgn * HULL_Y * 0.93, DECK * 0.45), 0.026, 0.020, 0.014, M_IMUPCB)
-    prim("cyl", f"ultra_xducer_{'L' if sgn > 0 else 'R'}",
-         (HULL_X - 0.009, sgn * HULL_Y * 0.93, DECK * 0.45), 0.0075, 0.004, None, M_SIL,
+    side = 'L' if sgn > 0 else 'R'
+    prim("cube", f"ultra_{side}",
+         (HULL_X - 0.028, sgn * HULL_Y * 0.92, TOFZ), 0.030, 0.024, 0.016, M_IMUPCB)
+    prim("cyl", f"ultra_xducer_{side}",
+         (HULL_X - 0.006, sgn * HULL_Y * 0.92, TOFZ), 0.009, 0.006, None, M_SIL,
+         rot=(0, math.pi / 2, 0))
+    prim("cyl", f"ultra_ring_{side}",
+         (HULL_X - 0.0035, sgn * HULL_Y * 0.92, TOFZ), 0.011, 0.002, None, M_BLK,
          rot=(0, math.pi / 2, 0))
 
 # ------------------------------------------------------------- 3-DOF arm
