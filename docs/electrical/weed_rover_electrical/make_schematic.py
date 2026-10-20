@@ -70,8 +70,10 @@ COMPONENTS = [
         ("ESTOP_N",   "in", "l"), ("PWM_L", "out", "l"),
         ("PWM_R",     "out", "l"), ("DIR_L", "out", "l"),
         ("DIR_R",     "out", "l"), ("LASER_EN", "out", "l"),
+        ("PWM_YAW",   "out", "l"), ("PWM_SH", "out", "l"),
+        ("PWM_EL",    "out", "l"),
         ("BAT_ADC",   "x", "r"), ("MTR_ERR", "x", "r"),
-    ], descr="Real-time wheel loop + safety gating"),
+    ], descr="Real-time wheel loop + safety gating + 3-DOF arm PWM"),
 
     dict(ref="U5", val="MD13S left", pos=(330, 58), w=34, pins=[
         ("+12VL", "x", "l"), ("GND", "p", "l"),
@@ -135,6 +137,23 @@ COMPONENTS = [
     dict(ref="SW3", val="Emergency stop", pos=(78, 280), w=30, pins=[
         ("3V3", "p", "l"), ("ESTOP_N", "out", "r"), ("GND", "p", "r"),
     ], descr="Breaks LASER_EN and motor chain"),
+
+    dict(ref="U15", val="UBEC 6V 10A", pos=(160, 282), w=32, pins=[
+        ("+12VL", "x", "l"), ("GND", "p", "l"),
+        ("+6VS",  "P", "r"), ("GND", "p", "r"),
+    ], descr="Dedicated servo rail - keeps browns off the Pi"),
+
+    dict(ref="U12", val="Servo yaw MG996R", pos=(238, 282), w=30, pins=[
+        ("PWM_YAW", "in", "l"), ("+6VS", "x", "l"), ("GND", "p", "l"),
+    ], descr="Turret yaw at the arm base"),
+
+    dict(ref="U13", val="Servo shoulder DS3218", pos=(300, 282), w=30, pins=[
+        ("PWM_SH", "in", "l"), ("+6VS", "x", "l"), ("GND", "p", "l"),
+    ], descr="Shoulder pitch, 20 kg-cm"),
+
+    dict(ref="U14", val="Servo elbow DS3218", pos=(362, 282), w=30, pins=[
+        ("PWM_EL", "in", "l"), ("+6VS", "x", "l"), ("GND", "p", "l"),
+    ], descr="Elbow pitch + laser head at the tip"),
 ]
 
 def geom(c):

@@ -26,6 +26,10 @@ Files:
 - **Sensors**: 2× HC-SR04 (U8/U9, TRIG/ECHO) + 2× VL53L0X (U10/U11, I2C 0x29/0x2A
   with XSHUT pins) + INA219, all on the Pi's I2C bus. Buzzer (LS1), power LED
   (D2), and a latching emergency stop (SW3) that breaks the drive chain.
+- **3-DOF laser arm** (`docs/mechanical/laser_arm`): three servos — yaw
+  MG996R (U12), shoulder+elbow DS3218 (U13/U14) — driven by the ESP32 on
+  `PWM_YAW` / `PWM_SH` / `PWM_EL`, powered from a dedicated 6 V UBEC (U15)
+  on the `+6VS` rail so stall spikes never brown out the Pi.
 
 ## Regenerating headlessly
 
