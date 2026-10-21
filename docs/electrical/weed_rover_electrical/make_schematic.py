@@ -356,6 +356,7 @@ for net, stubs in ordered:
                 failed.append(net)
                 break
         tree.update(path)
+        claim(path, nid)          # block these cells for every other net
         segs_cells.extend(path)
         todo.remove(best)
         # did the path step over another stub of the same net? merge it
