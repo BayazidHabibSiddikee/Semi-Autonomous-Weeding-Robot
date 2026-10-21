@@ -39,6 +39,7 @@ try:
         column_projection,
         detect_corners,
         merge_segments,
+        regularize,
         segments_above,
         vegetation_mask,
     )
@@ -158,6 +159,11 @@ def analyze_bev(bev: np.ndarray, expected_rows: Optional[int] = None) -> Dict[st
     threshold = float(projection.max()) * 0.25 if projection.max() > 0 else 0.0
     segments = segments_above(projection, threshold)
     merged = merge_segments(segments, bev.shape[1], expected_rows)
+    # Trust the operator: when the app expects N rows and the projection
+    # merged some rows together (sun-blurred bands, slight camera angle),
+    # regularize snaps the detection onto a near-matching grid instead of
+    # handing back a fraction of the field.
+    merged = regularize(merged, bev.shape[1], expected_rows)
     corners = detect_corners(veg)
     vegetation_ratio = float(np.count_nonzero(veg)) / float(bev.shape[0] * bev.shape[1])
 

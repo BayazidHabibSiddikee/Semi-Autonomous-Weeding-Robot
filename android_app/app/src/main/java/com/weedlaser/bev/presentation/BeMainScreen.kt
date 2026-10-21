@@ -352,7 +352,12 @@ fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
                                     Toast.makeText(context, Strings.jsonCopied(lang), Toast.LENGTH_SHORT).show()
                                 }
                             )
-                        is BevOutcome.Error -> BeErrorPanel(o.message, viewModel::reset)
+                        is BevOutcome.Error -> BeErrorPanel(
+                            o.message,
+                            viewModel.pendingUpload != null,
+                            viewModel::reset,
+                            viewModel::sendPendingToPi,
+                        )
                         BevOutcome.Idle -> BeIdleHint()
                     }
 

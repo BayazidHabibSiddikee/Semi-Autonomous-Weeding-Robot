@@ -29,6 +29,7 @@ import kotlinx.serialization.json.Json
  */
 sealed interface BevOutcome {
     data class Success(
+
         val bevPath: String,
         val calibration: HomographyCalibration,
         val rows: RowDetectionResult,
@@ -38,6 +39,13 @@ sealed interface BevOutcome {
     data class Error(val message: String) : BevOutcome
     object Idle : BevOutcome
 }
+
+/** Photo request kept around when on-device generation fails. */
+data class PendingUpload(
+    val imagePath: String,
+    val corners: FieldCorners,
+    val field: Field,
+)
 
 /**
  * ViewModel driving the full pipeline:
@@ -81,6 +89,13 @@ class BeViewModel(
     var isUploading by mutableStateOf(false)
         private set
 
+    /**
+     * Photo request kept when on-device generation fails, so the user can
+     * still push it to the Pi (which runs its own analyser).
+     */
+    var pendingUpload by mutableStateOf<PendingUpload?>(null)
+        private set
+
     private var statusJob: Job? = null
 
     /**
@@ -97,6 +112,9 @@ class BeViewModel(
             isProcessing = true
             outcome = BevOutcome.Idle
             var step = "image/BGV setup"
+            // Keep the request even if local generation fails: the Pi can
+            // analyse the photo on its own, so the user can always send.
+            pendingUpload = PendingUpload(imagePath, corners, field)
             try {
                 this@BeViewModel.field = field
                 saveField(field)
@@ -127,10 +145,12 @@ class BeViewModel(
                     rows = rows,
                     mission = mission,
                 )
+                pendingUpload = null
             } catch (e: Exception) {
                 android.util.Log.e("BeViewModel", "generate failed at [$step]", e)
                 outcome = BevOutcome.Error(
-                    "$step failed: ${e.message ?: e.javaClass.simpleName}"
+                    "$step failed: ${e.message ?: e.javaClass.simpleName} " +
+                        "(field ${field.widthM}×${field.lengthM} m, ${field.totalRows} rows)"
                 )
             } finally {
                 isProcessing = false
@@ -141,6 +161,16 @@ class BeViewModel(
     /** Serialize the mission to a JSON string (for debugging / sending). */
     fun missionToJson(mission: Mission): String =
         json.encodeToString(Mission.serializer(), mission)
+
+    /**
+     * Send the kept-around photo even when on-device generation failed:
+     * the Pi has its own analyser and is the authority for what the rover
+     * should drive.
+     */
+    fun sendPendingToPi() {
+        val pending = pendingUpload ?: return
+        sendImageToPi(pending.imagePath, pending.corners, pending.field)
+    }
 
     /** Explicit send step — call after generation. */
     fun sendToPi(mission: Mission, ip: String, port: Int = 8080) {
@@ -215,6 +245,7 @@ class BeViewModel(
                     piInfo = PiNetworkClient.PiInfo(piInfo?.name ?: "rover-pi", target, piInfo?.port ?: 8080)
                     startStatusPolling(piInfo!!.baseUrl)
                     startSimStatusPolling(piInfo!!.baseUrl)
+                    pendingUpload = null
                 } else {
                     outcome = BevOutcome.Error(response.error ?: "The Pi rejected the image")
                 }

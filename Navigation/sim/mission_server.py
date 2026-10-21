@@ -253,6 +253,13 @@ class MissionServer:
         headland_m = float(fld.get("headlandMarginM", 0.2) or 0.2)
         max_weeds = int(float(fld.get("maxWeeds", 60.0) or 60.0))
         renderer = str(fld.get("renderer") or "freecad")
+        self.log(f"[IMAGE] field {width_m:g} x {length_m:g} m, rows={expected}")
+        if width_m < 0.5 or length_m < 0.5 or width_m > 60 or length_m > 60:
+            raise ValueError(
+                f"field size looks wrong: width {width_m:g} x length {length_m:g} m - "
+                "sizes are in METRES (e.g. width 6, length 8). Fix the field "
+                "width / length sliders in the app and try again."
+            )
 
         image = decode_image(image_b64)
         stem = f"field_{int(time.time() * 1000)}"

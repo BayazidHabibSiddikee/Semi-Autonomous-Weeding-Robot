@@ -348,7 +348,12 @@ private fun BevPathVisualizer(
 }
 
 @Composable
-internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
+internal fun BeErrorPanel(
+    message: String,
+    canSendAnyway: Boolean = false,
+    onRetry: () -> Unit,
+    onSendAnyway: (() -> Unit)? = null,
+) {
     val lang = LocalAppLanguage.current
     Card(
         colors = CardDefaults.cardColors(
@@ -360,7 +365,17 @@ internal fun BeErrorPanel(message: String, onRetry: () -> Unit) {
             val errPrefix = if (lang == AppLanguage.BN) "ত্রুটি: " else "Error: "
             Text("$errPrefix$message", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onRetry) { Text(Strings.retry(lang)) }
+            Row {
+                TextButton(onClick = onRetry) { Text(Strings.retry(lang)) }
+                if (canSendAnyway && onSendAnyway != null) {
+                    TextButton(onClick = onSendAnyway) {
+                        Text(
+                            if (lang == AppLanguage.BN) "রোবটকে পাঠাও"
+                            else "Send to rover anyway",
+                        )
+                    }
+                }
+            }
         }
     }
 }
