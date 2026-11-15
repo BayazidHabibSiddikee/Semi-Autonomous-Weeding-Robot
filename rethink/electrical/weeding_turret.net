@@ -1,0 +1,2831 @@
+(export
+	(version "E")
+	(design
+		(source "/home/sword/Documents/projects/weed-laser-robot/rethink/electrical/weeding_turret_electrical.kicad_sch")
+		(date "2026-11-15T16:20:10")
+		(tool "Eeschema 10.0.7")
+		(sheet
+			(number "1")
+			(name "/")
+			(tstamps "/")
+			(title_block
+				(title "Autonomous Weeding Robot - Complete Turret & Base Circuit")
+				(company "RUET Mechatronics / Autonomous Weeding Project")
+				(rev "2.0")
+				(date "2026-11-15")
+				(source "weeding_turret_electrical.kicad_sch")
+				(comment
+					(number "1")
+					(value "Power: 3S 12V LiPo -> L298N 5V (Logic) + LM7805 (Servos) + Buck 5V (Isolated Arc)")
+				)
+				(comment
+					(number "2")
+					(value "Actuation: L298N 4WD Motors, 180-deg Turret Servo, MG996R Gas Valve Servo")
+				)
+				(comment
+					(number "3")
+					(value "Safety: Optical Relay Isolation for 10kV Arc Module, HC-SR04 Obstacle Braking")
+				)
+				(comment
+					(number "4")
+					(value "")
+				)
+				(comment
+					(number "5")
+					(value "")
+				)
+				(comment
+					(number "6")
+					(value "")
+				)
+				(comment
+					(number "7")
+					(value "")
+				)
+				(comment
+					(number "8")
+					(value "")
+				)
+				(comment
+					(number "9")
+					(value "")
+				)
+			)
+		)
+	)
+	(components
+		(comp
+			(ref "BT1")
+			(value "3S LiPo 11.1V-12.6V")
+			(description "Main Battery Pack 3S LiPo")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Main Battery Pack 3S LiPo")
+			)
+			(libsource
+				(lib "")
+				(part "BT1")
+				(description "Main Battery Pack 3S LiPo")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "fd662f07-fb78-41f2-a2ac-251f48f53e54")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "C1")
+			(value "0.1uF 50V Ceramic")
+			(description "Brush Noise Suppression Capacitor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Brush Noise Suppression Capacitor")
+			)
+			(libsource
+				(lib "")
+				(part "C1")
+				(description "Brush Noise Suppression Capacitor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "b05077b7-dbaf-498f-a232-fb7864738d9c")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "C2")
+			(value "10uF 25V Electrolytic")
+			(description "LM7805 Input Filter Capacitor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "LM7805 Input Filter Capacitor")
+			)
+			(libsource
+				(lib "")
+				(part "C2")
+				(description "LM7805 Input Filter Capacitor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "4ae9cd45-af6d-4d33-8609-8cd5607f4224")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "C3")
+			(value "100uF 16V Electrolytic")
+			(description "LM7805 Output Buffer Capacitor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "LM7805 Output Buffer Capacitor")
+			)
+			(libsource
+				(lib "")
+				(part "C3")
+				(description "LM7805 Output Buffer Capacitor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "99ba4e73-4f58-4b85-8ed5-ade34c4a52f4")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "C4")
+			(value "0.1uF 50V Ceramic")
+			(description "High-Frequency Decoupling Capacitor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "High-Frequency Decoupling Capacitor")
+			)
+			(libsource
+				(lib "")
+				(part "C4")
+				(description "High-Frequency Decoupling Capacitor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "b93f150b-a0f1-49f7-8dd9-4d8b525b00ad")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "C5")
+			(value "1000uF 25V Low-ESR")
+			(description "ESP32 VIN Voltage Stabilizer Capacitor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "ESP32 VIN Voltage Stabilizer Capacitor")
+			)
+			(libsource
+				(lib "")
+				(part "C5")
+				(description "ESP32 VIN Voltage Stabilizer Capacitor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "4869fcaa-87c5-47ef-9b03-da9a5c202662")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "D1")
+			(value "1N4007 Arc Snubber")
+			(description "Flyback Diode across Arc Module Input")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Flyback Diode across Arc Module Input")
+			)
+			(libsource
+				(lib "")
+				(part "D1")
+				(description "Flyback Diode across Arc Module Input")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "78608992-8ff4-41c5-89dc-825ad856bffe")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "D2")
+			(value "1N4007 Motor Diode")
+			(description "Flyback Diode across Grinder Motor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Flyback Diode across Grinder Motor")
+			)
+			(libsource
+				(lib "")
+				(part "D2")
+				(description "Flyback Diode across Grinder Motor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "06c43836-61d1-4fc1-b0e1-95ab14250ecf")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "F1")
+			(value "15A Blade Fuse")
+			(description "Overcurrent Protection Fuse")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Overcurrent Protection Fuse")
+			)
+			(libsource
+				(lib "")
+				(part "F1")
+				(description "Overcurrent Protection Fuse")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "4a67defd-8baa-4c57-93d3-9464eea9f695")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "M1_M2")
+			(value "Left 2x TT Motors")
+			(description "Left Side Drive Motors (Wired Parallel)")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Left Side Drive Motors (Wired Parallel)")
+			)
+			(libsource
+				(lib "")
+				(part "M1_M2")
+				(description "Left Side Drive Motors (Wired Parallel)")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "15253211-aca7-488f-a847-396397435c8a")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "M3_M4")
+			(value "Right 2x TT Motors")
+			(description "Right Side Drive Motors (Wired Parallel)")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Right Side Drive Motors (Wired Parallel)")
+			)
+			(libsource
+				(lib "")
+				(part "M3_M4")
+				(description "Right Side Drive Motors (Wired Parallel)")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "efd62f03-02c0-4fad-b8e1-dc85d156a2f6")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "M5")
+			(value "Mini Grinding Motor (12V)")
+			(description "High-RPM Mechanical Weed Cutter Motor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "High-RPM Mechanical Weed Cutter Motor")
+			)
+			(libsource
+				(lib "")
+				(part "M5")
+				(description "High-RPM Mechanical Weed Cutter Motor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "873ce78b-6f5a-4bcd-b923-c7d92bc392ff")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "R1_R2")
+			(value "1k / 2k Divider")
+			(description "Resistor Divider: 5V Echo to 3.3V ESP32 GPIO")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Resistor Divider: 5V Echo to 3.3V ESP32 GPIO")
+			)
+			(libsource
+				(lib "")
+				(part "R1_R2")
+				(description "Resistor Divider: 5V Echo to 3.3V ESP32 GPIO")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "9939c35e-4a76-4818-ae4d-d1a6ac02aa93")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "SW1")
+			(value "Main Toggle Switch")
+			(description "System Main Power Switch")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "System Main Power Switch")
+			)
+			(libsource
+				(lib "")
+				(part "SW1")
+				(description "System Main Power Switch")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "ea4f60e0-f9fb-4bb3-8c2d-da7e5ea5eda2")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U1")
+			(value "ESP32 NodeMCU DevKit")
+			(description "ESP32 Microcontroller 38-pin DevKit")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "ESP32 Microcontroller 38-pin DevKit")
+			)
+			(libsource
+				(lib "")
+				(part "U1")
+				(description "ESP32 Microcontroller 38-pin DevKit")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "5cb7ff14-84d2-44f1-9aa0-d73860a85a06")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "14")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U2")
+			(value "L298N Dual H-Bridge")
+			(description "L298N Motor Driver with 5V Logic Out")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "L298N Motor Driver with 5V Logic Out")
+			)
+			(libsource
+				(lib "")
+				(part "U2")
+				(description "L298N Motor Driver with 5V Logic Out")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "f94866d1-ab23-4939-b6f2-cdccd9e4fb02")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "13")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U3")
+			(value "Isolated 5V Buck (0.5A)")
+			(description "Dedicated Buck Converter for Arc Module")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Dedicated Buck Converter for Arc Module")
+			)
+			(libsource
+				(lib "")
+				(part "U3")
+				(description "Dedicated Buck Converter for Arc Module")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "fd289ed0-84e0-41c4-af83-1b685b568b45")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U4")
+			(value "2-Ch Optocoupler Relay")
+			(description "2-Channel 5V Relay with Opto-Isolation (JD-VCC)")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "2-Channel 5V Relay with Opto-Isolation (JD-VCC)")
+			)
+			(libsource
+				(lib "")
+				(part "U4")
+				(description "2-Channel 5V Relay with Opto-Isolation (JD-VCC)")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "18729be7-e9bb-4b5b-adbf-2c83f92c768e")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U5")
+			(value "High-Voltage Arc Ignitor")
+			(description "10kV Electric Arc Pulse Ignitor Module")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "10kV Electric Arc Pulse Ignitor Module")
+			)
+			(libsource
+				(lib "")
+				(part "U5")
+				(description "10kV Electric Arc Pulse Ignitor Module")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "7c62bbc3-a1f5-49a1-b65a-4ca66aa8d30d")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U6")
+			(value "LM7805CV + Heatsink")
+			(description "5V 1.5A Linear Regulator for Servos")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "5V 1.5A Linear Regulator for Servos")
+			)
+			(libsource
+				(lib "")
+				(part "U6")
+				(description "5V 1.5A Linear Regulator for Servos")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "922f7214-33ba-4568-bfae-b91a522e18a8")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U7")
+			(value "Servo 180deg (Turret)")
+			(description "180-Degree Top Turret Rotation Servo")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "180-Degree Top Turret Rotation Servo")
+			)
+			(libsource
+				(lib "")
+				(part "U7")
+				(description "180-Degree Top Turret Rotation Servo")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "07360845-bbd2-4835-8875-6ca1145d0067")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U8")
+			(value "Servo MG996R (Gas)")
+			(description "Metal Gear Servo for Torch Gas Valve")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Metal Gear Servo for Torch Gas Valve")
+			)
+			(libsource
+				(lib "")
+				(part "U8")
+				(description "Metal Gear Servo for Torch Gas Valve")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "ab7f57cf-2d56-43e9-94ee-784a5e92cd45")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U9")
+			(value "HC-SR04 Ultrasonic")
+			(description "Ultrasonic Distance Ranging Sensor")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Ultrasonic Distance Ranging Sensor")
+			)
+			(libsource
+				(lib "")
+				(part "U9")
+				(description "Ultrasonic Distance Ranging Sensor")
+			)
+			(property
+				(name "Sheetname")
+				(value "Root")
+			)
+			(property
+				(name "Sheetfile")
+				(value "electrical/weeding_turret_electrical.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "e91eb2e4-fcdd-474b-b43f-d90f5ff2f4b5")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+					)
+				)
+			)
+		)
+	)
+	(groups)
+	(variants)
+	(libparts
+		(libpart
+			(lib "")
+			(part "BT1")
+			(description "Main Battery Pack 3S LiPo")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "3S LiPo 11.1V-12.6V")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Main Battery Pack 3S LiPo")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_BAT")
+					(type "power_out")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_out")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "C1")
+			(description "Brush Noise Suppression Capacitor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "0.1uF 50V Ceramic")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Brush Noise Suppression Capacitor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "GRINDER_PWR+")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "C2")
+			(description "LM7805 Input Filter Capacitor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "10uF 25V Electrolytic")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "LM7805 Input Filter Capacitor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_MAIN")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "C3")
+			(description "LM7805 Output Buffer Capacitor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "100uF 16V Electrolytic")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "LM7805 Output Buffer Capacitor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_SERVO")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "C4")
+			(description "High-Frequency Decoupling Capacitor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "0.1uF 50V Ceramic")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "High-Frequency Decoupling Capacitor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_SERVO")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "C5")
+			(description "ESP32 VIN Voltage Stabilizer Capacitor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "1000uF 25V Low-ESR")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "ESP32 VIN Voltage Stabilizer Capacitor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_LOGIC")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "D1")
+			(description "Flyback Diode across Arc Module Input")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "1N4007 Arc Snubber")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Flyback Diode across Arc Module Input")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "ARC_PWR+")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND_BUCK")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "D2")
+			(description "Flyback Diode across Grinder Motor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "1N4007 Motor Diode")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Flyback Diode across Grinder Motor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "GRINDER_PWR+")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "F1")
+			(description "Overcurrent Protection Fuse")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "15A Blade Fuse")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Overcurrent Protection Fuse")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_SW")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "+12V_MAIN")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "M1_M2")
+			(description "Left Side Drive Motors (Wired Parallel)")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Left 2x TT Motors")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Left Side Drive Motors (Wired Parallel)")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "OUT1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "OUT2")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "M3_M4")
+			(description "Right Side Drive Motors (Wired Parallel)")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Right 2x TT Motors")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Right Side Drive Motors (Wired Parallel)")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "OUT3")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "OUT4")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "M5")
+			(description "High-RPM Mechanical Weed Cutter Motor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Mini Grinding Motor (12V)")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "High-RPM Mechanical Weed Cutter Motor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "GRINDER_PWR+")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "R1_R2")
+			(description "Resistor Divider: 5V Echo to 3.3V ESP32 GPIO")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "1k / 2k Divider")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Resistor Divider: 5V Echo to 3.3V ESP32 GPIO")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "ECHO")
+					(type "input")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "ECHO_3V3")
+					(type "output")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "SW1")
+			(description "System Main Power Switch")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Main Toggle Switch")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "System Main Power Switch")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_BAT")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "+12V_SW")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U1")
+			(description "ESP32 Microcontroller 38-pin DevKit")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "ESP32 NodeMCU DevKit")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "ESP32 Microcontroller 38-pin DevKit")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_LOGIC")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "TRIG")
+					(type "output")
+				)
+				(pin
+					(num "4")
+					(name "ECHO_3V3")
+					(type "input")
+				)
+				(pin
+					(num "5")
+					(name "PWM_CYL")
+					(type "output")
+				)
+				(pin
+					(num "6")
+					(name "PWM_GAS")
+					(type "output")
+				)
+				(pin
+					(num "7")
+					(name "RELAY_ARC")
+					(type "output")
+				)
+				(pin
+					(num "8")
+					(name "RELAY_GRD")
+					(type "output")
+				)
+				(pin
+					(num "9")
+					(name "ENA")
+					(type "output")
+				)
+				(pin
+					(num "10")
+					(name "IN1")
+					(type "output")
+				)
+				(pin
+					(num "11")
+					(name "IN2")
+					(type "output")
+				)
+				(pin
+					(num "12")
+					(name "ENB")
+					(type "output")
+				)
+				(pin
+					(num "13")
+					(name "IN3")
+					(type "output")
+				)
+				(pin
+					(num "14")
+					(name "IN4")
+					(type "output")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U2")
+			(description "L298N Motor Driver with 5V Logic Out")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "L298N Dual H-Bridge")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "L298N Motor Driver with 5V Logic Out")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_MAIN")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "ENA")
+					(type "input")
+				)
+				(pin
+					(num "4")
+					(name "IN1")
+					(type "input")
+				)
+				(pin
+					(num "5")
+					(name "IN2")
+					(type "input")
+				)
+				(pin
+					(num "6")
+					(name "ENB")
+					(type "input")
+				)
+				(pin
+					(num "7")
+					(name "IN3")
+					(type "input")
+				)
+				(pin
+					(num "8")
+					(name "IN4")
+					(type "input")
+				)
+				(pin
+					(num "9")
+					(name "+5V_LOGIC")
+					(type "power_out")
+				)
+				(pin
+					(num "10")
+					(name "OUT1")
+					(type "output")
+				)
+				(pin
+					(num "11")
+					(name "OUT2")
+					(type "output")
+				)
+				(pin
+					(num "12")
+					(name "OUT3")
+					(type "output")
+				)
+				(pin
+					(num "13")
+					(name "OUT4")
+					(type "output")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U3")
+			(description "Dedicated Buck Converter for Arc Module")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Isolated 5V Buck (0.5A)")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Dedicated Buck Converter for Arc Module")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_MAIN")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "+5V_BUCK")
+					(type "power_out")
+				)
+				(pin
+					(num "4")
+					(name "GND_BUCK")
+					(type "power_out")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U4")
+			(description "2-Channel 5V Relay with Opto-Isolation (JD-VCC)")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "2-Ch Optocoupler Relay")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "2-Channel 5V Relay with Opto-Isolation (JD-VCC)")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_LOGIC")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "RELAY_ARC")
+					(type "input")
+				)
+				(pin
+					(num "4")
+					(name "RELAY_GRD")
+					(type "input")
+				)
+				(pin
+					(num "5")
+					(name "+5V_BUCK")
+					(type "power_in")
+				)
+				(pin
+					(num "6")
+					(name "GND_BUCK")
+					(type "power_in")
+				)
+				(pin
+					(num "7")
+					(name "+5V_BUCK")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "ARC_PWR+")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "+12V_MAIN")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "GRINDER_PWR+")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U5")
+			(description "10kV Electric Arc Pulse Ignitor Module")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "High-Voltage Arc Ignitor")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "10kV Electric Arc Pulse Ignitor Module")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "ARC_PWR+")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND_BUCK")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "HV_SPARK+")
+					(type "output")
+				)
+				(pin
+					(num "4")
+					(name "HV_SPARK-")
+					(type "output")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U6")
+			(description "5V 1.5A Linear Regulator for Servos")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LM7805CV + Heatsink")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "5V 1.5A Linear Regulator for Servos")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+12V_MAIN")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "+5V_SERVO")
+					(type "power_out")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U7")
+			(description "180-Degree Top Turret Rotation Servo")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Servo 180deg (Turret)")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "180-Degree Top Turret Rotation Servo")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "PWM_CYL")
+					(type "input")
+				)
+				(pin
+					(num "2")
+					(name "+5V_SERVO")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "GND")
+					(type "power_in")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U8")
+			(description "Metal Gear Servo for Torch Gas Valve")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "Servo MG996R (Gas)")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Metal Gear Servo for Torch Gas Valve")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "PWM_GAS")
+					(type "input")
+				)
+				(pin
+					(num "2")
+					(name "+5V_SERVO")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "GND")
+					(type "power_in")
+				)
+			)
+		)
+		(libpart
+			(lib "")
+			(part "U9")
+			(description "Ultrasonic Distance Ranging Sensor")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "HC-SR04 Ultrasonic")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description") "Ultrasonic Distance Ranging Sensor")
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "+5V_LOGIC")
+					(type "power_in")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "power_in")
+				)
+				(pin
+					(num "3")
+					(name "TRIG")
+					(type "input")
+				)
+				(pin
+					(num "4")
+					(name "ECHO")
+					(type "output")
+				)
+			)
+		)
+	)
+	(libraries)
+	(nets
+		(net
+			(code "1")
+			(name "/+5V_BUCK")
+			(class "Default")
+			(node
+				(ref "U3")
+				(pin "3")
+				(pinfunction "+5V_BUCK_3")
+				(pintype "power_out")
+			)
+			(node
+				(ref "U4")
+				(pin "5")
+				(pinfunction "+5V_BUCK_5")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U4")
+				(pin "7")
+				(pinfunction "+5V_BUCK_7")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "2")
+			(name "/+5V_LOGIC")
+			(class "Default")
+			(node
+				(ref "C5")
+				(pin "1")
+				(pinfunction "+5V_LOGIC_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U1")
+				(pin "1")
+				(pinfunction "+5V_LOGIC_1")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U2")
+				(pin "9")
+				(pinfunction "+5V_LOGIC_9")
+				(pintype "power_out")
+			)
+			(node
+				(ref "U4")
+				(pin "1")
+				(pinfunction "+5V_LOGIC_1")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U9")
+				(pin "1")
+				(pinfunction "+5V_LOGIC_1")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "3")
+			(name "/+5V_SERVO")
+			(class "Default")
+			(node
+				(ref "C3")
+				(pin "1")
+				(pinfunction "+5V_SERVO_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "C4")
+				(pin "1")
+				(pinfunction "+5V_SERVO_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U6")
+				(pin "3")
+				(pinfunction "+5V_SERVO_3")
+				(pintype "power_out")
+			)
+			(node
+				(ref "U7")
+				(pin "2")
+				(pinfunction "+5V_SERVO_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U8")
+				(pin "2")
+				(pinfunction "+5V_SERVO_2")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "4")
+			(name "/+12V_BAT")
+			(class "Default")
+			(node
+				(ref "BT1")
+				(pin "1")
+				(pinfunction "+12V_BAT_1")
+				(pintype "power_out")
+			)
+			(node
+				(ref "SW1")
+				(pin "1")
+				(pinfunction "+12V_BAT_1")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "5")
+			(name "/+12V_MAIN")
+			(class "Default")
+			(node
+				(ref "C2")
+				(pin "1")
+				(pinfunction "+12V_MAIN_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "F1")
+				(pin "2")
+				(pinfunction "+12V_MAIN_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U2")
+				(pin "1")
+				(pinfunction "+12V_MAIN_1")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U3")
+				(pin "1")
+				(pinfunction "+12V_MAIN_1")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U4")
+				(pin "9")
+				(pinfunction "+12V_MAIN_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "U6")
+				(pin "1")
+				(pinfunction "+12V_MAIN_1")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "6")
+			(name "/+12V_SW")
+			(class "Default")
+			(node
+				(ref "F1")
+				(pin "1")
+				(pinfunction "+12V_SW_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "SW1")
+				(pin "2")
+				(pinfunction "+12V_SW_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "7")
+			(name "/ARC_PWR+")
+			(class "Default")
+			(node
+				(ref "D1")
+				(pin "1")
+				(pinfunction "ARC_PWR+_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U4")
+				(pin "8")
+				(pinfunction "ARC_PWR+_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "U5")
+				(pin "1")
+				(pinfunction "ARC_PWR+_1")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "8")
+			(name "/ECHO")
+			(class "Default")
+			(node
+				(ref "R1_R2")
+				(pin "1")
+				(pinfunction "ECHO_1")
+				(pintype "input")
+			)
+			(node
+				(ref "U9")
+				(pin "4")
+				(pinfunction "ECHO_4")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "9")
+			(name "/ECHO_3V3")
+			(class "Default")
+			(node
+				(ref "R1_R2")
+				(pin "3")
+				(pinfunction "ECHO_3V3_3")
+				(pintype "output")
+			)
+			(node
+				(ref "U1")
+				(pin "4")
+				(pinfunction "ECHO_3V3_4")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "10")
+			(name "/ENA")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "9")
+				(pinfunction "ENA_9")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "3")
+				(pinfunction "ENA_3")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "11")
+			(name "/ENB")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "12")
+				(pinfunction "ENB_12")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "6")
+				(pinfunction "ENB_6")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "12")
+			(name "/GND")
+			(class "Default")
+			(node
+				(ref "BT1")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_out")
+			)
+			(node
+				(ref "C1")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "C2")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "C3")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "C4")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "C5")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "D2")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "M5")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "R1_R2")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U1")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U2")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U3")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U4")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U6")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U7")
+				(pin "3")
+				(pinfunction "GND_3")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U8")
+				(pin "3")
+				(pinfunction "GND_3")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U9")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "13")
+			(name "/GND_BUCK")
+			(class "Default")
+			(node
+				(ref "D1")
+				(pin "2")
+				(pinfunction "GND_BUCK_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U3")
+				(pin "4")
+				(pinfunction "GND_BUCK_4")
+				(pintype "power_out")
+			)
+			(node
+				(ref "U4")
+				(pin "6")
+				(pinfunction "GND_BUCK_6")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U5")
+				(pin "2")
+				(pinfunction "GND_BUCK_2")
+				(pintype "power_in")
+			)
+		)
+		(net
+			(code "14")
+			(name "/GRINDER_PWR+")
+			(class "Default")
+			(node
+				(ref "C1")
+				(pin "1")
+				(pinfunction "GRINDER_PWR+_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "D2")
+				(pin "1")
+				(pinfunction "GRINDER_PWR+_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "M5")
+				(pin "1")
+				(pinfunction "GRINDER_PWR+_1")
+				(pintype "power_in")
+			)
+			(node
+				(ref "U4")
+				(pin "10")
+				(pinfunction "GRINDER_PWR+_10")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "15")
+			(name "/HV_SPARK+")
+			(class "Default")
+			(node
+				(ref "U5")
+				(pin "3")
+				(pinfunction "HV_SPARK+_3")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "16")
+			(name "/HV_SPARK-")
+			(class "Default")
+			(node
+				(ref "U5")
+				(pin "4")
+				(pinfunction "HV_SPARK-_4")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "17")
+			(name "/IN1")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "10")
+				(pinfunction "IN1_10")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "4")
+				(pinfunction "IN1_4")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "18")
+			(name "/IN2")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "11")
+				(pinfunction "IN2_11")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "5")
+				(pinfunction "IN2_5")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "19")
+			(name "/IN3")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "13")
+				(pinfunction "IN3_13")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "7")
+				(pinfunction "IN3_7")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "20")
+			(name "/IN4")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "14")
+				(pinfunction "IN4_14")
+				(pintype "output")
+			)
+			(node
+				(ref "U2")
+				(pin "8")
+				(pinfunction "IN4_8")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "21")
+			(name "/OUT1")
+			(class "Default")
+			(node
+				(ref "M1_M2")
+				(pin "1")
+				(pinfunction "OUT1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U2")
+				(pin "10")
+				(pinfunction "OUT1_10")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "22")
+			(name "/OUT2")
+			(class "Default")
+			(node
+				(ref "M1_M2")
+				(pin "2")
+				(pinfunction "OUT2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U2")
+				(pin "11")
+				(pinfunction "OUT2_11")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "23")
+			(name "/OUT3")
+			(class "Default")
+			(node
+				(ref "M3_M4")
+				(pin "1")
+				(pinfunction "OUT3_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U2")
+				(pin "12")
+				(pinfunction "OUT3_12")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "24")
+			(name "/OUT4")
+			(class "Default")
+			(node
+				(ref "M3_M4")
+				(pin "2")
+				(pinfunction "OUT4_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U2")
+				(pin "13")
+				(pinfunction "OUT4_13")
+				(pintype "output")
+			)
+		)
+		(net
+			(code "25")
+			(name "/PWM_CYL")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "5")
+				(pinfunction "PWM_CYL_5")
+				(pintype "output")
+			)
+			(node
+				(ref "U7")
+				(pin "1")
+				(pinfunction "PWM_CYL_1")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "26")
+			(name "/PWM_GAS")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "6")
+				(pinfunction "PWM_GAS_6")
+				(pintype "output")
+			)
+			(node
+				(ref "U8")
+				(pin "1")
+				(pinfunction "PWM_GAS_1")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "27")
+			(name "/RELAY_ARC")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "7")
+				(pinfunction "RELAY_ARC_7")
+				(pintype "output")
+			)
+			(node
+				(ref "U4")
+				(pin "3")
+				(pinfunction "RELAY_ARC_3")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "28")
+			(name "/RELAY_GRD")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "8")
+				(pinfunction "RELAY_GRD_8")
+				(pintype "output")
+			)
+			(node
+				(ref "U4")
+				(pin "4")
+				(pinfunction "RELAY_GRD_4")
+				(pintype "input")
+			)
+		)
+		(net
+			(code "29")
+			(name "/TRIG")
+			(class "Default")
+			(node
+				(ref "U1")
+				(pin "3")
+				(pinfunction "TRIG_3")
+				(pintype "output")
+			)
+			(node
+				(ref "U9")
+				(pin "3")
+				(pinfunction "TRIG_3")
+				(pintype "input")
+			)
+		)
+	)
+)
