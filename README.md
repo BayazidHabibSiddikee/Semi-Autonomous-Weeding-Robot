@@ -10,10 +10,16 @@ A weed-detection and laser-elimination robot. Two generations in one repo:
 
 ## Demo videos
 
-| Video | What it shows |
-|-------|---------------|
+| Video / Demo | What it shows |
+|--------------|---------------|
+| [test_video.mp4](weed_detection_bot/videos/test_video.mp4) | Real-world field camera weed detection test run with YOLOv8 |
 | [rover_weeding_anim.mp4](Navigation/sim/rover_weeding_anim.mp4) | Blender 3D animation of the rover weeding a field |
 | [field_sim_mission.mp4](Navigation/sim/field_sim_mission.mp4) | Full autonomous mission in the Python field simulator: the rover drives the rows, scans with its virtual camera, aims the gimbal and fires the laser at every weed (minimap below shows live position) |
+
+### Weed Detection Field Test
+![Weed Detection Demo](weed_detection_bot/videos/weed_detection_demo.gif)
+
+*Preview from `weed_detection_bot/videos/test_video.mp4` evaluated with YOLOv8 model.*
 
 ![Field simulator mission](Navigation/sim/field_sim_mission_thumb.png)
 
@@ -38,6 +44,7 @@ Navigation/            the rover (current focus)
 └── ROADMAP.md               architecture shift, budget, week plan
 
 Weed_Detection/         detection pipeline + laser control (reused by the rover)
+weed_detection_bot/     autonomous edge AI + cloud retraining weed detection bot (YOLOv8 + Pi 5 + ESP32)
 Project-RIPRA/          original gantry-era project material
 case_study/             supporting case study material
 ```

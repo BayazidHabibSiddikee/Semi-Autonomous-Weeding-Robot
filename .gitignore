@@ -6,3 +6,5 @@ Navigation/sim/run_frames/
 .obsidian/
 *.FCBak
 Navigation/sim/outbox/
+weed_detection_bot/runs/
+weed_detection_bot/videos/*.avi
