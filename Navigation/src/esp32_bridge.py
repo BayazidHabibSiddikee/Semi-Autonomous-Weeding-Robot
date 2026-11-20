@@ -1,63 +1,132 @@
 """
-Serial bridge between Raspberry Pi and ESP32.
-Handles command sending and response parsing.
+Single Shared Thread-Safe Serial Bridge between Raspberry Pi 5 and ESP32.
+Fixes NAV-06 (eliminates dual /dev/ttyUSB0 port opening between ESP32Bridge and
+RoverMotors), HW-06 (command validation), and HW-07 (comm health tracking).
 """
+
+import math
+import threading
 import time
+from dataclasses import dataclass
+
+
+@dataclass
+class Esp32Telemetry:
+    left_ticks: int
+    right_ticks: int
+    left_rad_s: float
+    right_rad_s: float
+    distance_mm: int
+    estop_ok: bool
+    watchdog_ok: bool
+    valid: bool = True
 
 
 class ESP32Bridge:
-    """Manages serial communication with ESP32."""
+    """
+    Authoritative singleton-style shared serial bus to the ESP32.
+    All navigation subsystems (RoverMotors, ObstacleSensor, SafetyWatchdog) MUST
+    share one ESP32Bridge instance rather than opening /dev/ttyUSB0 independently.
+    """
 
-    def __init__(self, port="/dev/ttyUSB0", baudrate=115200, timeout=2):
+    def __init__(self, port: str = "/dev/ttyUSB0", baudrate: int = 115200, timeout: float = 0.5):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.serial = None
         self.connected = False
+        self._lock = threading.Lock()
+        self.last_rx_time = 0.0
+        self.consecutive_errors = 0
 
-    def connect(self):
+    def connect(self) -> bool:
         import serial
-        try:
-            self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-            time.sleep(2)
-            self.connected = True
-            # handshake
-            resp = self.send("STATUS?")
-            print(f"ESP32 connected on {self.port}: {resp}")
-        except Exception as e:
-            print(f"Cannot connect to ESP32: {e}")
-            self.connected = False
+        with self._lock:
+            if self.connected and self.serial and self.serial.is_open:
+                return True
+            try:
+                self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+                time.sleep(1.5)
+                self.serial.reset_input_buffer()
+                self.connected = True
+                resp = self._send_unlocked("PING")
+                if not resp.startswith("PONG"):
+                    raise RuntimeError(f"Unexpected ESP32 handshake: {resp!r}")
+                self.consecutive_errors = 0
+                return True
+            except Exception as exc:
+                self.connected = False
+                print(f"[ESP32Bridge] Connection failed on {self.port}: {exc}")
+                return False
 
     def disconnect(self):
-        if self.serial and self.serial.is_open:
-            self.serial.close()
+        with self._lock:
+            if self.serial and self.serial.is_open:
+                try:
+                    self._send_unlocked("STOP")
+                except Exception:
+                    pass
+                self.serial.close()
             self.connected = False
 
-    def send(self, cmd):
-        """Send command, return response string."""
-        if not self.connected:
+    def _send_unlocked(self, cmd: str) -> str:
+        if not self.connected or self.serial is None:
             raise RuntimeError("ESP32 not connected")
-        self.serial.write(f"{cmd}\n".encode())
-        response = self.serial.readline().decode().strip()
-        return response
+        clean = cmd.strip()
+        if not clean or "\n" in clean or "\r" in clean:
+            raise ValueError(f"Invalid command frame: {cmd!r}")
+        self.serial.write(f"{clean}\n".encode("ascii"))
+        self.serial.flush()
+        raw = self.serial.readline().decode("ascii", errors="ignore").strip()
+        if not raw:
+            self.consecutive_errors += 1
+            return "ERR:TIMEOUT"
+        self.last_rx_time = time.monotonic()
+        self.consecutive_errors = 0
+        return raw
 
-    def send_motor(self, direction, duration_ms=500, speed=200):
-        """Send motor command: F=forward, B=backward, R=right, L=left, S=stop."""
-        if direction == "S":
-            return self.send("MOVE S")
-        return self.send(f"MOVE {direction} {duration_ms} {speed}")
+    def send(self, cmd: str) -> str:
+        with self._lock:
+            return self._send_unlocked(cmd)
 
-    def send_servo(self, axis, angle_deg):
-        """Send servo command: PAN or TILT."""
-        return self.send(f"SERVO {axis} {int(angle_deg)}")
+    def send_velocity(self, left_rad_s: float, right_rad_s: float) -> tuple[bool, str]:
+        if not (math.isfinite(left_rad_s) and math.isfinite(right_rad_s)):
+            return False, "ERR:NON_FINITE"
+        resp = self.send(f"VEL {left_rad_s:.4f} {right_rad_s:.4f}")
+        return resp == "OK", resp
 
-    def send_laser(self, on):
-        """Turn laser on/off."""
-        return self.send("LASER ON" if on else "LASER OFF")
+    def send_stop(self) -> bool:
+        try:
+            return self.send("STOP") == "OK"
+        except Exception:
+            return False
 
-    def read_ultrasonic(self):
-        """Read distance in mm from ultrasonic/ToF sensor."""
-        resp = self.send("ULTRASONIC?")
+    def reset_encoders(self) -> bool:
+        return self.send("RESET_ENC") == "OK"
+
+    def read_telemetry(self) -> Esp32Telemetry:
+        resp = self.send("TELEM?")
+        if not resp.startswith("TELEM "):
+            return Esp32Telemetry(0, 0, 0.0, 0.0, -1, False, False, valid=False)
+        parts = resp.split()
+        if len(parts) != 8:
+            return Esp32Telemetry(0, 0, 0.0, 0.0, -1, False, False, valid=False)
+        try:
+            return Esp32Telemetry(
+                left_ticks=int(parts[1]),
+                right_ticks=int(parts[2]),
+                left_rad_s=float(parts[3]),
+                right_rad_s=float(parts[4]),
+                distance_mm=int(parts[5]),
+                estop_ok=(parts[6] == "1"),
+                watchdog_ok=(parts[7] == "1"),
+                valid=True,
+            )
+        except ValueError:
+            return Esp32Telemetry(0, 0, 0.0, 0.0, -1, False, False, valid=False)
+
+    def read_distance_mm(self) -> int:
+        resp = self.send("DIST?")
         if resp.startswith("DIST:"):
             try:
                 return int(resp.split(":")[1])
@@ -67,48 +136,94 @@ class ESP32Bridge:
 
 
 class ESP32Simulator:
-    """Simulator for testing without ESP32."""
+    """
+    Physics-backed ESP32 bridge simulator for unit tests and virtual field runs.
+    Integrates closed-loop velocity setpoints into realistic quadrature encoder
+    ticks, supports fault injection (sensor drop, E-stop, wheel slip).
+    """
 
-    def __init__(self):
+    def __init__(self, ticks_per_rev: float = 17280.0):
         self.connected = True
-        self._laser_on = False
-        self._distance = 150  # mm
+        self.ticks_per_rev = ticks_per_rev
+        self.rad_per_tick = (2.0 * math.pi) / ticks_per_rev
+        self.left_ticks = 0
+        self.right_ticks = 0
+        self.left_rad_s = 0.0
+        self.right_rad_s = 0.0
+        self.distance_mm = 900
+        self.estop_ok = True
+        self.watchdog_ok = True
+        self._lock = threading.Lock()
+        self.slip_factor_l = 1.0
+        self.slip_factor_r = 1.0
 
-    def connect(self):
-        print("[SIM] ESP32 connected")
+    def connect(self) -> bool:
+        self.connected = True
+        return True
 
     def disconnect(self):
-        print("[SIM] ESP32 disconnected")
+        self.send_stop()
+        self.connected = False
 
-    def send(self, cmd):
-        if cmd == "STATUS?":
-            return "OK"
-        elif cmd == "ULTRASONIC?":
-            return f"DIST:{self._distance}"
-        elif cmd == "LASER ON":
-            self._laser_on = True
-            return "OK"
-        elif cmd == "LASER OFF":
-            self._laser_on = False
-            return "OK"
-        elif cmd.startswith("MOVE"):
-            parts = cmd.split()
-            print(f"[SIM] Motor: {parts[1]} {parts[2] if len(parts) > 2 else ''}")
-            return "OK"
-        elif cmd.startswith("SERVO"):
-            parts = cmd.split()
-            print(f"[SIM] Servo: {parts[1]} → {parts[2]}°")
-            return "OK"
-        return "OK"
+    def step_physics(self, dt_s: float):
+        """Advance simulated wheel encoders by dt_s seconds."""
+        with self._lock:
+            if not self.estop_ok:
+                self.left_rad_s = 0.0
+                self.right_rad_s = 0.0
+                return
+            dl_rad = self.left_rad_s * self.slip_factor_l * dt_s
+            dr_rad = self.right_rad_s * self.slip_factor_r * dt_s
+            self.left_ticks += int(round(dl_rad / self.rad_per_tick))
+            self.right_ticks += int(round(dr_rad / self.rad_per_tick))
 
-    def send_motor(self, direction, duration_ms=500, speed=200):
-        return self.send(f"MOVE {direction} {duration_ms} {speed}")
+    def send(self, cmd: str) -> str:
+        parts = cmd.strip().split()
+        if not parts:
+            return "ERR:EMPTY"
+        action = parts[0].upper()
+        if action == "PING":
+            return f"PONG {int(self.estop_ok)}"
+        if action == "STOP":
+            self.left_rad_s = 0.0
+            self.right_rad_s = 0.0
+            return "OK"
+        if action == "RESET_ENC":
+            self.left_ticks = 0
+            self.right_ticks = 0
+            return "OK"
+        if action == "DIST?":
+            return f"DIST:{self.distance_mm}"
+        if action == "VEL" and len(parts) == 3:
+            if not self.estop_ok:
+                return "ERR:ESTOP_ACTIVE"
+            self.left_rad_s = float(parts[1])
+            self.right_rad_s = float(parts[2])
+            return "OK"
+        return "ERR:UNKNOWN"
 
-    def send_servo(self, axis, angle_deg):
-        return self.send(f"SERVO {axis} {int(angle_deg)}")
+    def send_velocity(self, left_rad_s: float, right_rad_s: float) -> tuple[bool, str]:
+        resp = self.send(f"VEL {left_rad_s:.4f} {right_rad_s:.4f}")
+        return resp == "OK", resp
 
-    def send_laser(self, on):
-        return self.send("LASER ON" if on else "LASER OFF")
+    def send_stop(self) -> bool:
+        return self.send("STOP") == "OK"
 
-    def read_ultrasonic(self):
-        return self._distance
+    def reset_encoders(self) -> bool:
+        return self.send("RESET_ENC") == "OK"
+
+    def read_telemetry(self) -> Esp32Telemetry:
+        with self._lock:
+            return Esp32Telemetry(
+                left_ticks=self.left_ticks,
+                right_ticks=self.right_ticks,
+                left_rad_s=self.left_rad_s,
+                right_rad_s=self.right_rad_s,
+                distance_mm=self.distance_mm,
+                estop_ok=self.estop_ok,
+                watchdog_ok=self.watchdog_ok,
+                valid=True,
+            )
+
+    def read_distance_mm(self) -> int:
+        return self.distance_mm

@@ -1,29 +1,18 @@
 @import "tailwindcss";
 
-@font-face {
-  font-family: "NotoSansBengali";
-  src: url("/fonts/noto_sans_bengali_regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
+@theme {
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-@font-face {
-  font-family: "NotoSansBengali";
-  src: url("/fonts/noto_sans_bengali_bold.ttf") format("truetype");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
+@layer base {
+  html, body {
+    font-family: var(--font-sans);
+    background-color: #F7FAF8;
+    color: #0F172A;
+  }
 }
 
-body {
-  font-family: "IBM Plex Sans", "NotoSansBengali", system-ui, -apple-system, sans-serif;
-  background-color: #f8fafc;
-  color: #0f172a;
-}
-
-code,
-pre,
-.font-mono {
-  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

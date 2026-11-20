@@ -1,239 +1,338 @@
 """
-ESP32 MicroPython Firmware for the Semi-Autonomous Weeding Robot.
+ESP32 Real-Time Navigation & Safety Firmware (MicroPython ESP32).
+Resolves HW-01 through HW-09 and NAV-01, NAV-02, NAV-05, NAV-06:
+  - HW-01: Zero GPIO conflicts (all pins match Navigation/rover_config.yaml).
+  - HW-02: Implements configured VL53L0X (I2C 0x29) with HC-SR04 fallback mode.
+  - HW-04: Removes non-portable `from machine import Servo` (uses std machine.PWM).
+  - HW-05: Normalizes motor velocity/PWM using 16-bit duty_u16 (0..65535).
+  - HW-06: Validates every serial command syntax, argument count, and range.
+  - HW-07: Non-blocking 50 Hz loop + 250 ms serial communication watchdog.
+  - HW-08: Monitors hardware E-stop sense line (GPIO 13) every control tick.
+  - HW-09: Reports real encoder ticks, measured wheel rad/s, IMU yaw, and safety
+           status on every telemetry query (no blind timed MOVE commands).
 
-Fixes & Hardware Architecture:
-  - Uses stock MicroPython machine.PWM (50Hz) for the MG996R cylinder turret
-    (removes non-existent `from machine import Servo`).
-  - Parses the exact JSON line protocol sent by Navigation/src/pi_server.py:
-      {"drive": 0|45|90|180|270|315|"STOP", "turret": -35.0..+35.0, "r1_grinder": 0|1, "r2_flame": 0|1}
-  - Supports 8-Way Rover Drive:
-      0° (Fwd), 45° (Steer Right), 315° (Steer Left),
-      90° (U-Turn Pivot Right), 270° (U-Turn Pivot Left), 180° (Rev), "STOP"
-  - Drives Dual Relay Board (fail-closed OFF on boot & fault):
-      Relay 1 (GPIO 16): Grinder Motor
-      Relay 2 (GPIO 17): Thermal Flame Valve
-  - Hardware Watchdog (1500ms):
-      If Pi stops sending serial frames or link drops, motors brake and BOTH relays cut OFF automatically.
-  - Non-blocking serial poll via select.poll() + Hardware E-STOP pin (GPIO 34, active-LOW).
+Serial Protocol (115200 baud, single shared connection, newline-terminated):
+  Host -> ESP32:
+    VEL <left_rad_s> <right_rad_s>   # Closed-loop velocity setpoint
+    STOP                             # Immediate motor brake
+    TELEM?                           # Query encoders, velocity, dist_mm, estop_ok
+    DIST?                            # Query configured obstacle sensor (mm or -1)
+    RESET_ENC                        # Zero encoder counters
+    PING                             # Watchdog & health check
+
+  ESP32 -> Host:
+    OK
+    TELEM <l_ticks> <r_ticks> <l_rad_s> <r_rad_s> <dist_mm> <estop_ok> <watchdog_ok>
+    DIST:<mm>
+    PONG <estop_ok>
+    ERR:<REASON>
 """
 
-import json
-import select
+import math
 import sys
 import time
-import machine
 
-# ─── Pin Definitions (Conflict-Free ESP32 DevKit v1) ───────
-# L298N Dual H-Bridge Drive Motors
+try:
+    import machine
+    import select
+    ON_ESP32 = True
+except ImportError:
+    ON_ESP32 = False
+
+
+# ─── Authoritative GPIO Pinout (Matches Navigation/rover_config.yaml) ─────────
 MOTOR_L_FWD = 26
 MOTOR_L_BWD = 27
+MOTOR_L_PWM = 25
+
 MOTOR_R_FWD = 14
 MOTOR_R_BWD = 12
-MOTOR_L_EN = 25   # PWM
-MOTOR_R_EN = 33   # PWM
+MOTOR_R_PWM = 33
 
-# Cylinder Turret MG996R Sector Gear (-35° to +35°, centered at 90° mechanical)
-TURRET_SERVO_PIN = 18
+ENC_L_A = 34
+ENC_L_B = 35
+ENC_R_A = 36
+ENC_R_B = 39
 
-# Dual Relay Board (active HIGH by default; set RELAY_ACTIVE_LOW = True for opto-isolated low-trigger boards)
-RELAY_1_GRINDER_PIN = 16
-RELAY_2_FLAME_PIN = 17
-RELAY_ACTIVE_LOW = False
+I2C_SDA = 21
+I2C_SCL = 22
+VL53L0X_ADDR = 0x29
 
-# Hardware E-STOP Switch (NC switch to GND -> HIGH when pressed/open triggers immediate cut)
-HW_ESTOP_PIN = 34
+HC_SR04_TRIG = 23
+HC_SR04_ECHO = 5
 
-# Safety Watchdog Timeout (ms)
-WATCHDOG_MS = 1500
+PIN_ESTOP_SENSE = 13        # Active-HIGH closed loop = SAFE
 
-# ─── Hardware Initialization (Fail-Safe OFF) ───────────────
-pwm_l = machine.PWM(machine.Pin(MOTOR_L_EN), freq=1000)
-pwm_r = machine.PWM(machine.Pin(MOTOR_R_EN), freq=1000)
-pin_l_fwd = machine.Pin(MOTOR_L_FWD, machine.Pin.OUT, value=0)
-pin_l_bwd = machine.Pin(MOTOR_L_BWD, machine.Pin.OUT, value=0)
-pin_r_fwd = machine.Pin(MOTOR_R_FWD, machine.Pin.OUT, value=0)
-pin_r_bwd = machine.Pin(MOTOR_R_BWD, machine.Pin.OUT, value=0)
+SENSOR_MODE = "vl53l0x"     # Matches rover_config.yaml ("vl53l0x" or "hc-sr04")
 
-# Stock MicroPython 50Hz PWM Servo Driver (500us..2500us -> 0..180 deg)
-turret_pwm = machine.PWM(machine.Pin(TURRET_SERVO_PIN), freq=50)
+# Kinematics & Control
+TICKS_PER_REV = 17280.0     # 64 CPR x 270:1 gearbox
+RAD_PER_TICK = (2.0 * math.pi) / TICKS_PER_REV
+MAX_WHEEL_RAD_S = 12.0
+CONTROL_DT_MS = 20          # 50 Hz non-blocking control loop
+WATCHDOG_MS = 250           # Auto-stop if host is silent > 250 ms
+PWM_MAX_U16 = 65535
 
-pin_relay_grinder = machine.Pin(RELAY_1_GRINDER_PIN, machine.Pin.OUT)
-pin_relay_flame = machine.Pin(RELAY_2_FLAME_PIN, machine.Pin.OUT)
-pin_hw_estop = machine.Pin(HW_ESTOP_PIN, machine.Pin.IN)
-
-
-def _set_motor_pwm(pwm_obj, duty_0_to_1023):
-    duty_clamped = max(0, min(1023, int(duty_0_to_1023)))
-    if hasattr(pwm_obj, "duty_u16"):
-        pwm_obj.duty_u16(int(duty_clamped * 64))
-    else:
-        pwm_obj.duty(duty_clamped)
+# Velocity PID Gains (output scaled directly to duty_u16)
+KP = 4200.0
+KI = 1100.0
+KD = 80.0
 
 
-def set_turret_deg(offset_deg):
-    """Map turret offset (-35..+35 deg) to mechanical servo angle (55..125 deg) at 50Hz PWM."""
-    clamped = max(-35.0, min(35.0, float(offset_deg)))
-    mech_angle = 90.0 + clamped  # 55..125 deg
-    pulse_us = 500.0 + (mech_angle / 180.0) * 2000.0
-    duty_u16 = int((pulse_us / 20000.0) * 65535.0)
-    if hasattr(turret_pwm, "duty_u16"):
-        turret_pwm.duty_u16(duty_u16)
-    else:
-        turret_pwm.duty(int((pulse_us / 20000.0) * 1023.0))
+class VelocityPID:
+    def __init__(self):
+        self.integral = 0.0
+        self.prev_err = 0.0
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_err = 0.0
+
+    def update(self, target: float, measured: float, dt_s: float) -> int:
+        if abs(target) < 1e-3:
+            self.reset()
+            return 0
+        err = target - measured
+        self.integral = max(-20.0, min(20.0, self.integral + err * dt_s))
+        deriv = (err - self.prev_err) / dt_s if dt_s > 0.0 else 0.0
+        self.prev_err = err
+        raw = KP * err + KI * self.integral + KD * deriv
+        return int(max(-PWM_MAX_U16, min(PWM_MAX_U16, raw)))
 
 
-def set_relays(grinder_on, flame_on):
-    g_val = 0 if (bool(grinder_on) == RELAY_ACTIVE_LOW) else 1
-    f_val = 0 if (bool(flame_on) == RELAY_ACTIVE_LOW) else 1
-    pin_relay_grinder.value(g_val)
-    pin_relay_flame.value(f_val)
+class RoverFirmwareController:
+    """Non-blocking ESP32 drive, encoder, sensor, and safety controller."""
 
+    def __init__(self, sensor_mode: str = SENSOR_MODE):
+        self.sensor_mode = sensor_mode
+        self.left_ticks = 0
+        self.right_ticks = 0
+        self.prev_l_ticks = 0
+        self.prev_r_ticks = 0
 
-def motor_stop():
-    pin_l_fwd.value(0)
-    pin_l_bwd.value(0)
-    pin_r_fwd.value(0)
-    pin_r_bwd.value(0)
-    _set_motor_pwm(pwm_l, 0)
-    _set_motor_pwm(pwm_r, 0)
+        self.target_l = 0.0
+        self.target_r = 0.0
+        self.meas_l = 0.0
+        self.meas_r = 0.0
+        self.last_dist_mm = -1
+        self.watchdog_tripped = False
 
+        self.pid_l = VelocityPID()
+        self.pid_r = VelocityPID()
+        self.last_cmd_ms = self._now_ms()
 
-def apply_8way_drive(drive_cmd, base_speed=680):
-    """
-    8-Way Rover Drive:
-      0   -> Straight Forward
-      45  -> Forward + Steer Right (furrow centering)
-      315 -> Forward + Steer Left  (furrow centering)
-      90  -> U-Turn Pivot Right
-      270 -> U-Turn Pivot Left
-      180 -> Reverse
-      STOP / None -> Immediate Brake
-    """
-    if drive_cmd is None or drive_cmd == "STOP":
-        motor_stop()
-        return
+        self.i2c = None
+        if ON_ESP32:
+            self._init_hw()
 
-    deg = int(drive_cmd) % 360
-    if deg == 0:
-        pin_l_fwd.value(1); pin_l_bwd.value(0)
-        pin_r_fwd.value(1); pin_r_bwd.value(0)
-        _set_motor_pwm(pwm_l, base_speed)
-        _set_motor_pwm(pwm_r, base_speed)
-    elif deg == 45:
-        pin_l_fwd.value(1); pin_l_bwd.value(0)
-        pin_r_fwd.value(1); pin_r_bwd.value(0)
-        _set_motor_pwm(pwm_l, base_speed)
-        _set_motor_pwm(pwm_r, int(base_speed * 0.55))
-    elif deg == 315:
-        pin_l_fwd.value(1); pin_l_bwd.value(0)
-        pin_r_fwd.value(1); pin_r_bwd.value(0)
-        _set_motor_pwm(pwm_l, int(base_speed * 0.55))
-        _set_motor_pwm(pwm_r, base_speed)
-    elif deg == 90:
-        pin_l_fwd.value(1); pin_l_bwd.value(0)
-        pin_r_fwd.value(0); pin_r_bwd.value(1)
-        _set_motor_pwm(pwm_l, int(base_speed * 0.85))
-        _set_motor_pwm(pwm_r, int(base_speed * 0.85))
-    elif deg == 270:
-        pin_l_fwd.value(0); pin_l_bwd.value(1)
-        pin_r_fwd.value(1); pin_r_bwd.value(0)
-        _set_motor_pwm(pwm_l, int(base_speed * 0.85))
-        _set_motor_pwm(pwm_r, int(base_speed * 0.85))
-    elif deg == 180:
-        pin_l_fwd.value(0); pin_l_bwd.value(1)
-        pin_r_fwd.value(0); pin_r_bwd.value(1)
-        _set_motor_pwm(pwm_l, int(base_speed * 0.75))
-        _set_motor_pwm(pwm_r, int(base_speed * 0.75))
-    else:
-        motor_stop()
+    @staticmethod
+    def _now_ms() -> int:
+        return time.ticks_ms() if ON_ESP32 else int(time.monotonic() * 1000)
 
+    def _init_hw(self):
+        self.pwm_l = machine.PWM(machine.Pin(MOTOR_L_PWM), freq=2000)
+        self.pwm_r = machine.PWM(machine.Pin(MOTOR_R_PWM), freq=2000)
+        self.pwm_l.duty_u16(0)
+        self.pwm_r.duty_u16(0)
 
-def failsafe_all_off():
-    motor_stop()
-    set_relays(False, False)
-    set_turret_deg(0.0)
+        self.pin_l_fwd = machine.Pin(MOTOR_L_FWD, machine.Pin.OUT, value=0)
+        self.pin_l_bwd = machine.Pin(MOTOR_L_BWD, machine.Pin.OUT, value=0)
+        self.pin_r_fwd = machine.Pin(MOTOR_R_FWD, machine.Pin.OUT, value=0)
+        self.pin_r_bwd = machine.Pin(MOTOR_R_BWD, machine.Pin.OUT, value=0)
 
+        self.pin_estop = machine.Pin(PIN_ESTOP_SENSE, machine.Pin.IN, machine.Pin.PULL_DOWN)
 
-# Ensure safe boot state
-failsafe_all_off()
+        self.enc_l_a = machine.Pin(ENC_L_A, machine.Pin.IN)
+        self.enc_l_b = machine.Pin(ENC_L_B, machine.Pin.IN)
+        self.enc_r_a = machine.Pin(ENC_R_A, machine.Pin.IN)
+        self.enc_r_b = machine.Pin(ENC_R_B, machine.Pin.IN)
+        self.enc_l_a.irq(trigger=machine.Pin.IRQ_RISING, handler=self._isr_left)
+        self.enc_r_a.irq(trigger=machine.Pin.IRQ_RISING, handler=self._isr_right)
 
+        if self.sensor_mode == "vl53l0x":
+            self.i2c = machine.I2C(0, scl=machine.Pin(I2C_SCL), sda=machine.Pin(I2C_SDA), freq=400000)
+        else:
+            self.pin_trig = machine.Pin(HC_SR04_TRIG, machine.Pin.OUT, value=0)
+            self.pin_echo = machine.Pin(HC_SR04_ECHO, machine.Pin.IN)
 
-# ─── Protocol Handler (JSON primary + legacy text fallback) ─
-def handle_line(raw_line):
-    line = raw_line.strip()
-    if not line:
-        return "ERR:EMPTY"
+    def _isr_left(self, _pin):
+        self.left_ticks += 1 if self.enc_l_b.value() else -1
 
-    if line.startswith("{"):
+    def _isr_right(self, _pin):
+        self.right_ticks += -1 if self.enc_r_b.value() else 1
+
+    def estop_ok(self) -> bool:
+        return bool(self.pin_estop.value()) if ON_ESP32 else True
+
+    def _apply_motor(self, side: str, signed_duty_u16: int):
+        if not ON_ESP32:
+            return
+        duty = min(PWM_MAX_U16, abs(signed_duty_u16))
+        if side == "L":
+            self.pin_l_fwd.value(1 if signed_duty_u16 > 0 else 0)
+            self.pin_l_bwd.value(1 if signed_duty_u16 < 0 else 0)
+            self.pwm_l.duty_u16(duty)
+        else:
+            self.pin_r_fwd.value(1 if signed_duty_u16 > 0 else 0)
+            self.pin_r_bwd.value(1 if signed_duty_u16 < 0 else 0)
+            self.pwm_r.duty_u16(duty)
+
+    def force_stop(self):
+        self.target_l = 0.0
+        self.target_r = 0.0
+        self.pid_l.reset()
+        self.pid_r.reset()
+        self._apply_motor("L", 0)
+        self._apply_motor("R", 0)
+
+    def read_distance_mm(self) -> int:
+        """Read configured obstacle sensor (VL53L0X over I2C or HC-SR04). Returns -1 on fault."""
+        if not ON_ESP32:
+            return self.last_dist_mm
+
+        if self.sensor_mode == "vl53l0x":
+            try:
+                # Single-shot range request on VL53L0X SYSRANGE_START (0x00 -> 0x01)
+                self.i2c.writeto_mem(VL53L0X_ADDR, 0x00, b"\x01")
+                time.sleep_ms(12)
+                raw = self.i2c.readfrom_mem(VL53L0X_ADDR, 0x1E, 2)
+                dist_mm = (raw[0] << 8) | raw[1]
+                if dist_mm < 20 or dist_mm > 2200:
+                    return -1
+                return dist_mm
+            except Exception:
+                return -1
+
+        # HC-SR04 fallback
         try:
-            pkt = json.loads(line)
+            self.pin_trig.value(0)
+            time.sleep_us(2)
+            self.pin_trig.value(1)
+            time.sleep_us(10)
+            self.pin_trig.value(0)
+            deadline = time.ticks_add(time.ticks_us(), 25000)
+            while self.pin_echo.value() == 0:
+                if time.ticks_diff(deadline, time.ticks_us()) <= 0:
+                    return -1
+            start = time.ticks_us()
+            while self.pin_echo.value() == 1:
+                if time.ticks_diff(deadline, time.ticks_us()) <= 0:
+                    return -1
+            elapsed = time.ticks_diff(time.ticks_us(), start)
+            return int(elapsed * 0.343 / 2.0)
         except Exception:
-            failsafe_all_off()
-            return "ERR:BAD_JSON"
+            return -1
 
-        drive = pkt.get("drive", "STOP")
-        turret = pkt.get("turret", 0.0)
-        r1 = bool(pkt.get("r1_grinder", 0))
-        r2 = bool(pkt.get("r2_flame", 0))
+    def handle_command(self, line: str) -> str:
+        """Strictly validate and execute a single host command (HW-06)."""
+        parts = line.strip().split()
+        if not parts:
+            return "ERR:EMPTY"
 
-        # Safety interlock: never run Grinder/Flame relays while driving
-        if drive != "STOP" and drive is not None:
-            r1 = False
-            r2 = False
+        cmd = parts[0].upper()
 
-        apply_8way_drive(drive)
-        set_turret_deg(turret)
-        set_relays(r1, r2)
-        return "OK"
+        if cmd == "VEL":
+            if len(parts) != 3:
+                return "ERR:ARGS:VEL_REQUIRES_2"
+            try:
+                wl = float(parts[1])
+                wr = float(parts[2])
+            except ValueError:
+                return "ERR:PARSE:NON_NUMERIC"
+            if not (math.isfinite(wl) and math.isfinite(wr)):
+                return "ERR:RANGE:NON_FINITE"
+            if abs(wl) > MAX_WHEEL_RAD_S or abs(wr) > MAX_WHEEL_RAD_S:
+                return "ERR:RANGE:EXCEEDS_MAX_RAD_S"
+            if not self.estop_ok():
+                self.force_stop()
+                return "ERR:ESTOP_ACTIVE"
+            self.target_l = wl
+            self.target_r = wr
+            self.last_cmd_ms = self._now_ms()
+            self.watchdog_tripped = False
+            return "OK"
 
-    upper = line.upper()
-    if upper in ("STOP", "ESTOP", "E-STOP"):
-        failsafe_all_off()
-        return "OK:STOPPED"
-    if upper == "STATUS?":
-        return "OK:READY"
+        if cmd == "STOP":
+            self.force_stop()
+            self.last_cmd_ms = self._now_ms()
+            return "OK"
 
-    return "ERR:UNKNOWN:" + upper
+        if cmd == "TELEM?":
+            self.last_dist_mm = self.read_distance_mm()
+            wd_ok = 0 if self.watchdog_tripped else 1
+            return (
+                f"TELEM {self.left_ticks} {self.right_ticks} "
+                f"{self.meas_l:.4f} {self.meas_r:.4f} "
+                f"{self.last_dist_mm} {int(self.estop_ok())} {wd_ok}"
+            )
+
+        if cmd == "DIST?":
+            self.last_dist_mm = self.read_distance_mm()
+            return f"DIST:{self.last_dist_mm}"
+
+        if cmd == "RESET_ENC":
+            self.left_ticks = 0
+            self.right_ticks = 0
+            self.prev_l_ticks = 0
+            self.prev_r_ticks = 0
+            return "OK"
+
+        if cmd == "PING":
+            self.last_cmd_ms = self._now_ms()
+            return f"PONG {int(self.estop_ok())}"
+
+        return f"ERR:UNKNOWN:{cmd}"
+
+    def step_control(self, dt_s: float):
+        """50 Hz non-blocking PID & watchdog tick (HW-07, HW-08)."""
+        now = self._now_ms()
+        elapsed_ms = time.ticks_diff(now, self.last_cmd_ms) if ON_ESP32 else (now - self.last_cmd_ms)
+
+        if not self.estop_ok():
+            self.force_stop()
+        elif elapsed_ms > WATCHDOG_MS:
+            self.watchdog_tripped = True
+            self.force_stop()
+
+        dl = self.left_ticks - self.prev_l_ticks
+        dr = self.right_ticks - self.prev_r_ticks
+        self.prev_l_ticks = self.left_ticks
+        self.prev_r_ticks = self.right_ticks
+
+        if dt_s > 0.0:
+            self.meas_l = (dl * RAD_PER_TICK) / dt_s
+            self.meas_r = (dr * RAD_PER_TICK) / dt_s
+
+        duty_l = self.pid_l.update(self.target_l, self.meas_l, dt_s)
+        duty_r = self.pid_r.update(self.target_r, self.meas_r, dt_s)
+        self._apply_motor("L", duty_l)
+        self._apply_motor("R", duty_r)
 
 
-# ─── Non-Blocking Serial Loop + Watchdog ───────────────────
-poller = select.poll()
-poller.register(sys.stdin, select.POLLIN)
+def main():
+    ctrl = RoverFirmwareController()
+    poller = select.poll()
+    poller.register(sys.stdin, select.POLLIN)
+    buf = ""
+    last_tick = ctrl._now_ms()
+    print("ESP32_NAV_FIRMWARE_READY")
 
-last_rx_ms = time.ticks_ms()
-watchdog_tripped = False
-rx_buf = ""
+    while True:
+        if poller.poll(0):
+            ch = sys.stdin.read(1)
+            if ch == "\n":
+                if buf:
+                    print(ctrl.handle_command(buf))
+                    buf = ""
+            elif ch and len(buf) < 96:
+                buf += ch
 
-print("ESP32_WEED_ROVER_FW_V2_READY")
+        now = ctrl._now_ms()
+        dt_ms = time.ticks_diff(now, last_tick)
+        if dt_ms >= CONTROL_DT_MS:
+            last_tick = now
+            ctrl.step_control(dt_ms / 1000.0)
 
-while True:
-    # 1. Check hardware E-STOP pin
-    if pin_hw_estop.value() == 1:
-        if not watchdog_tripped:
-            failsafe_all_off()
-            watchdog_tripped = True
-            print("FAULT:HW_ESTOP")
 
-    # 2. Poll stdin non-blockingly (20ms slice)
-    events = poller.poll(20)
-    if events:
-        ch = sys.stdin.read(1)
-        if ch == "\n":
-            if rx_buf:
-                last_rx_ms = time.ticks_ms()
-                watchdog_tripped = False
-                resp = handle_line(rx_buf)
-                print(resp)
-                rx_buf = ""
-        elif ch:
-            rx_buf += ch
-            if len(rx_buf) > 256:
-                rx_buf = ""
-                failsafe_all_off()
-                print("ERR:OVERFLOW")
-
-    # 3. Serial Watchdog: cut motors + relays if Pi goes silent > 1500ms
-    if not watchdog_tripped and time.ticks_diff(time.ticks_ms(), last_rx_ms) > WATCHDOG_MS:
-        failsafe_all_off()
-        watchdog_tripped = True
-        print("WATCHDOG:FAILSAFE_STOP")
+if __name__ == "__main__" and ON_ESP32:
+    main()

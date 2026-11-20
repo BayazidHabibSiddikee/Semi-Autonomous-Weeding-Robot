@@ -1,0 +1,21 @@
+# ==============================================================================
+# navsat_transform_node Configuration for Holybro H-RTK ZED-F9P (RTK-GNSS)
+# Converts /gps/fix (sensor_msgs/NavSatFix) + /imu/data -> /odometry/gps
+# Enables Nav2 FollowGPSWaypoints, field geofencing, and return-to-home.
+# ==============================================================================
+
+navsat_transform_node:
+  ros__parameters:
+    frequency: 10.0
+    delay: 2.0
+    magnetic_declination_radians: 0.0
+    yaw_offset: 0.0
+    zero_altitude: true
+    broadcast_utm_transform: true
+    publish_filtered_gps: true
+    use_odometry_yaw: false
+    wait_for_datum: false
+
+    # Require RTK Fixed or Float accuracy before trusting GNSS for narrow crop rows
+    # (covariance threshold enforced in rover_navigation mission supervisor)
+    max_horizontal_std_m: 0.08

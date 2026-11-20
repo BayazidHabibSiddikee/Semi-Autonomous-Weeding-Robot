@@ -1,144 +1,206 @@
 """
-Rover motor control via ESP32 serial bridge.
-Drives DC gear motors for forward/backward/rotate movement.
+Closed-Loop Differential-Drive Motor Controller over Shared ESP32Bridge.
+Fixes:
+  - NAV-01: Uses real wheel-encoder displacement via FieldLocalizer (no duration*10 guesses).
+  - NAV-02: Uses IMU + encoder fused heading for closed-loop rotations (no blind heading+=deg).
+  - NAV-06: Accepts a single shared ESP32Bridge instance instead of opening /dev/ttyUSB0 twice.
 """
-import time
+
 import math
+import time
+from typing import Callable
+
+from localizer import FieldLocalizer, normalize_angle_deg
 
 
 class RoverMotors:
-    """Send movement commands to ESP32 over serial."""
+    """Closed-loop differential drive controller sharing one ESP32Bridge."""
 
-    def __init__(self, port="/dev/ttyUSB0", baudrate=115200, timeout=2):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self.serial = None
-        self.connected = False
-        self.current_x = 0.0  # estimated position in cm
-        self.current_y = 0.0
-        self.heading = 0.0    # degrees, 0 = forward
+    def __init__(
+        self,
+        esp32_bridge,
+        localizer: FieldLocalizer,
+        imu_heading_fn: Callable[[], float | None] | None = None,
+        wheel_radius_cm: float = 3.5,
+        wheel_separation_cm: float = 17.4,
+        skid_multiplier: float = 1.18,
+        cruise_linear_cms: float = 15.0,
+        turn_angular_deg_s: float = 35.0,
+        heading_tolerance_deg: float = 2.5,
+        control_dt_s: float = 0.02,
+        step_physics_fn: Callable[[float], None] | None = None,
+    ):
+        if esp32_bridge is None:
+            raise ValueError("RoverMotors requires a shared ESP32Bridge instance (NAV-06).")
+        self.bridge = esp32_bridge
+        self.localizer = localizer
+        self.imu_heading_fn = imu_heading_fn
+        self.wheel_radius_cm = wheel_radius_cm
+        self.eff_sep_cm = wheel_separation_cm * skid_multiplier
+        self.cruise_linear_cms = cruise_linear_cms
+        self.turn_angular_deg_s = turn_angular_deg_s
+        self.heading_tolerance_deg = heading_tolerance_deg
+        self.control_dt_s = control_dt_s
+        self._step_physics_fn = step_physics_fn
 
-    def connect(self):
-        import serial
-        try:
-            self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-            time.sleep(2)  # wait for ESP32 reset
-            self.connected = True
-            self._send("STATUS?")
-            print(f"Connected to ESP32 on {self.port}")
-        except Exception as e:
-            print(f"Cannot connect to {self.port}: {e}")
-            self.connected = False
+    def _twist_to_wheel_rad_s(self, linear_cms: float, angular_deg_s: float) -> tuple[float, float]:
+        omega_rad_s = math.radians(angular_deg_s)
+        v_left = linear_cms - (omega_rad_s * self.eff_sep_cm / 2.0)
+        v_right = linear_cms + (omega_rad_s * self.eff_sep_cm / 2.0)
+        return v_left / self.wheel_radius_cm, v_right / self.wheel_radius_cm
 
-    def disconnect(self):
-        if self.serial and self.serial.is_open:
+    def _sync_localizer(self) -> tuple[bool, str]:
+        """Read encoder telemetry from shared ESP32Bridge and update FieldLocalizer."""
+        telem = self.bridge.read_telemetry()
+        if not telem.valid:
             self.stop()
-            self.serial.close()
-            self.connected = False
-            print("Disconnected from ESP32")
+            return False, "TELEMETRY_INVALID"
+        if not telem.estop_ok:
+            self.stop()
+            return False, "HARDWARE_ESTOP_ACTIVE"
+        imu_deg = self.imu_heading_fn() if self.imu_heading_fn else None
+        self.localizer.update(telem.left_ticks, telem.right_ticks, imu_heading_deg=imu_deg)
+        return True, "OK"
 
-    def _send(self, cmd):
-        if not self.connected:
-            raise RuntimeError("Not connected to ESP32")
-        self.serial.write(f"{cmd}\n".encode())
-        response = self.serial.readline().decode().strip()
-        return response
+    def set_velocity(self, linear_cms: float, angular_deg_s: float) -> tuple[bool, str]:
+        wl, wr = self._twist_to_wheel_rad_s(linear_cms, angular_deg_s)
+        return self.bridge.send_velocity(wl, wr)
 
-    def forward(self, duration_ms=500, speed=200):
-        """Move forward for duration_ms at given speed."""
-        self._send(f"MOVE F {duration_ms} {speed}")
-        # estimate position change
-        dist_cm = (duration_ms / 1000.0) * 10  # rough: 10 cm/s at speed 200
-        rad = math.radians(self.heading)
-        self.current_x += dist_cm * math.cos(rad)
-        self.current_y += dist_cm * math.sin(rad)
-        time.sleep(duration_ms / 1000.0 + 0.1)
+    def move_distance(
+        self,
+        target_cm: float,
+        target_heading_deg: float | None = None,
+        linear_cms: float | None = None,
+        abort_check_fn: Callable[[], tuple[bool, str]] | None = None,
+        max_ticks: int = 400,
+    ) -> tuple[bool, float, str]:
+        """
+        Closed-loop linear travel using wheel encoders + IMU heading hold (NAV-01, NAV-02).
+        Returns (success, actual_distance_cm, reason).
+        """
+        speed = abs(linear_cms if linear_cms is not None else self.cruise_linear_cms)
+        direction = 1.0 if target_cm >= 0.0 else -1.0
+        goal_dist = abs(target_cm)
 
-    def backward(self, duration_ms=300, speed=180):
-        """Move backward for duration_ms."""
-        self._send(f"MOVE B {duration_ms} {speed}")
-        dist_cm = (duration_ms / 1000.0) * 8
-        rad = math.radians(self.heading)
-        self.current_x -= dist_cm * math.cos(rad)
-        self.current_y -= dist_cm * math.sin(rad)
-        time.sleep(duration_ms / 1000.0 + 0.1)
+        ok, reason = self._sync_localizer()
+        if not ok:
+            return False, 0.0, reason
 
-    def rotate_right(self, degrees=90, speed=180):
-        """Rotate clockwise by given degrees."""
-        self._send(f"MOVE R {degrees} {speed}")
-        self.heading = (self.heading + degrees) % 360
-        time.sleep(degrees / 90.0 * 0.5 + 0.1)
+        start_pose = self.localizer.get_pose()
+        hold_heading = start_pose.heading_deg if target_heading_deg is None else target_heading_deg
+        traveled = 0.0
 
-    def rotate_left(self, degrees=90, speed=180):
-        """Rotate counter-clockwise by given degrees."""
-        self._send(f"MOVE L {degrees} {speed}")
-        self.heading = (self.heading - degrees) % 360
-        time.sleep(degrees / 90.0 * 0.5 + 0.1)
+        for _ in range(max_ticks):
+            if abort_check_fn is not None:
+                safe, abort_reason = abort_check_fn()
+                if not safe:
+                    self.stop()
+                    return False, traveled, abort_reason
 
-    def stop(self):
-        """Stop all movement."""
-        self._send("MOVE S")
+            pose = self.localizer.get_pose()
+            traveled = math.hypot(pose.x_cm - start_pose.x_cm, pose.y_cm - start_pose.y_cm)
+            if traveled >= goal_dist - 0.4:
+                self.stop()
+                return True, traveled, "DISTANCE_REACHED"
 
-    def get_position(self):
-        """Return estimated (x_cm, y_cm, heading_deg)."""
-        return self.current_x, self.current_y, self.heading
+            # Proportional heading hold during straight travel
+            yaw_err = normalize_angle_deg(hold_heading - pose.heading_deg)
+            wz = max(-25.0, min(25.0, yaw_err * 1.4))
+            remaining = max(0.0, goal_dist - traveled)
+            v_cmd = direction * min(speed, max(5.0, remaining * 1.8))
 
-    def emergency_stop(self):
-        """Immediate stop."""
+            sent_ok, resp = self.set_velocity(v_cmd, wz)
+            if not sent_ok:
+                self.stop()
+                return False, traveled, resp
+
+            if self._step_physics_fn:
+                self._step_physics_fn(self.control_dt_s)
+            else:
+                time.sleep(self.control_dt_s)
+
+            ok, reason = self._sync_localizer()
+            if not ok:
+                return False, traveled, reason
+
         self.stop()
-        print("ROVER EMERGENCY STOP")
+        return False, traveled, "MOVE_TIMEOUT"
 
+    def rotate_to_heading(
+        self,
+        target_heading_deg: float,
+        abort_check_fn: Callable[[], tuple[bool, str]] | None = None,
+        max_ticks: int = 350,
+    ) -> tuple[bool, str]:
+        """Closed-loop rotation using fused IMU + encoder heading (NAV-02)."""
+        ok, reason = self._sync_localizer()
+        if not ok:
+            return False, reason
 
-class RoverSimulator:
-    """Simulator for testing without hardware."""
+        for _ in range(max_ticks):
+            if abort_check_fn is not None:
+                safe, abort_reason = abort_check_fn()
+                if not safe:
+                    self.stop()
+                    return False, abort_reason
 
-    def __init__(self):
-        self.connected = True
-        self.current_x = 0.0
-        self.current_y = 0.0
-        self.heading = 0.0
+            pose = self.localizer.get_pose()
+            err = normalize_angle_deg(target_heading_deg - pose.heading_deg)
+            if abs(err) <= self.heading_tolerance_deg:
+                self.stop()
+                return True, "HEADING_REACHED"
 
-    def connect(self):
-        print("[SIM] Rover connected")
+            wz = max(-self.turn_angular_deg_s, min(self.turn_angular_deg_s, err * 1.8))
+            if abs(wz) < 8.0:
+                wz = math.copysign(8.0, err)
 
-    def disconnect(self):
-        print("[SIM] Rover disconnected")
+            sent_ok, resp = self.set_velocity(0.0, wz)
+            if not sent_ok:
+                self.stop()
+                return False, resp
 
-    def forward(self, duration_ms=500, speed=200):
-        dist_cm = (duration_ms / 1000.0) * 10
-        rad = math.radians(self.heading)
-        self.current_x += dist_cm * math.cos(rad)
-        self.current_y += dist_cm * math.sin(rad)
-        print(f"[SIM] Forward {duration_ms}ms → ({self.current_x:.1f}, {self.current_y:.1f})")
+            if self._step_physics_fn:
+                self._step_physics_fn(self.control_dt_s)
+            else:
+                time.sleep(self.control_dt_s)
 
-    def backward(self, duration_ms=300, speed=180):
-        dist_cm = (duration_ms / 1000.0) * 8
-        rad = math.radians(self.heading)
-        self.current_x -= dist_cm * math.cos(rad)
-        self.current_y -= dist_cm * math.sin(rad)
-        print(f"[SIM] Backward {duration_ms}ms → ({self.current_x:.1f}, {self.current_y:.1f})")
+            ok, reason = self._sync_localizer()
+            if not ok:
+                return False, reason
 
-    def rotate_right(self, degrees=90, speed=180):
-        self.heading = (self.heading + degrees) % 360
-        print(f"[SIM] Rotate right {degrees}° → heading {self.heading}°")
+        self.stop()
+        return False, "ROTATE_TIMEOUT"
 
-    def rotate_left(self, degrees=90, speed=180):
-        self.heading = (self.heading - degrees) % 360
-        print(f"[SIM] Rotate left {degrees}° → heading {self.heading}°")
+    def rotate_by(self, delta_deg: float, abort_check_fn=None) -> tuple[bool, str]:
+        pose = self.localizer.get_pose()
+        target = normalize_angle_deg(pose.heading_deg + delta_deg)
+        return self.rotate_to_heading(target, abort_check_fn=abort_check_fn)
 
     def stop(self):
-        print("[SIM] Stop")
-
-    def get_position(self):
-        return self.current_x, self.current_y, self.heading
+        self.bridge.send_stop()
 
     def emergency_stop(self):
-        print("[SIM] EMERGENCY STOP")
+        self.bridge.send_stop()
+
+    def get_position(self) -> tuple[float, float, float]:
+        p = self.localizer.get_pose()
+        return p.x_cm, p.y_cm, p.heading_deg
 
 
-def create_rover(simulate=False, **kwargs):
-    """Factory function."""
-    if simulate:
-        return RoverSimulator()
-    return RoverMotors(**kwargs)
+def create_rover(esp32_bridge, localizer: FieldLocalizer, config: dict, imu_heading_fn=None, step_physics_fn=None) -> RoverMotors:
+    """Factory creating closed-loop RoverMotors over a single shared ESP32Bridge."""
+    geo = config["rover"]["geometry"]
+    mot = config["rover"]["motor"]
+    imu = config["rover"]["imu"]
+    return RoverMotors(
+        esp32_bridge=esp32_bridge,
+        localizer=localizer,
+        imu_heading_fn=imu_heading_fn,
+        wheel_radius_cm=geo["wheel_radius_cm"],
+        wheel_separation_cm=geo["wheel_separation_cm"],
+        skid_multiplier=geo["skid_steer_multiplier"],
+        cruise_linear_cms=mot["cruise_linear_cms"],
+        turn_angular_deg_s=mot["turn_angular_deg_s"],
+        heading_tolerance_deg=imu["heading_tolerance_deg"],
+        step_physics_fn=step_physics_fn,
+    )

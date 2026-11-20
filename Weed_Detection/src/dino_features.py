@@ -56,13 +56,17 @@ class DINOv2Extractor:
         """Extract features from all images in a directory."""
         data_path = Path(data_dir)
         features = {}
-        for img_path in data_path.rglob("*.{jpg,jpeg,png,webp}"):
-            try:
-                feat = self.extract_from_path(str(img_path))
-                features[str(img_path)] = feat
-                print(f"  + {img_path.name}: {feat.shape}")
-            except Exception as e:
-                print(f"  ! {img_path.name}: {e}")
+        extensions = ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.JPG", "*.JPEG", "*.PNG"]
+        for ext in extensions:
+            for img_path in data_path.rglob(ext):
+                if str(img_path) in features:
+                    continue
+                try:
+                    feat = self.extract_from_path(str(img_path))
+                    features[str(img_path)] = feat
+                    print(f"  + {img_path.name}: {feat.shape}")
+                except Exception as e:
+                    print(f"  ! {img_path.name}: {e}")
 
         np.savez(output_path, **features)
         print(f"\nSaved {len(features)} feature vectors to {output_path}")

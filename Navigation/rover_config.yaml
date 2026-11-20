@@ -1,59 +1,98 @@
-# Rover Configuration
+# ==============================================================================
+# Authoritative Rover Navigation & Real-Time Hardware Configuration
+# Resolves HW-01..HW-09 and NAV-01..NAV-12.
+# Navigation is strictly decoupled from weed-treatment actuators (legacy laser
+# retired; modular Flame / Grinder treatment attaches via abstract interface).
+# ==============================================================================
 
 rover:
-  # Motor settings
+  # Physical geometry (meters / centimeters aligned with chassis CAD)
+  geometry:
+    length_cm: 25.6
+    width_cm: 17.4
+    wheel_radius_cm: 3.5
+    wheel_separation_cm: 17.4
+    skid_steer_multiplier: 1.18
+    boundary_margin_cm: 15.0        # footprint + safety buffer inside field polygon
+
+  # Paired-channel differential drive (4 wheels coupled as Left/Right channels)
   motor:
-    left_pin_fwd: 26      # ESP32 GPIO (via L298N)
-    left_pin_bwd: 27
-    right_pin_fwd: 14
-    right_pin_bwd: 12
-    pwm_freq: 1000        # Hz
-    speed_default: 200    # 0-255 duty cycle
-    speed_turn: 180       # slower for rotation
-    step_forward_ms: 500  # move forward for 500ms per step
+    left_pin_fwd: 26                # L298N IN1
+    left_pin_bwd: 27                # L298N IN2
+    left_pin_pwm: 25                # L298N ENA (dedicated — zero conflict)
+    right_pin_fwd: 14               # L298N IN3
+    right_pin_bwd: 12               # L298N IN4
+    right_pin_pwm: 33               # L298N ENB (dedicated)
+    pwm_freq: 2000                  # Hz
+    max_linear_cms: 20.0            # 0.20 m/s safe field cruise cap
+    cruise_linear_cms: 15.0         # 0.15 m/s default row-follow speed
+    turn_angular_deg_s: 35.0        # controlled closed-loop turn rate
+    watchdog_timeout_ms: 250        # ESP32 auto-stop if host heartbeat lapses
 
-  # Servo gimbal settings
-  servo:
-    pan_pin: 18           # ESP32 GPIO
-    tilt_pin: 19          # ESP32 GPIO
-    pan_range: [0, 180]   # degrees
-    tilt_range: [30, 90]  # degrees (limited by arm geometry)
-    pan_center: 90        # center position
-    tilt_center: 60       # looking ~45deg down
-    settle_ms: 300        # wait after moving servo
+  # Wheel quadrature encoders (NAV-01)
+  encoders:
+    left_pin_a: 34                  # ESP32 input-only GPIO
+    left_pin_b: 35
+    right_pin_a: 36
+    right_pin_b: 39
+    ticks_per_rev: 17280            # 64 CPR x 270:1 metal geared DC motor
 
-  # Ultrasonic / ToF sensor
-  ultrasonic:
-    type: "vl53l0x"       # or "hc-sr04"
-    pin_trig: 23          # HC-SR04 only
-    pin_echo: 22          # HC-SR04 only
-    i2c_addr: 0x29        # VL53L0X I2C address
-    max_distance_mm: 2000 # max readable distance
-    min_distance_mm: 50   # too close — ignore
-    fire_distance_mm: 100 # ideal laser firing distance
+  # 9-DOF IMU for closed-loop heading & tilt protection (NAV-02)
+  imu:
+    type: "bno055"
+    i2c_sda_pin: 21
+    i2c_scl_pin: 22
+    i2c_addr: 0x28
+    max_safe_tilt_deg: 22.0
+    heading_tolerance_deg: 2.5
 
-  # Navigation
+  # Forward obstacle sensor (NAV-05, NAV-09, HW-02)
+  obstacle_sensor:
+    type: "vl53l0x"                 # "vl53l0x" (I2C 0x29) or "hc-sr04"
+    i2c_sda_pin: 21
+    i2c_scl_pin: 22
+    i2c_addr: 0x29
+    hc_sr04_trig_pin: 23            # used only when type == "hc-sr04"
+    hc_sr04_echo_pin: 5             # resolved conflict with I2C SCL GPIO 22
+    min_valid_mm: 40
+    max_valid_mm: 2000
+    obstacle_stop_mm: 350           # unknown obstacle -> safe OBSTACLE_HOLD
+    max_consecutive_faults: 2       # >=2 invalid reads -> immediate FAULT state
+
+  # Independent hardware safety sense lines (HW-08)
+  safety:
+    estop_sense_pin: 13             # Active-HIGH closed-loop E-stop relay contact
+    treatment_interlock_pin: 15     # Active-HIGH closed-loop treatment interlock
+    require_explicit_recovery: true # FAULT / E-STOP never auto-clears
+
+  # Structured field navigation & serpentine coverage (NAV-04, NAV-07, NAV-08)
   navigation:
-    row_width_cm: 60      # distance between crop rows
-    step_forward_cm: 20   # distance per forward step
-    row_end_threshold: 1000  # mm — ultrasonic sees no ground = row end
-    obstacle_threshold: 300  # mm — something ahead, stop
+    field_id: "field_01"
+    field_length_cm: 300.0          # X extent along crop rows
+    field_width_cm: 200.0           # Y extent across crop rows
+    row_width_cm: 60.0              # center-to-center row spacing
+    headland_margin_cm: 25.0        # row-end geometry margin from field wall
+    step_distance_cm: 12.0          # closed-loop encoder step distance
+    lateral_kp: 0.9                 # visual/pose row-centerline steering gain
+    heading_kp: 1.4                 # closed-loop heading hold gain
+    max_slip_residual_cm: 18.0      # triggers localization recovery request
+    checkpoint_file: "Navigation/mission_checkpoint.json"
 
-  # Laser
-  laser:
-    fire_pin: 25          # ESP32 GPIO (MOSFET gate)
-    dwell_time_ms: 300
-    cooldown_s: 1.0
-
+# Single shared serial connection to ESP32 (NAV-06)
 serial:
   esp32_port: "/dev/ttyUSB0"
   esp32_baud: 115200
-  esp32_timeout: 2
+  esp32_timeout_s: 0.5
 
+# Fixed downward-facing camera geometry (for navigation alignment & mapping)
 camera:
   device_id: 0
   resolution:
     width: 1280
     height: 720
   fps: 30
-  height_mm: 500          # camera mount height above ground
+  height_mm: 500
+  fov_x_deg: 72.0
+  fov_y_deg: 45.0
+  mount_offset_x_mm: 0.0
+  mount_offset_y_mm: 0.0
