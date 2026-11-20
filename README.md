@@ -7,62 +7,81 @@ A weed-detection and precision-elimination agricultural robot. Two operational g
 
 ---
 
-## 📱 End-to-End Workflow: From Phone Image to Autonomous Field Execution
+## 📱 End-to-End Workflow: Zero-Effort Phone Photo to Autonomous Execution
 
 ```
-[Phone App Photo] ──► [4-Corner Tap & Dimensions] ──► [OpenCV BEV Homography]
-         │                                                    │
-         ▼                                                    ▼
- [Upload via Wi-Fi/Hotspot]                            [Crop Rows Detected]
-         │                                                    │
-         ▼                                                    ▼
-[Raspberry Pi 5 Server] ◄────────────────────── [Boustrophedon Waypoints Generated]
+[Farmer snaps 1 photo on Phone]  ──► (No corner selection needed!)
          │
-         ├──► [MaixSense-A075V Depth (30°)] ──► Real-Time Furrow Centering (±25mm)
-         │                                      & Headland Row-End Corner Detection
+         ▼ (HTTP POST /image to Pi over Wi-Fi Hotspot)
+[Raspberry Pi 5 Onboard Pipeline]
+         ├──► 1. Automatic Field Boundary Detection (ExG + minAreaRect Contour)
+         │       - Detects field boundary polygon automatically
+         │       - Computes Homography & warps to 2D Top-Down Bird's-Eye-View (BEV)
          │
-         ├──► [YOLOv8 best.pt Edge AI]       ──► Weed Cut Coordinates (X_ground, Y_fwd)
-         │                                      & Monotonic Priority Queue (Band Sweep)
+         ├──► 2. Crop Row Segmentation & Regularization
+         │       - Identifies crop ridges vs. furrows using ExG projection
          │
-         ├──► [Passive Canopy Scanner]       ──► Healthy vs. Sick Chili Foliage
-         │                                      & Auto-Records 3s MP4 Evidence Clips
+         ├──► 3. Phone User Selects Start & End Points (2 Clicks)
+         │       - User clicks Start Point (e.g. Row 1, Furrow 1) and End Point on phone
+         │       - Pi generates optimal Boustrophedon serpentine route between them
          │
-         ├──► [FastAPI Live Dashboard]       ──► /video_feed, /map_feed, /cut_plan
-         │                                      Streamed to Phone in Real Time
+         ├──► 4. Live 3D Real-Time Furrow Guidance (MaixSense-A075V Depth @ 30°)
+         │       - Slices crop walls (>60mm elevation) to center rover (±25mm error)
+         │       - Automatically detects row ends (<520mm wall) for corner U-turns
+         │
+         ├──► 5. Edge AI Weed Targeting (YOLOv8 best.pt)
+         │       - Pinpoints stem base (X_ground, Y_fwd) in 3D ground coordinates
+         │       - Groups targets into 30mm forward bands sorted by minimum turret slew
+         │
+         ├──► 6. Passive Bad-Chili Surveillance
+         │       - Checks side canopy for chlorosis/necrosis; auto-records 3s MP4 clips
+         │
+         ├──► 7. Live FastAPI Feeds → Phone App Display
+         │       - /video_feed : Live camera stream + weed targets + cut points
+         │       - /map_feed   : Live top-down field map with rover position & weeds
+         │       - /cut_plan   : JSON telemetry (heading, turret angle, cut queue)
          │
          ▼ (UART Serial /dev/ttyUSB0 @ 115200)
 [ESP32 Motor & Turret Controller]
-         ├── 8-Direction Drive : 0° (Fwd), 45°/315° (Steer), 90°/270° (U-Turn Pivot), 180° (Rev)
-         ├── Turret Yaw Servo  : Aims 120° Sector Gear (-35° to +35°) Directly Over Stem Base
-         └── Dual Relay Board  : Relay 1 (Grinder Motor) / Relay 2 (Thermal Flame Solenoid)
+         ├── 8-Way Rover Drive : 0° (Fwd), 45°/315° (Steer), 90°/270° (U-Turn Pivot), 180° (Rev)
+         ├── Cylinder Turret   : Rotates MG996R sector gear (-35° to +35°) over weed stem base
+         └── Dual Relay Board  : Relay 1 (Grinder Motor) / Relay 2 (Thermal Flame Valve)
 ```
 
 ### Detailed Step-by-Step Execution
 
-#### Step 1: Field Capture & Bird's-Eye-View (BEV) Transformation (Android App)
-1. **Take an Angled Photo**: The farmer snaps a photo of the crop field using the Android app camera (`android_app/`).
-2. **Select 4 Corners & Enter Dimensions**: Tap the 4 boundary corners of the field plot and input the physical dimensions (e.g., $8\text{ m} \times 6\text{ m}$).
-3. **OpenCV Perspective Warp (Homography)**: The app runs `cv2.warpPerspective` to flatten the perspective-skewed image into a scaled, top-down 2D Bird's-Eye-View (BEV) grid where $1\text{ pixel} = X\text{ cm}$.
-4. **Crop Row Extraction**: `FieldAnalyzer.kt` computes Excess Green (`ExG = 2G - R - B`) and Otsu thresholding to identify parallel green crop ridges vs. walkable furrows.
+#### Step 1: 1-Click Photo Upload (No Manual Corner Selection)
+1. **Snap Field Photo**: The farmer simply points their phone camera at the field from the edge and takes a photo in the app (`android_app/`).
+2. **Instant Upload to Pi**: The phone uploads the raw image directly to the Raspberry Pi over the Wi-Fi hotspot (`POST /image`).
+3. **Automatic Pi-Side Field Boundary Detection**:
+   * The Pi calculates the Excess Green vegetation index (`ExG = 2G - R - B`) and Otsu thresholding.
+   * `cv2.findContours` + `cv2.minAreaRect` automatically identifies the bounding boundary of the planted field.
+   * Sorts the contour corners into Top-Left, Top-Right, Bottom-Right, Bottom-Left automatically — **zero manual corner-clicking required**.
+4. **Automatic BEV Homography**: The Pi runs `cv2.warpPerspective` to flatten the angled photo into a calibrated top-down Bird's-Eye-View (BEV) map.
 
-#### Step 2: Global Mission Planning & Transmission
-1. **Boustrophedon Coverage Plan**: `BoustrophedonGenerator.kt` connects the detected rows into an alternating serpentine traversal pattern with headland turning margins.
-2. **Sync to Raspberry Pi**: The phone connects to the rover's Wi-Fi hotspot and HTTP POSTs the mission JSON (`/image` or `/mission`) to the onboard server (`Navigation/sim/mission_server.py` or `pi_boustrophedon_brain.py`).
+#### Step 2: 2-Tap Waypoint Selection (Start Point & End Point)
+1. **Interactive Tap on Phone**: The phone displays the top-down field map generated by the Pi.
+2. **User Clicks Only 2 Points**:
+   * **Start Point**: Where the rover is placed (e.g. entrance of Row 1).
+   * **End Point**: Where the mission should finish (e.g. exit of Row 8).
+3. **Boustrophedon Serpentine Path Generation**:
+   * The Pi's path planner connects the Start and End points across all intermediate crop rows.
+   * Calculates row-end turn waypoints, headland margins, and traversal direction sequence (+Y then -Y).
 
-#### Step 3: Local 3D Depth Navigation & Corner Tracking (MaixSense-A075V)
-1. **Pitched 3D Elevation Slicing**: The MaixSense-A075V is mounted at $20\text{ cm}$ height, angled $30^\circ$ downward. Its $320 \times 240$ millimeter depth matrix projects onto a local height grid.
-2. **Crop Walls vs. Furrow Floor**: Crop ridges stand $>60\text{ mm}$ above the furrow soil. The Pi measures left vs. right wall distance:
-   $$\text{steer\_error} = \text{dist}_{\text{left}} - \text{dist}_{\text{right}}$$
-3. **8-Way Heading Command**:
-   * $|\text{error}| \le 25\text{ mm} \implies \mathbf{0^\circ}$ (Drive straight ahead).
-   * $\text{error} < -25\text{ mm} \implies \mathbf{45^\circ}$ (Veer slightly right).
-   * $\text{error} > +25\text{ mm} \implies \mathbf{315^\circ}$ (Veer slightly left).
-4. **Headland Corner Detection**: When crop walls terminate ahead ($\text{max\_wall\_y} < 520\text{ mm}$), the Pi triggers a row-end turn:
-   * **Odd rows**: Command $\mathbf{90^\circ}$ (In-place pivot right).
-   * **Even rows**: Command $\mathbf{270^\circ}$ (In-place pivot left).
-   * The rover shifts laterally across the headland ($0^\circ$ for row spacing) and locks into the next furrow corridor.
+#### Step 3: Autonomous Furrow Navigation & Corner Turns (MaixSense-A075V)
+1. **Real-Time 3D Depth Ridge Slicing**:
+   * The onboard MaixSense-A075V camera (mounted at $20\text{ cm}$ height, angled $30^\circ$ downward) delivers $320 \times 240$ millimeter depth data.
+   * Crop ridges stand $>60\text{ mm}$ above the furrow soil. The Pi calculates steering offset:
+     $$\text{steer\_error} = \text{dist}_{\text{left\_wall}} - \text{dist}_{\text{right\_wall}}$$
+2. **8-Way Discrete ESP32 Commands**:
+   * Centered ($|\text{error}| \le 25\text{ mm}$) $\implies \mathbf{0^\circ}$ (Forward straight).
+   * Drifting left ($\text{error} < -25\text{ mm}$) $\implies \mathbf{45^\circ}$ (Veer right).
+   * Drifting right ($\text{error} > +25\text{ mm}$) $\implies \mathbf{315^\circ}$ (Veer left).
+3. **Automatic Headland U-Turns**:
+   * When crop walls terminate ahead ($\text{max\_wall\_y} < 520\text{ mm}$), the Pi detects row-end.
+   * Executes a slip-free U-turn: $\mathbf{90^\circ}$ (Pivot Right) on odd rows or $\mathbf{270^\circ}$ (Pivot Left) on even rows, drives across the headland to the next row, aligns into the furrow, and continues until reaching the designated **End Point**.
 
-#### Step 4: YOLOv8 Weed Detection & Target Prioritization
+#### Step 4: YOLOv8 Weed Detection & Prioritization
 1. **Trained YOLOv8 Weights (`best.pt`)**: Detects weed instances at 12–18 FPS directly on the Pi.
 2. **$30^\circ$ Stem Base Geometry**: Converts pixel coordinates $[x_1, y_1, x_2, y_2]$ and depth $D$ into ground millimeters:
    $$X_{\text{ground}} = \frac{(u - 160) \cdot D}{280}, \quad Y_{\text{fwd}} = D \cos(30^\circ) - Y_c \sin(30^\circ)$$
@@ -79,7 +98,7 @@ A weed-detection and precision-elimination agricultural robot. Two operational g
 1. **Approach**: The rover drives forward until $\text{drive\_to\_cut} \le 15\text{ mm}$ (weed stem directly under the tool ring).
 2. **Aim Turret**: The Pi commands `TURRET <deg>`, rotating the MG996R sector gear to center the tool directly over the stem base.
 3. **Eliminate**: The Pi sends `CUT <GRINDER|FLAME> <duration_ms>`, triggering Relay 1 (high-speed rotary grinder) or Relay 2 (thermal flame valve) to destroy the weed without damaging crop roots.
-4. **Resume**: The rover immediately rotates to the next weed in the same band, or drives forward along the planned Boustrophedon route.
+4. **Resume**: The rover immediately rotates to the next weed in the same band, or drives forward along the planned Boustrophedon route until reaching the **End Point**.
 
 ---
 
