@@ -116,6 +116,7 @@ class RoverFirmwareController:
         self.meas_r = 0.0
         self.last_dist_mm = -1
         self.watchdog_tripped = False
+        self.estop_latched = False
 
         self.pid_l = VelocityPID()
         self.pid_r = VelocityPID()
@@ -224,12 +225,26 @@ class RoverFirmwareController:
             return -1
 
     def handle_command(self, line: str) -> str:
-        """Strictly validate and execute a single host command (HW-06)."""
+        """Strictly validate and execute a single host command (HW-06, Audit 1E)."""
         parts = line.strip().split()
         if not parts:
             return "ERR:EMPTY"
 
         cmd = parts[0].upper()
+
+        if cmd == "ESTOP":
+            self.estop_latched = True
+            self.force_stop()
+            return "OK:ESTOP_LATCHED"
+
+        if cmd == "CLEAR_LATCH":
+            if not self.estop_ok():
+                self.force_stop()
+                return "ERR:ESTOP_PIN_OPEN"
+            self.estop_latched = False
+            self.watchdog_tripped = False
+            self.last_cmd_ms = self._now_ms()
+            return "OK:LATCH_CLEARED"
 
         if cmd == "VEL":
             if len(parts) != 3:
@@ -244,26 +259,33 @@ class RoverFirmwareController:
             if abs(wl) > MAX_WHEEL_RAD_S or abs(wr) > MAX_WHEEL_RAD_S:
                 return "ERR:RANGE:EXCEEDS_MAX_RAD_S"
             if not self.estop_ok():
+                self.estop_latched = True
                 self.force_stop()
                 return "ERR:ESTOP_ACTIVE"
+            if self.estop_latched:
+                self.force_stop()
+                return "ERR:ESTOP_LATCHED"
+            if self.watchdog_tripped:
+                self.force_stop()
+                return "ERR:WATCHDOG_LATCHED"
             self.target_l = wl
             self.target_r = wr
             self.last_cmd_ms = self._now_ms()
-            self.watchdog_tripped = False
             return "OK"
 
         if cmd == "STOP":
             self.force_stop()
             self.last_cmd_ms = self._now_ms()
-            return "OK"
+            return "OK:STOPPED"
 
         if cmd == "TELEM?":
             self.last_dist_mm = self.read_distance_mm()
             wd_ok = 0 if self.watchdog_tripped else 1
+            safe_ok = 1 if (self.estop_ok() and not self.estop_latched) else 0
             return (
                 f"TELEM {self.left_ticks} {self.right_ticks} "
                 f"{self.meas_l:.4f} {self.meas_r:.4f} "
-                f"{self.last_dist_mm} {int(self.estop_ok())} {wd_ok}"
+                f"{self.last_dist_mm} {safe_ok} {wd_ok}"
             )
 
         if cmd == "DIST?":
@@ -278,20 +300,28 @@ class RoverFirmwareController:
             return "OK"
 
         if cmd == "PING":
-            self.last_cmd_ms = self._now_ms()
-            return f"PONG {int(self.estop_ok())}"
+            # PING refreshes comms liveness ONLY when not latched in watchdog/E-stop fault
+            if not self.watchdog_tripped and not self.estop_latched:
+                self.last_cmd_ms = self._now_ms()
+            safe_ok = 1 if (self.estop_ok() and not self.estop_latched) else 0
+            return f"PONG {safe_ok}"
 
         return f"ERR:UNKNOWN:{cmd}"
 
     def step_control(self, dt_s: float):
-        """50 Hz non-blocking PID & watchdog tick (HW-07, HW-08)."""
+        """50 Hz non-blocking PID & watchdog tick (HW-07, HW-08, Audit 1E)."""
         now = self._now_ms()
         elapsed_ms = time.ticks_diff(now, self.last_cmd_ms) if ON_ESP32 else (now - self.last_cmd_ms)
 
         if not self.estop_ok():
+            self.estop_latched = True
+            self.force_stop()
+        elif self.estop_latched:
             self.force_stop()
         elif elapsed_ms > WATCHDOG_MS:
             self.watchdog_tripped = True
+            self.force_stop()
+        elif self.watchdog_tripped:
             self.force_stop()
 
         dl = self.left_ticks - self.prev_l_ticks

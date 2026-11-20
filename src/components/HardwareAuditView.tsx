@@ -45,14 +45,14 @@ export const HardwareAuditView: React.FC = () => {
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-emerald-900/10 pb-4">
         <div>
           <h2 className="text-xl font-semibold tracking-tight text-slate-900">
-            Navigation Sector Audit Resolution (NAV-01..NAV-12 &amp; HW-01..HW-09)
+            Navigation Sector Audit Resolution (NAV-01..12, HW-01..09 &amp; 21 Nov 2026 Audit)
           </h2>
           <p className="text-xs text-slate-600 mt-1">
-            Scope strictly bounded to Navigation &amp; coupled real-time ESP32 firmware · Legacy laser detached · Modular Flame/Grinder ready
+            Scope strictly bounded to Navigation, Pi control server &amp; ESP32 firmware · Zero virtual pose · Verified E-stop ACK · One-shot target lifecycle
           </p>
         </div>
         <div className="text-xs font-mono tabular-nums text-emerald-700 font-semibold">
-          Verification: 8/8 unittest PASS · Honest Sim: 99.9% coverage · 0 faults
+          Verification: 13/13 unittest PASS · Honest Sim: 99.9% coverage · 0 faults
         </div>
       </div>
 
@@ -61,14 +61,14 @@ export const HardwareAuditView: React.FC = () => {
         <div className="bg-white border border-emerald-900/10 rounded-lg p-4">
           <div className="text-xs text-slate-500">Audit Items Resolved</div>
           <div className="text-2xl font-mono font-semibold tabular-nums text-emerald-700 mt-1">
-            12 / 12
+            {NAV_AUDIT_MATRIX.length} / {NAV_AUDIT_MATRIX.length}
           </div>
-          <div className="text-xs font-mono text-slate-500 mt-1">NAV-01..12 + HW-01..09</div>
+          <div className="text-xs font-mono text-slate-500 mt-1">NAV-01..12 + HW + AUD-26</div>
         </div>
         <div className="bg-white border border-emerald-900/10 rounded-lg p-4">
           <div className="text-xs text-slate-500">Automated Audit Tests</div>
           <div className="text-2xl font-mono font-semibold tabular-nums text-emerald-700 mt-1">
-            8 / 8 PASS
+            13 / 13 PASS
           </div>
           <div className="text-xs font-mono text-slate-500 mt-1">Navigation/tests/test_navigation_audit.py</div>
         </div>
@@ -80,15 +80,15 @@ export const HardwareAuditView: React.FC = () => {
           <div className="text-xs font-mono text-slate-500 mt-1">3/3 Rows · 66 Steps · 2 Turns</div>
         </div>
         <div className="bg-white border border-emerald-900/10 rounded-lg p-4">
-          <div className="text-xs text-slate-500">Treatment Coupling</div>
-          <div className="text-2xl font-mono font-semibold text-slate-900 mt-1">
-            DETACHED
+          <div className="text-xs text-slate-500">Safety Interlocks</div>
+          <div className="text-2xl font-mono font-semibold text-emerald-700 mt-1">
+            FAIL-CLOSED
           </div>
-          <div className="text-xs font-mono text-slate-500 mt-1">Zero laser imports in Navigation/</div>
+          <div className="text-xs font-mono text-slate-500 mt-1">503 Unverified E-Stop · 412 Gate</div>
         </div>
       </div>
 
-      {/* 1. Complete NAV-01..12 & HW-01..09 Resolution Matrix */}
+      {/* 1. Complete NAV-01..12, HW-01..09 & 21 Nov 2026 Resolution Matrix */}
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -109,7 +109,7 @@ export const HardwareAuditView: React.FC = () => {
                     : 'text-slate-600 hover:text-emerald-800 border border-transparent'
                 }`}
               >
-                {level === 'ALL' ? 'All (14)' : level}
+                {level === 'ALL' ? `All (${NAV_AUDIT_MATRIX.length})` : level}
               </button>
             ))}
           </div>

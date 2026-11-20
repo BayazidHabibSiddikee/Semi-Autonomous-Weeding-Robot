@@ -20,6 +20,8 @@ export interface VisionAlignmentData {
   rawHeadingErrorRad: number; // Raw ExG+Otsu frame observation (rad)
   rowWidthM: number;
   rowEndConfidence: number;
+  greenRatioFar?: number; // Top 1/3 ROI ExG foliage density (0..1)
+  greenRatioNear?: number; // Bottom 1/2 ROI ExG foliage density (0..1)
   missedFrames: number;
   cmdWzRadS: number;
   currentRow: number;

@@ -168,6 +168,160 @@ class NavigationAuditTestSuite(unittest.TestCase):
         self.assertTrue(fw.watchdog_tripped)
         self.assertEqual(fw.target_l, 0.0)
         self.assertEqual(fw.target_r, 0.0)
+        # Audit 1E: Watchdog latch MUST NOT clear on VEL or PING — only on explicit CLEAR_LATCH
+        self.assertEqual(fw.handle_command("VEL 1.0 1.0"), "ERR:WATCHDOG_LATCHED")
+        self.assertEqual(fw.handle_command("CLEAR_LATCH"), "OK:LATCH_CLEARED")
+        self.assertEqual(fw.handle_command("VEL 1.0 1.0"), "OK")
+
+    def test_audit26_1a_no_virtual_pose_without_physical_encoders(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.camera_monitor.record_frame_ok()
+        before = ctrl.get_status()["pose_measured"]
+
+        # Freeze physical wheel encoders (slip_factor = 0 -> zero ticks even if motor commanded)
+        ctrl.esp32.slip_factor_l = 0.0
+        ctrl.esp32.slip_factor_r = 0.0
+        ctrl.esp32.send_velocity(4.0, 4.0)
+        ctrl.esp32.step_physics(0.5)
+        telem = ctrl.esp32.read_telemetry()
+        ctrl.sm.rover.localizer.update(telem.left_ticks, telem.right_ticks, imu_heading_deg=0.0)
+        after = ctrl.get_status()["pose_measured"]
+
+        # Map position MUST NOT advance mathematically when physical encoders did not turn
+        self.assertAlmostEqual(after["x_cm"], before["x_cm"], delta=0.01)
+        self.assertAlmostEqual(after["y_cm"], before["y_cm"], delta=0.01)
+
+    def test_audit26_1c_camera_failure_causes_immediate_stop_no_blind_move(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.camera_monitor.record_frame_ok(now=100.0)
+        code, data = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True, now=100.1)
+        self.assertEqual(code, 200, data)
+
+        pose_before = ctrl.sm.rover.get_position()
+        # Simulate camera read failure -> must immediately STOP and enter FAULT (zero blind movement)
+        ctrl.camera_monitor.record_read_failure()
+        ctrl.camera_monitor.record_read_failure()
+        status = ctrl.step_control_loop(now=100.2)
+
+        self.assertEqual(status["state"], RoverState.FAULT)
+        self.assertIn("CAMERA_LOSS", status["fault_reason"])
+        self.assertFalse(status["mission_active"])
+        self.assertEqual(ctrl.sm.rover.get_position(), pose_before)
+
+    def test_audit26_1d_3c_3d_one_shot_target_lifecycle_and_crop_rejection(self):
+        from target_lifecycle import TargetExecutionManager, TargetState
+
+        # Uncalibrated manager MUST refuse detections (Audit 3D)
+        uncal = TargetExecutionManager(homography_matrix=None)
+        tgt, reason = uncal.ingest_detection("weed_dandelion", 0.95, 640, 360)
+        self.assertIsNone(tgt)
+        self.assertEqual(reason, "REJECTED_UNCALIBRATED_HOMOGRAPHY")
+
+        # Calibrated manager
+        H = [
+            [0.421, -0.012, -260.0],
+            [0.015, 0.418, 10.0],
+            [0.0, 0.0, 1.0],
+        ]
+        mgr = TargetExecutionManager(homography_matrix=H, dedup_radius_mm=45.0, cooldown_ms=1000)
+
+        # Audit 3C: Protected crops MUST be hard-rejected
+        tgt, reason = mgr.ingest_detection("crop_tomato", 0.99, 640, 360)
+        self.assertIsNone(tgt)
+        self.assertIn("REJECTED_PROTECTED_CROP", reason)
+        self.assertEqual(mgr.rejected_crops, 1)
+
+        # Valid weed accepted once, duplicate frame deduplicated
+        t1, r1 = mgr.ingest_detection("weed_dandelion", 0.91, 640, 360)
+        self.assertIsNotNone(t1)
+        self.assertEqual(r1, "VALIDATED")
+        t_dup, r_dup = mgr.ingest_detection("weed_dandelion", 0.93, 642, 361)
+        self.assertIsNone(t_dup)
+        self.assertEqual(r_dup, "DEDUPLICATED_EXISTING_TARGET")
+
+        # Cannot actuate while rover is moving
+        fires = []
+        ok, msg = mgr.execute_next_target(
+            rover_speed_cms=12.0,
+            estop_ok=True,
+            interlock_ok=True,
+            actuate_fn=lambda t, dwell: (fires.append((t.target_id, dwell)) or True),
+            verify_fn=lambda t: True,
+            now=10.0,
+        )
+        self.assertFalse(ok)
+        self.assertIn("ROVER_NOT_STATIONARY", msg)
+
+        # Stationary actuation fires ONCE and consumes target
+        ok, msg = mgr.execute_next_target(
+            rover_speed_cms=0.0,
+            estop_ok=True,
+            interlock_ok=True,
+            actuate_fn=lambda t, dwell: (fires.append((t.target_id, dwell)) or True),
+            verify_fn=lambda t: True,
+            now=10.5,
+        )
+        self.assertTrue(ok, msg)
+        self.assertEqual(len(fires), 1)
+        self.assertEqual(mgr.weeds_eliminated, 1)
+        self.assertEqual(t1.state, TargetState.CONSUMED)
+
+        # Re-seeing same weed on next frame MUST NOT re-actuate or double-count
+        t_again, r_again = mgr.ingest_detection("weed_dandelion", 0.94, 641, 359)
+        self.assertIsNone(t_again)
+        self.assertEqual(r_again, "DEDUPLICATED_EXISTING_TARGET")
+
+    def test_audit26_1e_estop_latch_and_unverified_ack_returns_503(self):
+        from pi_server import HardenedNavigationController
+
+        # Firmware E-stop latch check
+        fw = RoverFirmwareController()
+        self.assertEqual(fw.handle_command("ESTOP"), "OK:ESTOP_LATCHED")
+        self.assertEqual(fw.handle_command("VEL 2.0 2.0"), "ERR:ESTOP_LATCHED")
+        self.assertEqual(fw.handle_command("CLEAR_LATCH"), "OK:LATCH_CLEARED")
+        self.assertEqual(fw.handle_command("VEL 2.0 2.0"), "OK")
+
+        # Pi server /stop MUST return HTTP 503 when ESP32 ACK fails (disconnected / NO_ACK)
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.esp32.connected = False
+        code, body = ctrl.handle_stop()
+        self.assertEqual(code, 503)
+        self.assertFalse(body["ack_verified"])
+        self.assertFalse(body["stopped"])
+
+        # When ESP32 is connected and ACKs OK:ESTOP_LATCHED, /stop returns HTTP 200
+        ctrl.esp32.connected = True
+        code, body = ctrl.handle_stop()
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ack_verified"])
+        self.assertTrue(body["estop_latched"])
+
+    def test_audit26_2b_2c_3a_launch_interlocks_and_sample_image_guard(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True, model_loaded=False)
+        # Missing camera + missing weed model (when nav_only=False) -> blocked 412
+        code, body = ctrl.handle_start_mission(nav_only=False, operator_confirmed=True)
+        self.assertEqual(code, 412)
+        self.assertTrue(any("CAMERA_UNHEALTHY" in b for b in body["blockers"]))
+        self.assertIn("WEED_MODEL_NOT_LOADED", body["blockers"])
+        self.assertIn("HOMOGRAPHY_NOT_CALIBRATED", body["blockers"])
+
+        # Audit 2C: Sample demo image (/media/field_render.png) MUST be blocked on live hardware
+        ctrl.simulate = False
+        ctrl.camera_monitor.record_frame_ok()
+        code, body = ctrl.handle_start_mission(
+            source_type="sample",
+            image_url="/media/field_render.png",
+            nav_only=True,
+            operator_confirmed=True,
+        )
+        self.assertEqual(code, 412)
+        self.assertIn("SAMPLE_IMAGE_FORBIDDEN_ON_LIVE_HARDWARE", body["blockers"])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import { NavigationWorkbench } from './components/NavigationWorkbench';
 import { HardwareAuditView } from './components/HardwareAuditView';
 import { Ros2ToolsView } from './components/Ros2ToolsView';
 import { WeedVisionView } from './components/WeedVisionView';
+import { MobileCameraPublisher } from './components/MobileCameraPublisher';
 
 type TabId = 'navigation' | 'hardware' | 'ros2' | 'vision' | 'calibration';
 
@@ -16,6 +17,11 @@ const NAV_ITEMS: Array<{ id: TabId; label: string }> = [
 ];
 
 export default function App() {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('mode') === 'camera-publisher') {
+    return <MobileCameraPublisher initialRoom={urlParams.get('room') || 'rover-01'} />;
+  }
+
   const [activeTab, setActiveTab] = useState<TabId>('navigation');
   const [estopActive, setEstopActive] = useState<boolean>(false);
   const [eventLog, setEventLog] = useState<string[]>([

@@ -22,6 +22,15 @@ class Esp32Telemetry:
     valid: bool = True
 
 
+@dataclass
+class StopAckResult:
+    """Verified stop acknowledgement from ESP32 (Audit 1E: never treats SIM/NO_ACK/UART_ERR as verified HW stop)."""
+    verified: bool
+    response: str
+    simulated: bool = False
+    estop_latched: bool = False
+
+
 class ESP32Bridge:
     """
     Authoritative singleton-style shared serial bus to the ESP32.
@@ -97,9 +106,30 @@ class ESP32Bridge:
 
     def send_stop(self) -> bool:
         try:
-            return self.send("STOP") == "OK"
+            resp = self.send("STOP")
+            return resp in ("OK", "OK:STOPPED")
         except Exception:
             return False
+
+    def send_emergency_stop(self) -> StopAckResult:
+        """Issue latching hardware ESTOP over UART and verify strict firmware acknowledgement (Audit 1E)."""
+        if not self.connected or self.serial is None:
+            return StopAckResult(verified=False, response="UART_ERR:DISCONNECTED", simulated=False, estop_latched=False)
+        try:
+            resp = self.send("ESTOP")
+        except Exception as exc:
+            return StopAckResult(verified=False, response=f"UART_ERR:{exc}", simulated=False, estop_latched=False)
+
+        if resp in ("OK:ESTOP_LATCHED", "OK:STOPPED"):
+            return StopAckResult(verified=True, response=resp, simulated=False, estop_latched=True)
+        return StopAckResult(verified=False, response=resp or "NO_ACK", simulated=False, estop_latched=False)
+
+    def clear_latch(self) -> tuple[bool, str]:
+        try:
+            resp = self.send("CLEAR_LATCH")
+            return resp == "OK:LATCH_CLEARED", resp
+        except Exception as exc:
+            return False, f"UART_ERR:{exc}"
 
     def reset_encoders(self) -> bool:
         return self.send("RESET_ENC") == "OK"
@@ -187,7 +217,16 @@ class ESP32Simulator:
         if action == "STOP":
             self.left_rad_s = 0.0
             self.right_rad_s = 0.0
-            return "OK"
+            return "OK:STOPPED"
+        if action == "ESTOP":
+            self.left_rad_s = 0.0
+            self.right_rad_s = 0.0
+            self.estop_ok = False
+            return "OK:ESTOP_LATCHED"
+        if action == "CLEAR_LATCH":
+            self.estop_ok = True
+            self.watchdog_ok = True
+            return "OK:LATCH_CLEARED"
         if action == "RESET_ENC":
             self.left_ticks = 0
             self.right_ticks = 0
@@ -196,7 +235,7 @@ class ESP32Simulator:
             return f"DIST:{self.distance_mm}"
         if action == "VEL" and len(parts) == 3:
             if not self.estop_ok:
-                return "ERR:ESTOP_ACTIVE"
+                return "ERR:ESTOP_LATCHED"
             self.left_rad_s = float(parts[1])
             self.right_rad_s = float(parts[2])
             return "OK"
@@ -207,7 +246,22 @@ class ESP32Simulator:
         return resp == "OK", resp
 
     def send_stop(self) -> bool:
-        return self.send("STOP") == "OK"
+        return self.send("STOP") in ("OK", "OK:STOPPED")
+
+    def send_emergency_stop(self) -> StopAckResult:
+        if not self.connected:
+            return StopAckResult(verified=False, response="NO_ACK", simulated=True, estop_latched=False)
+        resp = self.send("ESTOP")
+        return StopAckResult(
+            verified=(resp == "OK:ESTOP_LATCHED"),
+            response=resp,
+            simulated=True,
+            estop_latched=(resp == "OK:ESTOP_LATCHED"),
+        )
+
+    def clear_latch(self) -> tuple[bool, str]:
+        resp = self.send("CLEAR_LATCH")
+        return resp == "OK:LATCH_CLEARED", resp
 
     def reset_encoders(self) -> bool:
         return self.send("RESET_ENC") == "OK"

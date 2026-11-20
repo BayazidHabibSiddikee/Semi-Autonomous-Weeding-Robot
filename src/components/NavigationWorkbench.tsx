@@ -5,7 +5,6 @@ import {
   RotateCcw,
   AlertOctagon,
   Compass,
-  Eye,
   Radio,
   Plus,
   Trash2,
@@ -16,8 +15,7 @@ import {
   Wrench,
   Camera,
   CameraOff,
-  Upload,
-  RefreshCw,
+  Wifi,
 } from 'lucide-react';
 import {
   LineChart,
@@ -29,8 +27,17 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { CropRowAlignmentGauge, VisionAlignmentData } from './CropRowAlignmentGauge';
-import { useLiveCameraVision } from '../vision/useLiveCameraVision';
-import type { CameraOverlayMode } from '../vision/cropRowVision';
+import { RealTimeCameraStream, StreamTransportMode } from './RealTimeCameraStream';
+import { CameraFeedTrigger, RealTimeCameraFeed } from './RealTimeCameraFeed';
+import { RowEndDetectionPanel } from './RowEndDetectionPanel';
+import {
+  DEFAULT_ROW_END_CONFIG,
+  RowEndDetectionConfig,
+  RowEndDetectionService,
+  RowEndDetectionSnapshot,
+  RowEndVisionInput,
+  formatTurnLabel,
+} from '../services/rowEndDetectionService';
 
 interface Props {
   estopActive: boolean;
@@ -201,6 +208,15 @@ function useVisionNodeTelemetry(
         tr.trackedYawRad = (1 - ALPHA_YAW) * tr.trackedYawRad + ALPHA_YAW * rawYawRad;
         tr.missedFrames = 0;
 
+        const simGreenFar = Math.max(
+          0.004,
+          Math.min(0.32, 0.22 * (1 - src.rowEndConf) + Math.sin(t * 2.3) * 0.008)
+        );
+        const simGreenNear = Math.max(
+          0.02,
+          Math.min(0.36, 0.27 * (1 - src.rowEndConf * 0.35) + Math.cos(t * 1.9) * 0.008)
+        );
+
         setAlignment({
           trackingLocked: true,
           lateralOffsetM: tr.trackedLatM,
@@ -209,6 +225,8 @@ function useVisionNodeTelemetry(
           rawHeadingErrorRad: rawYawRad,
           rowWidthM,
           rowEndConfidence: src.rowEndConf,
+          greenRatioFar: simGreenFar,
+          greenRatioNear: simGreenNear,
           missedFrames: 0,
           cmdWzRadS: src.cmdWz,
           currentRow: src.rowIdx + 1,
@@ -225,6 +243,8 @@ function useVisionNodeTelemetry(
           rawHeadingErrorRad: tr.trackedYawRad,
           rowWidthM,
           rowEndConfidence: src.rowEndConf,
+          greenRatioFar: 0.005,
+          greenRatioNear: 0.012,
           missedFrames: tr.missedFrames,
           cmdWzRadS: src.cmdWz,
           currentRow: src.rowIdx + 1,
@@ -248,9 +268,15 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
   const [sensorFaultInjected, setSensorFaultInjected] = useState<boolean>(false);
   const [faultReason, setFaultReason] = useState<string | null>(null);
   const [checkpoint, setCheckpoint] = useState<SavedCheckpoint | null>(null);
-  const [cameraOverlayMode, setCameraOverlayMode] = useState<CameraOverlayMode>('overlay');
-  const [minExgFloor, setMinExgFloor] = useState<number>(22);
-  const mediaInputRef = useRef<HTMLInputElement | null>(null);
+  const [streamMode, setStreamMode] = useState<StreamTransportMode>('sim');
+  const [liveVisionState, setLiveVisionState] = useState<{
+    active: boolean;
+    alignment: VisionAlignmentData | null;
+  }>({ active: false, alignment: null });
+  const [streamAction, setStreamAction] = useState<{
+    type: 'start_local' | 'start_webrtc' | 'start_ws' | 'stop_to_sim';
+    seq: number;
+  } | null>(null);
 
   const [telemetry, setTelemetry] = useState({
     phase: 'FOLLOW_CROP_ROW' as MissionPhase,
@@ -322,24 +348,54 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     100
   );
 
-  // Real-time browser webcam / uploaded video-image computer vision hook (ExG + Otsu + Strip Centerline)
-  const liveCamera = useLiveCameraVision({
-    canvasRef: camCanvasRef,
-    rowWidthM: rowWidthCm / 100,
-    stanleyGain,
-    speedLimit,
-    minExgFloor,
-    overlayMode: cameraOverlayMode,
-    onLogEvent,
-  });
+  const handleLiveAlignmentChange = useCallback(
+    (nextAlignment: VisionAlignmentData, isLive: boolean) => {
+      setLiveVisionState({ active: isLive, alignment: isLive ? nextAlignment : null });
+    },
+    []
+  );
 
-  const isRealVisionActive = liveCamera.sourceMode !== 'sim';
-  const visionAlignment: VisionAlignmentData = isRealVisionActive
-    ? liveCamera.alignment
-    : {
-        ...simVisionAlignment,
-        sourceLabel: `FIELD SIM · Row ${simVisionAlignment.currentRow} · /crop_row/alignment`,
-      };
+  const triggerStreamAction = (type: 'start_local' | 'start_webrtc' | 'start_ws' | 'stop_to_sim') => {
+    setStreamAction((prev) => ({ type, seq: (prev?.seq ?? 0) + 1 }));
+  };
+
+  const simAlignmentWithLabel: VisionAlignmentData = {
+    ...simVisionAlignment,
+    sourceLabel: `FIELD SIM · Row ${simVisionAlignment.currentRow} · /crop_row/alignment`,
+  };
+
+  const [cameraFeedState, setCameraFeedState] = useState<{
+    active: boolean;
+    alignment: VisionAlignmentData | null;
+  }>({ active: false, alignment: null });
+  const [cameraFeedTrigger, setCameraFeedTrigger] = useState<CameraFeedTrigger | null>(null);
+
+  const triggerCameraFeed = (action: 'start' | 'stop') => {
+    setCameraFeedTrigger((prev) => ({ action, seq: (prev?.seq ?? 0) + 1 }));
+  };
+
+  const handleCameraFeedAlignment = useCallback(
+    (nextAlignment: VisionAlignmentData, active: boolean) => {
+      setCameraFeedState({ active, alignment: active ? nextAlignment : null });
+    },
+    []
+  );
+
+  const visionAlignment: VisionAlignmentData =
+    cameraFeedState.active && cameraFeedState.alignment
+      ? cameraFeedState.alignment
+      : liveVisionState.active && liveVisionState.alignment
+      ? liveVisionState.alignment
+      : simAlignmentWithLabel;
+
+  // Dedicated row_end_detection vision service instance
+  const rowEndServiceRef = useRef<RowEndDetectionService>(
+    new RowEndDetectionService(DEFAULT_ROW_END_CONFIG)
+  );
+  const [rowEndConfig, setRowEndConfig] = useState<RowEndDetectionConfig>(DEFAULT_ROW_END_CONFIG);
+  const [rowEndSnapshot, setRowEndSnapshot] = useState<RowEndDetectionSnapshot>(() =>
+    rowEndServiceRef.current.getSnapshot()
+  );
 
   const paramsRef = useRef({
     running,
@@ -351,7 +407,8 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     obstacles,
     sensorFaultInjected,
     faultReason,
-    visionSourceMode: liveCamera.sourceMode,
+    visionSourceMode: streamMode,
+    rowEndConfig,
   });
 
   useEffect(() => {
@@ -365,7 +422,8 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       obstacles,
       sensorFaultInjected,
       faultReason,
-      visionSourceMode: liveCamera.sourceMode,
+      visionSourceMode: streamMode,
+      rowEndConfig,
     };
   }, [
     running,
@@ -377,8 +435,193 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     obstacles,
     sensorFaultInjected,
     faultReason,
-    liveCamera.sourceMode,
+    streamMode,
+    rowEndConfig,
   ]);
+
+  const buildRowEndVisionInput = useCallback(
+    (align: VisionAlignmentData): RowEndVisionInput => {
+      const s = simRef.current;
+      const isLiveCamera = cameraFeedState.active || liveVisionState.active;
+      return {
+        rowEndConfidence: align.rowEndConfidence,
+        greenRatioFar:
+          align.greenRatioFar ?? Math.max(0.004, 0.2 * (1 - align.rowEndConfidence)),
+        greenRatioNear: align.greenRatioNear ?? 0.22,
+        trackingLocked: align.trackingLocked,
+        missedFrames: align.missedFrames,
+        currentRow: s.rowIdx + 1,
+        totalRows: NUM_ROWS,
+        direction: s.dir >= 0 ? 1 : -1,
+        sourceLabel: align.sourceLabel || 'Vision Node',
+        isLiveCamera,
+        timestampMs: performance.now(),
+      };
+    },
+    [cameraFeedState.active, liveVisionState.active]
+  );
+
+  const dispatchHeadlandTurn = useCallback(
+    (triggerOrigin: 'operator' | 'auto') => {
+      const s = simRef.current;
+      const rw = paramsRef.current.rowWidthM;
+      if (paramsRef.current.estopActive || paramsRef.current.faultReason !== null || paramsRef.current.sensorFaultInjected) {
+        return;
+      }
+
+      if (s.rowIdx >= NUM_ROWS - 1) {
+        s.rowProgress[s.rowIdx] = 1.0;
+        s.phase = 'MISSION_COMPLETE';
+        s.cmdVx = 0;
+        s.cmdWz = 0;
+        setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+        onLogEvent(
+          `[row_end_detection] Final row (Row ${NUM_ROWS}) complete (${triggerOrigin}) — rover halted cleanly at headland.`
+        );
+        return;
+      }
+
+      const nextRowIdx = s.rowIdx + 1;
+      const yFrom = rowCenterY(s.rowIdx, rw);
+      const yTo = rowCenterY(nextRowIdx, rw);
+      const exitX = s.dir > 0 ? ROW_END_X + 0.62 : ROW_START_X - 0.62;
+      const entryX = s.dir > 0 ? ROW_END_X - 0.1 : ROW_START_X + 0.1;
+      const nextYaw = s.dir > 0 ? Math.PI : 0;
+
+      s.rowProgress[s.rowIdx] = 1.0;
+      s.turnWaypoints = [
+        { x: exitX, y: yFrom, yaw: Math.PI / 2 },
+        { x: exitX, y: yTo, yaw: nextYaw },
+        { x: entryX, y: yTo, yaw: nextYaw },
+      ];
+      s.turnWpIdx = 0;
+      s.phase = 'NAV2_HEADLAND_TURN';
+      setRunning(true);
+      setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart());
+      onLogEvent(
+        `[row_end_detection] Dispatched Nav2 Headland U-Turn (${triggerOrigin}): Row ${s.rowIdx + 1} → Row ${nextRowIdx + 1} (${s.dir > 0 ? 'RIGHT_U_TURN' : 'LEFT_U_TURN'}).`
+      );
+    },
+    [onLogEvent]
+  );
+
+  // Continuously feed active vision frames (Live <video>, WebRTC/WS, or Field Sim) into row_end_detection
+  useEffect(() => {
+    const s = simRef.current;
+    const isLiveCamera = cameraFeedState.active || liveVisionState.active;
+    if (!isLiveCamera && (s.phase === 'MISSION_COMPLETE' || s.phase === 'NAV2_HEADLAND_TURN')) {
+      return;
+    }
+
+    const input = buildRowEndVisionInput(visionAlignment);
+    const { newlyTriggeredAlert, snapshot } = rowEndServiceRef.current.processVisionFrame(input);
+    setRowEndSnapshot(snapshot);
+
+    if (newlyTriggeredAlert) {
+      onLogEvent(
+        `[row_end_detection] TURN ALERT ${newlyTriggeredAlert.id}: Row ${newlyTriggeredAlert.row} end detected (${Math.round(
+          newlyTriggeredAlert.confidence * 100
+        )}% conf, Far-ROI ${newlyTriggeredAlert.farGreenPct.toFixed(1)}% green) → ${formatTurnLabel(
+          newlyTriggeredAlert.recommendedTurn
+        )}.`
+      );
+
+      if (s.phase === 'FOLLOW_CROP_ROW') {
+        s.rowProgress[s.rowIdx] = 1.0;
+        s.phase = 'ROW_END_STOP';
+        s.phaseTimer = 1.3;
+        s.cmdVx = 0;
+        s.cmdWz = 0;
+      }
+    }
+  }, [
+    visionAlignment,
+    cameraFeedState.active,
+    liveVisionState.active,
+    buildRowEndVisionInput,
+    onLogEvent,
+  ]);
+
+  const handleUpdateRowEndConfig = useCallback(
+    (patch: Partial<RowEndDetectionConfig>) => {
+      rowEndServiceRef.current.updateConfig(patch);
+      const nextCfg = rowEndServiceRef.current.getConfig();
+      setRowEndConfig(nextCfg);
+      setRowEndSnapshot(rowEndServiceRef.current.getSnapshot());
+      if (patch.enabled !== undefined) {
+        onLogEvent(
+          `[row_end_detection] Service ${patch.enabled ? 'ENABLED' : 'PAUSED'} by operator.`
+        );
+      } else if (patch.turnDispatchMode !== undefined) {
+        onLogEvent(
+          `[row_end_detection] Turn dispatch policy set to ${
+            patch.turnDispatchMode === 'auto_execute' ? 'AUTO-EXECUTE' : 'ALERT & CONFIRM'
+          }.`
+        );
+      }
+    },
+    [onLogEvent]
+  );
+
+  const handleDismissRowEndAlert = useCallback(() => {
+    const snap = rowEndServiceRef.current.dismissAlert();
+    setRowEndSnapshot(snap);
+    const s = simRef.current;
+    if (s.phase === 'ROW_END_STOP') {
+      const distToEnd = s.dir > 0 ? ROW_END_X - s.x : s.x - ROW_START_X;
+      if (distToEnd > 0.25) {
+        s.phase = 'FOLLOW_CROP_ROW';
+      } else {
+        setRunning(false);
+      }
+    }
+    onLogEvent('[row_end_detection] Operator dismissed turn alert — entered post-alert cooldown.');
+  }, [onLogEvent]);
+
+  const handleInvokeRowEndCheck = useCallback(() => {
+    const input = buildRowEndVisionInput(visionAlignment);
+    const { response, newlyTriggeredAlert, snapshot } =
+      rowEndServiceRef.current.invokeServiceCheck(input);
+    setRowEndSnapshot(snapshot);
+    onLogEvent(
+      `[RPC /navigation/row_end_detection] row_end_detected=${response.rowEndDetected} (conf ${Math.round(
+        response.confidence * 100
+      )}%, Far-ROI ${response.farGreenPct.toFixed(1)}%) — ${response.reason}`
+    );
+    if (newlyTriggeredAlert && simRef.current.phase === 'FOLLOW_CROP_ROW') {
+      simRef.current.rowProgress[simRef.current.rowIdx] = 1.0;
+      simRef.current.phase = 'ROW_END_STOP';
+      simRef.current.phaseTimer = 1.3;
+      simRef.current.cmdVx = 0;
+      simRef.current.cmdWz = 0;
+    }
+  }, [buildRowEndVisionInput, visionAlignment, onLogEvent]);
+
+  const handleJumpToRowEndTest = useCallback(() => {
+    if (estopActive || faultReason !== null || sensorFaultInjected) return;
+    const s = simRef.current;
+    const rw = rowWidthCm / 100;
+    if (s.phase === 'MISSION_COMPLETE') {
+      s.rowIdx = 0;
+      s.dir = 1;
+      s.rowProgress = [0, 0, 0, 0];
+    }
+    const targetY = rowCenterY(s.rowIdx, rw);
+    s.x = s.dir > 0 ? ROW_END_X - 0.88 : ROW_START_X + 0.88;
+    s.y = targetY;
+    s.yaw = s.dir > 0 ? 0 : Math.PI;
+    s.rawX = s.x;
+    s.rawY = s.y;
+    s.rawYaw = s.yaw;
+    s.phase = 'FOLLOW_CROP_ROW';
+    s.turnWaypoints = [];
+    s.rowEndConf = 0.12;
+    setRowEndSnapshot(rowEndServiceRef.current.reset());
+    setRunning(true);
+    onLogEvent(
+      `[row_end_detection] Positioned rover 0.88 m from Row ${s.rowIdx + 1} headland to test live vision row-end detection & turn alert.`
+    );
+  }, [estopActive, faultReason, sensorFaultInjected, rowWidthCm, onLogEvent]);
 
   const resetSimulation = (newRowWidthCm = rowWidthCm) => {
     const rw = newRowWidthCm / 100;
@@ -418,6 +661,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       boundaryOk: true,
     };
     syncVisionTracker(0.05, 0.06);
+    setRowEndSnapshot(rowEndServiceRef.current.reset());
     setHistory(
       Array.from({ length: 24 }, (_, idx) => ({
         t: `-${24 - idx}s`,
@@ -545,6 +789,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     s.turnWaypoints = [];
     s.ekfPath = [{ x: checkpoint.x, y: checkpoint.y }];
     s.rawPath = [{ x: checkpoint.x, y: checkpoint.y }];
+    setRowEndSnapshot(rowEndServiceRef.current.reset());
     setRunning(true);
     onLogEvent(
       `[NAV-12] Resumed mission from checkpoint (${checkpoint.savedAt}) at Row ${checkpoint.rowIdx + 1} (${checkpoint.coveragePct.toFixed(1)}% covered).`
@@ -677,10 +922,11 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             s.activeTargetId = nearbyTarget.id;
             vx = 0;
             wz = 0;
-          } else if (s.rowEndConf >= 0.88) {
+          } else if (s.rowEndConf >= 0.96) {
+            // Hard boundary backstop if row_end_detection service is paused or not yet latched
             s.rowProgress[s.rowIdx] = 1.0;
             s.phase = 'ROW_END_STOP';
-            s.phaseTimer = 0.65;
+            s.phaseTimer = 1.1;
             vx = 0;
             wz = 0;
           } else {
@@ -702,24 +948,31 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             s.phase = 'FOLLOW_CROP_ROW';
           }
         } else if (s.phase === 'ROW_END_STOP') {
-          s.phaseTimer -= dt;
-          if (s.phaseTimer <= 0) {
-            if (s.rowIdx >= NUM_ROWS - 1) {
-              s.phase = 'MISSION_COMPLETE';
-            } else {
-              const nextRowIdx = s.rowIdx + 1;
-              const yFrom = rowCenterY(s.rowIdx, rw);
-              const yTo = rowCenterY(nextRowIdx, rw);
-              const exitX = s.dir > 0 ? ROW_END_X + 0.62 : ROW_START_X - 0.62;
-              const entryX = s.dir > 0 ? ROW_END_X - 0.1 : ROW_START_X + 0.1;
-              const nextYaw = s.dir > 0 ? Math.PI : 0;
-              s.turnWaypoints = [
-                { x: exitX, y: yFrom, yaw: Math.PI / 2 },
-                { x: exitX, y: yTo, yaw: nextYaw },
-                { x: entryX, y: yTo, yaw: nextYaw },
-              ];
-              s.turnWpIdx = 0;
-              s.phase = 'NAV2_HEADLAND_TURN';
+          // Hold cleanly for operator turn confirmation in alert_and_confirm mode; auto-dispatch in auto_execute mode
+          const autoDispatch =
+            !p.rowEndConfig.enabled || p.rowEndConfig.turnDispatchMode === 'auto_execute';
+          if (autoDispatch) {
+            s.phaseTimer -= dt;
+            if (s.phaseTimer <= 0) {
+              if (s.rowIdx >= NUM_ROWS - 1) {
+                s.phase = 'MISSION_COMPLETE';
+                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+              } else {
+                const nextRowIdx = s.rowIdx + 1;
+                const yFrom = rowCenterY(s.rowIdx, rw);
+                const yTo = rowCenterY(nextRowIdx, rw);
+                const exitX = s.dir > 0 ? ROW_END_X + 0.62 : ROW_START_X - 0.62;
+                const entryX = s.dir > 0 ? ROW_END_X - 0.1 : ROW_START_X + 0.1;
+                const nextYaw = s.dir > 0 ? Math.PI : 0;
+                s.turnWaypoints = [
+                  { x: exitX, y: yFrom, yaw: Math.PI / 2 },
+                  { x: exitX, y: yTo, yaw: nextYaw },
+                  { x: entryX, y: yTo, yaw: nextYaw },
+                ];
+                s.turnWpIdx = 0;
+                s.phase = 'NAV2_HEADLAND_TURN';
+                setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart());
+              }
             }
           }
         } else if (s.phase === 'NAV2_HEADLAND_TURN') {
@@ -728,6 +981,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             s.rowIdx += 1;
             s.dir *= -1;
             s.phase = 'FOLLOW_CROP_ROW';
+            setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
           } else {
             const dx = wp.x - s.x;
             const dy = wp.y - s.y;
@@ -738,6 +992,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                 s.rowIdx += 1;
                 s.dir *= -1;
                 s.phase = 'FOLLOW_CROP_ROW';
+                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
               }
             } else {
               const desiredYaw = Math.atan2(dy, dx);
@@ -860,42 +1115,36 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Real-Time Camera Vision Trigger */}
-          <input
-            ref={mediaInputRef}
-            type="file"
-            accept="video/*,image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) liveCamera.loadMediaFile(file);
-              e.target.value = '';
-            }}
-          />
-          {liveCamera.sourceMode === 'webcam' ? (
+          {/* Quick Real-Time Video Stream Controls */}
+          {cameraFeedState.active || streamMode !== 'sim' ? (
             <button
-              onClick={liveCamera.switchToSim}
+              onClick={() => {
+                if (cameraFeedState.active) triggerCameraFeed('stop');
+                if (streamMode !== 'sim') triggerStreamAction('stop_to_sim');
+              }}
               className="px-3.5 py-2 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
             >
               <CameraOff className="w-3.5 h-3.5" />
-              <span>Stop Live Camera</span>
+              <span>Stop Camera Feed</span>
             </button>
           ) : (
-            <button
-              onClick={() => void liveCamera.startWebcam()}
-              className="px-3.5 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Start Live Camera CV</span>
-            </button>
+            <>
+              <button
+                onClick={() => triggerCameraFeed('start')}
+                className="px-3.5 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Device Camera</span>
+              </button>
+              <button
+                onClick={() => triggerStreamAction('start_webrtc')}
+                className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+                <span>WebRTC / CameraX WS</span>
+              </button>
+            </>
           )}
-          <button
-            onClick={() => mediaInputRef.current?.click()}
-            className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Test Video / Photo</span>
-          </button>
 
           <div className="flex items-center p-1 bg-[#EDF5F0] border border-emerald-900/10 rounded-lg">
             <button
@@ -1112,6 +1361,29 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
           {/* Dedicated Vision Node Crop-Row Alignment Visualization Block (Prominent Top Band) */}
           <CropRowAlignmentGauge alignment={visionAlignment} />
 
+          {/* Vision-Based row_end_detection Service & Turn Execution Alert Console */}
+          <RowEndDetectionPanel
+            snapshot={rowEndSnapshot}
+            config={rowEndConfig}
+            estopActive={estopActive}
+            isFaulted={isFaulted}
+            onUpdateConfig={handleUpdateRowEndConfig}
+            onExecuteTurn={() => dispatchHeadlandTurn('operator')}
+            onDismissAlert={handleDismissRowEndAlert}
+            onInvokeServiceCheck={handleInvokeRowEndCheck}
+            onJumpToRowEndTest={handleJumpToRowEndTest}
+          />
+
+          {/* Live Device Camera Crop-Row Feed (<video> via getUserMedia) */}
+          <RealTimeCameraFeed
+            rowWidthM={rowWidthCm / 100}
+            stanleyGain={stanleyGain}
+            speedLimit={speedLimit}
+            externalTrigger={cameraFeedTrigger}
+            onAlignmentUpdate={handleCameraFeedAlignment}
+            onLogEvent={onLogEvent}
+          />
+
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
             {/* Top-Down Field + Boundary Polygon + EKF + LiDAR Map */}
             <div className="lg:col-span-8 bg-white border border-emerald-900/10 rounded-lg p-4 flex flex-col gap-3">
@@ -1178,239 +1450,20 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
               </div>
             </div>
 
-            {/* Forward-Facing Visual Crop-Row Camera (Real-Time Browser CV or Field Sim) */}
-            <div className="lg:col-span-4 bg-white border border-emerald-900/10 rounded-lg p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Eye className="w-4 h-4 text-emerald-600" />
-                  <h3 className="text-sm font-semibold text-slate-900">
-                    {liveCamera.sourceMode === 'webcam'
-                      ? 'Live Camera Vision'
-                      : liveCamera.sourceMode === 'media'
-                      ? 'Uploaded Media Vision'
-                      : 'Forward Nav Camera'}
-                  </h3>
-                </div>
-                <span className="text-[11px] font-mono text-emerald-700 font-semibold">
-                  {liveCamera.sourceMode === 'webcam'
-                    ? liveCamera.cameraStatus === 'active'
-                      ? `● LIVE ${liveCamera.diagnostics.fps.toFixed(0)} FPS`
-                      : liveCamera.cameraStatus === 'requesting'
-                      ? 'OPENING...'
-                      : 'CAM ERROR'
-                    : liveCamera.sourceMode === 'media'
-                    ? '● REAL CV'
-                    : 'SIM FEED'}
-                </span>
-              </div>
-
-              {/* Source Mode Selector Bar */}
-              <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#EDF5F0] border border-emerald-900/10 rounded-md">
-                <button
-                  onClick={() => void liveCamera.startWebcam()}
-                  className={`py-1 text-[11px] font-medium rounded transition-colors cursor-pointer ${
-                    liveCamera.sourceMode === 'webcam'
-                      ? 'bg-emerald-600 text-white font-semibold'
-                      : 'text-slate-600 hover:text-emerald-800'
-                  }`}
-                >
-                  Live Cam
-                </button>
-                <button
-                  onClick={() => mediaInputRef.current?.click()}
-                  className={`py-1 text-[11px] font-medium rounded transition-colors cursor-pointer ${
-                    liveCamera.sourceMode === 'media'
-                      ? 'bg-emerald-600 text-white font-semibold'
-                      : 'text-slate-600 hover:text-emerald-800'
-                  }`}
-                >
-                  Video/Img
-                </button>
-                <button
-                  onClick={liveCamera.switchToSim}
-                  className={`py-1 text-[11px] font-medium rounded transition-colors cursor-pointer ${
-                    liveCamera.sourceMode === 'sim'
-                      ? 'bg-white text-emerald-800 border border-emerald-200 font-semibold'
-                      : 'text-slate-600 hover:text-emerald-800'
-                  }`}
-                >
-                  Field Sim
-                </button>
-              </div>
-
-              <div className="relative rounded border border-emerald-900/10 bg-[#141A17] overflow-hidden">
-                <canvas ref={camCanvasRef} width={340} height={240} className="w-full h-auto block" />
-                {isRealVisionActive && liveCamera.cameraStatus === 'requesting' && (
-                  <div className="absolute inset-0 bg-slate-950/70 flex flex-col items-center justify-center p-4 text-center gap-2">
-                    <Camera className="w-6 h-6 text-emerald-400" />
-                    <span className="text-xs font-mono text-emerald-100">
-                      Requesting camera stream...
-                    </span>
-                  </div>
-                )}
-                {isRealVisionActive && liveCamera.cameraStatus === 'error' && (
-                  <div className="absolute inset-0 bg-slate-950/88 flex flex-col items-center justify-center p-4 text-center gap-2.5">
-                    <CameraOff className="w-6 h-6 text-rose-400" />
-                    <p className="text-[11px] font-mono text-rose-200 leading-relaxed">
-                      {liveCamera.cameraError}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => void liveCamera.startWebcam()}
-                        className="px-2.5 py-1 text-[11px] font-semibold rounded bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
-                      >
-                        Retry Camera
-                      </button>
-                      <button
-                        onClick={() => mediaInputRef.current?.click()}
-                        className="px-2.5 py-1 text-[11px] font-semibold rounded bg-white text-slate-800 hover:bg-emerald-50 cursor-pointer"
-                      >
-                        Upload Video/Photo
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Real-Time CV Controls when Webcam or Media is active */}
-              {isRealVisionActive && (
-                <div className="space-y-2.5 bg-[#F8FBF9] border border-emerald-900/10 rounded p-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1">
-                      {(['overlay', 'mask', 'raw'] as const).map((m) => (
-                        <button
-                          key={m}
-                          onClick={() => setCameraOverlayMode(m)}
-                          className={`px-2 py-0.5 text-[10px] font-mono uppercase rounded border transition-colors cursor-pointer ${
-                            cameraOverlayMode === m
-                              ? 'bg-emerald-600 border-emerald-600 text-white font-semibold'
-                              : 'bg-white border-slate-200 text-slate-600 hover:border-emerald-300'
-                          }`}
-                        >
-                          {m === 'overlay' ? 'CV Overlay' : m === 'mask' ? 'ExG Mask' : 'Raw'}
-                        </button>
-                      ))}
-                    </div>
-                    {liveCamera.sourceMode === 'webcam' && (
-                      <button
-                        onClick={liveCamera.switchFacingMode}
-                        title="Switch Front / Rear Camera"
-                        className="px-2 py-0.5 text-[10px] font-mono rounded bg-white border border-slate-200 text-slate-700 hover:bg-emerald-50 flex items-center gap-1 cursor-pointer"
-                      >
-                        <RefreshCw className="w-3 h-3 text-emerald-600" />
-                        <span>{liveCamera.facingMode === 'environment' ? 'Rear' : 'Front'}</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {liveCamera.sourceMode === 'webcam' && liveCamera.devices.length > 1 && (
-                    <select
-                      value={liveCamera.selectedDeviceId}
-                      onChange={(e) => liveCamera.selectDevice(e.target.value)}
-                      className="w-full text-[11px] font-mono bg-white border border-slate-200 rounded px-2 py-1 text-slate-700"
-                    >
-                      <option value="">Default Camera</option>
-                      {liveCamera.devices.map((d, idx) => (
-                        <option key={d.deviceId} value={d.deviceId}>
-                          {d.label || `Camera ${idx + 1}`}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px] font-mono text-slate-600 tabular-nums">
-                      <span>ExG Green Floor (Otsu ≥ {liveCamera.diagnostics.otsuThreshold})</span>
-                      <span className="text-emerald-700 font-semibold">{minExgFloor}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={6}
-                      max={65}
-                      step={1}
-                      value={minExgFloor}
-                      onChange={(e) => setMinExgFloor(Number(e.target.value))}
-                      className="w-full accent-emerald-600 cursor-pointer"
-                    />
-                  </div>
-
-                  <div className="flex justify-between text-[10px] font-mono text-slate-500 tabular-nums">
-                    <span>
-                      Near Green: {(liveCamera.diagnostics.greenRatioNear * 100).toFixed(1)}% · Far:{' '}
-                      {(liveCamera.diagnostics.greenRatioFar * 100).toFixed(1)}%
-                    </span>
-                    <span>{liveCamera.diagnostics.processingMs.toFixed(1)} ms/f</span>
-                  </div>
-                </div>
-              )}
-
-              <div className="space-y-2 pt-1 text-xs font-mono tabular-nums">
-                <div className="flex justify-between border-b border-emerald-900/10 pb-1.5">
-                  <span className="text-slate-600">Lateral Offset (e_y)</span>
-                  <span className={Math.abs(visionAlignment.lateralOffsetM) > 0.08 ? 'text-amber-700 font-semibold' : 'text-emerald-700 font-semibold'}>
-                    {visionAlignment.lateralOffsetM >= 0 ? '+' : ''}
-                    {visionAlignment.lateralOffsetM.toFixed(3)} m
-                  </span>
-                </div>
-                <div className="flex justify-between border-b border-emerald-900/10 pb-1.5">
-                  <span className="text-slate-600">Heading Error (e_ψ)</span>
-                  <span className="text-slate-800 font-semibold">
-                    {visionAlignment.headingErrorRad >= 0 ? '+' : ''}
-                    {visionAlignment.headingErrorRad.toFixed(3)} rad
-                  </span>
-                </div>
-                <div className="flex justify-between border-b border-emerald-900/10 pb-1.5">
-                  <span className="text-slate-600">
-                    {isRealVisionActive ? 'Vision Lock Mode' : 'Boundary Guard'}
-                  </span>
-                  <span
-                    className={
-                      isRealVisionActive
-                        ? visionAlignment.trackingLocked
-                          ? 'text-emerald-700 font-semibold'
-                          : 'text-amber-700 font-semibold'
-                        : telemetry.boundaryOk
-                        ? 'text-emerald-700 font-semibold'
-                        : 'text-rose-700 font-semibold'
-                    }
-                  >
-                    {isRealVisionActive
-                      ? liveCamera.diagnostics.detectionMode === 'dual_row'
-                        ? '2-ROW CENTERLINE'
-                        : liveCamera.diagnostics.detectionMode === 'single_band'
-                        ? '1-BAND FOLIAGE'
-                        : 'SEARCHING GREEN'
-                      : telemetry.boundaryOk
-                      ? 'INSIDE MARGIN'
-                      : 'BLOCKED'}
-                  </span>
-                </div>
-                <div className="space-y-1">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Row-End Confidence</span>
-                    <span
-                      className={
-                        (isRealVisionActive ? visionAlignment.rowEndConfidence : telemetry.rowEndConf) > 0.78
-                          ? 'text-amber-700 font-semibold'
-                          : 'text-slate-700'
-                      }
-                    >
-                      {((isRealVisionActive ? visionAlignment.rowEndConfidence : telemetry.rowEndConf) * 100).toFixed(0)}%
-                    </span>
-                  </div>
-                  <div className="w-full h-1.5 bg-[#E6EFE9] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-600 transition-all duration-150"
-                      style={{
-                        width: `${Math.round(
-                          (isRealVisionActive ? visionAlignment.rowEndConfidence : telemetry.rowEndConf) * 100
-                        )}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
+            {/* Real-Time Crop-Row Video Stream Component (Device Camera + WebRTC + CameraX WebSocket) */}
+            <RealTimeCameraStream
+              simCanvasRef={camCanvasRef}
+              rowWidthM={rowWidthCm / 100}
+              stanleyGain={stanleyGain}
+              speedLimit={speedLimit}
+              simRowEndConf={telemetry.rowEndConf}
+              simBoundaryOk={telemetry.boundaryOk}
+              simAlignment={simAlignmentWithLabel}
+              onAlignmentChange={handleLiveAlignmentChange}
+              onStreamModeChange={setStreamMode}
+              onLogEvent={onLogEvent}
+              externalAction={streamAction}
+            />
           </div>
 
           {/* 4-Column Tabular KPI Strip */}
