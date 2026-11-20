@@ -8,3 +8,5 @@ Navigation/sim/run_frames/
 Navigation/sim/outbox/
 weed_detection_bot/runs/
 weed_detection_bot/videos/*.avi
+bad_chilli_clips/
+models/cad/*.FCBak

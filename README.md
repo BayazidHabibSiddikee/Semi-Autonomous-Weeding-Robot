@@ -88,14 +88,56 @@ python3 Navigation/sim/run_field_sim.py --seed 7
 The simulator wires the real `RoverStateMachine` into a virtual 3x2 m field,
 so the exact code that will run on the rover is what gets exercised here.
 
-## Hardware stack (target)
+## Hardware stack
 
 ```
-Raspberry Pi 5 ── USB camera (down-facing)  → weed X/Y detection
-             ├── VL53L0X ToF sensor         → Z distance confirmation
-             ├── ESP32 (USB serial)         → L298N DC motors, 2x SG90
-             │                                pan/tilt servos, MOSFET laser
-             └── GPIO                       → E-stop + safety interlock
+MaixSense-A075V (20cm, 30° down) ─── USB ───► Raspberry Pi 5
+                                               ├── YOLOv8 weed detection (best.pt)
+                                               ├── 3D BEV furrow tracking & headland corners
+                                               ├── Passive chili canopy health scanner
+                                               ├── Boustrophedon map generator
+                                               ├── FastAPI server → /video_feed /map_feed /cut_plan
+                                               └── ESP32 (Serial /dev/ttyUSB0 @ 115200)
+                                                         ├── 8-way direction: 0/45/90/135/180/225/270/315°
+                                                         ├── Turret yaw servo (MG996R, 120° sector gear)
+                                                         └── Relay 1: Grinder motor / Relay 2: Flame valve
+```
+
+| File | Purpose |
+|------|---------|
+| [`weed_detection_bot/pi_brain/pi_boustrophedon_brain.py`](weed_detection_bot/pi_brain/pi_boustrophedon_brain.py) | Main Pi runtime — weed targeting, navigation, canopy scanner, map server |
+| [`weed_detection_bot/video_test.py`](weed_detection_bot/video_test.py) | Offline YOLOv8 test on `test_video.mp4` |
+| [`weed_detection_bot/yolo_models/best.pt`](weed_detection_bot/yolo_models/best.pt) | Your trained YOLOv8 weed detection weights |
+| [`weed_detection_bot/yolo_models/smartweeder_best.pt`](weed_detection_bot/yolo_models/smartweeder_best.pt) | Upstream SmartWeeder weights (alternate) |
+| [`weed_detection_bot/esp32_code/allmotor_control.ino`](weed_detection_bot/esp32_code/allmotor_control.ino) | ESP32 firmware — servo, relay, serial command parser |
+| [`weed_detection_bot/pi5_code/raspberry_pi_prog.py`](weed_detection_bot/pi5_code/raspberry_pi_prog.py) | Standalone Pi detection + GPIO runner (no MaixSense) |
+| [`weed_detection_bot/cloud_trainer/app.py`](weed_detection_bot/cloud_trainer/app.py) | Streamlit annotation & Kaggle retraining pipeline |
+| [`urdf/weed_laser_robot.urdf.xacro`](urdf/weed_laser_robot.urdf.xacro) | Full rover URDF: chassis + 4 wheels + turret + MaixSense + Gazebo plugins |
+
+### Run the Pi Brain (on Raspberry Pi)
+
+```bash
+cd weed_detection_bot/pi_brain
+pip install ultralytics fastapi uvicorn opencv-python-headless requests numpy
+python3 pi_boustrophedon_brain.py
+# Then open on phone: http://<pi-ip>:8080/video_feed   (live detections)
+#                     http://<pi-ip>:8080/map_feed      (boustrophedon map)
+#                     http://<pi-ip>:8080/cut_plan      (JSON: weed queue & ESP32 heading)
+```
+
+### Run offline video test (no Pi needed)
+
+```bash
+cd weed_detection_bot
+python3 video_test.py
+# Output: runs/weed_v1/video_test/detected_video.mp4
+```
+
+### ROS 2 / Gazebo Simulation
+
+```bash
+# Check turret + MaixSense joints in RViz2
+ros2 launch urdf_tutorial display.launch.py model:=urdf/weed_laser_robot.urdf.xacro
 ```
 
 See [Navigation/ROADMAP.md](Navigation/ROADMAP.md) for the full plan and
