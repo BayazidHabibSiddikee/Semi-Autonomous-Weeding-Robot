@@ -157,6 +157,7 @@ export interface LaunchMissionConfig {
   startPoint: NormalizedPoint;
   endPoint: NormalizedPoint | null;
   relayMode: RelayMode;
+  targetMode?: 'SIMULATOR' | 'LIVE_PI';
   seed?: number;
 }
 

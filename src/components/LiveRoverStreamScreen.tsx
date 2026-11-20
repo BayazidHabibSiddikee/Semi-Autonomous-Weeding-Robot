@@ -21,6 +21,8 @@ interface Props {
   lang: AppLanguage;
   piHost: string;
   onPiHostChange: (host: string) => void;
+  apiToken: string;
+  onApiTokenChange: (token: string) => void;
   launchConfig: LaunchMissionConfig | null;
 }
 
@@ -30,8 +32,16 @@ interface LivePiCutPlanJson {
   state?: string;
   running?: boolean;
   e_stopped?: boolean;
+  fault_reason?: string | null;
+  hardware?: {
+    camera_attached?: boolean;
+    yolo_loaded?: boolean;
+    esp32_serial?: boolean;
+    simulation_mode?: boolean;
+  };
   heading_deg?: number;
   esp32_drive_deg?: number | null;
+  esp32_ack?: string;
   lateral_offset_mm?: number;
   wall_distance_mm?: number;
   turret_angle_deg?: number;
@@ -59,6 +69,8 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
   lang,
   piHost,
   onPiHostChange,
+  apiToken,
+  onApiTokenChange,
   launchConfig,
 }) => {
   const isBn = lang === 'BN';
@@ -72,6 +84,8 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
   // Live Pi FastAPI state when switched to LIVE_PI mode
   const [piConnected, setPiConnected] = useState(false);
   const [piError, setPiError] = useState<string | null>(null);
+  const [eStopError, setEStopError] = useState<string | null>(null);
+  const [streamNonce, setStreamNonce] = useState(0);
   const [liveCutPlan, setLiveCutPlan] = useState<LivePiCutPlanJson | null>(null);
 
   const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -83,8 +97,13 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
     if (!launchConfig) return;
     engineRef.current.configure(launchConfig);
     setSnap(engineRef.current.getSnapshot());
-    setStreamMode('SIMULATOR');
-    setRunning(true);
+    if (launchConfig.targetMode === 'LIVE_PI') {
+      setStreamMode('LIVE_PI');
+      setRunning(false);
+    } else {
+      setStreamMode('SIMULATOR');
+      setRunning(true);
+    }
   }, [launchConfig]);
 
   // Cache warped BEV image for /map_feed background rendering
@@ -116,11 +135,15 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
     return () => window.clearInterval(timer);
   }, [streamMode, running, speedMs]);
 
-  // Live Raspberry Pi FastAPI /cut_plan polling when streamMode === 'LIVE_PI'
+  // Live Raspberry Pi FastAPI /cut_plan polling & 1.5s /heartbeat keep-alive when streamMode === 'LIVE_PI'
   useEffect(() => {
     if (streamMode !== 'LIVE_PI') return;
     let active = true;
+    let wasConnected = false;
     const base = piHost.replace(/\/+$/, '');
+    const authHeaders: Record<string, string> = apiToken.trim()
+      ? { Authorization: `Bearer ${apiToken.trim()}` }
+      : {};
 
     const poll = async () => {
       try {
@@ -129,24 +152,43 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
         const data = (await res.json()) as LivePiCutPlanJson;
         if (active) {
           setLiveCutPlan(data);
+          if (!wasConnected) {
+            setStreamNonce((n) => n + 1);
+          }
+          wasConnected = true;
           setPiConnected(true);
           setPiError(null);
         }
       } catch (err) {
         if (active) {
+          wasConnected = false;
           setPiConnected(false);
           setPiError(err instanceof Error ? err.message : 'Pi unreachable from browser');
         }
       }
     };
 
+    const sendHeartbeat = async () => {
+      if (!wasConnected) return;
+      try {
+        await fetch(`${base}/heartbeat`, {
+          method: 'POST',
+          headers: authHeaders,
+        });
+      } catch {
+        // Heartbeat drop will safely trigger Pi's 5s LINK_LOST_STOP failsafe
+      }
+    };
+
     poll();
     const timer = window.setInterval(poll, 450);
+    const hbTimer = window.setInterval(sendHeartbeat, 1500);
     return () => {
       active = false;
       window.clearInterval(timer);
+      window.clearInterval(hbTimer);
     };
-  }, [streamMode, piHost]);
+  }, [streamMode, piHost, apiToken]);
 
   // Render Live /video_feed (30° Forward/Downward Furrow Camera + MaixSense Depth + YOLOv8 + MG996R Turret)
   useEffect(() => {
@@ -567,12 +609,22 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
   }, [snap, streamMode]);
 
   const handleToggleEStop = async () => {
+    setEStopError(null);
     if (streamMode === 'LIVE_PI') {
       const base = piHost.replace(/\/+$/, '');
+      const headers: Record<string, string> = apiToken.trim()
+        ? { Authorization: `Bearer ${apiToken.trim()}` }
+        : {};
       try {
-        await fetch(`${base}/stop`, { method: 'POST' });
-      } catch {
-        // ignore network failure
+        const res = await fetch(`${base}/stop`, { method: 'POST', headers });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ''}`);
+        }
+      } catch (err) {
+        setEStopError(
+          `E-STOP NOT CONFIRMED (${err instanceof Error ? err.message : 'network error'}). Retry or trigger hardware switch!`
+        );
       }
       return;
     }
@@ -779,16 +831,37 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
                 type="text"
                 value={piHost}
                 onChange={(e) => onPiHostChange(e.target.value)}
-                className="w-64 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 font-mono text-xs text-slate-900"
+                className="w-56 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 font-mono text-xs text-slate-900"
               />
+              <input
+                type="password"
+                value={apiToken}
+                onChange={(e) => onApiTokenChange(e.target.value)}
+                placeholder="Bearer token"
+                autoComplete="off"
+                className="w-40 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 font-mono text-xs text-slate-900"
+              />
+              <button
+                type="button"
+                onClick={() => setStreamNonce((n) => n + 1)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reconnect Feeds
+              </button>
               <span className={piConnected ? 'font-semibold text-emerald-700' : 'text-amber-700'}>
                 {piConnected
-                  ? '● Connected to Pi /video_feed, /map_feed, /cut_plan'
-                  : `▲ ${piError ?? 'Run uvicorn Navigation.src.pi_server:app --host 0.0.0.0 --port 8000 on Pi'}`}
+                  ? `Connected · Cam:${liveCutPlan?.hardware?.camera_attached ? 'OK' : 'SIM'} · ESP32:${liveCutPlan?.hardware?.esp32_serial ? 'UART' : 'SIM'}`
+                  : `${piError ?? 'Run uvicorn Navigation.src.pi_server:app --host 0.0.0.0 --port 8000 on Pi'}`}
               </span>
             </div>
           )}
         </div>
+        {liveCutPlan?.fault_reason && streamMode === 'LIVE_PI' && (
+          <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800">
+            Pi Fault: {liveCutPlan.fault_reason}
+          </div>
+        )}
       </section>
 
       {/* Primary Split Viewports: /video_feed (What the Rover Sees) + /map_feed (Live Field Map) */}
@@ -812,7 +885,8 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
           ) : (
             <div className="flex aspect-[16/10] w-full items-center justify-center overflow-hidden rounded-lg bg-slate-950">
               <img
-                src={`${cleanPiBase}/video_feed`}
+                key={`vid-${streamNonce}`}
+                src={`${cleanPiBase}/video_feed?r=${streamNonce}`}
                 alt="Live Raspberry Pi rover camera feed"
                 referrerPolicy="no-referrer"
                 className="h-full w-full object-contain"
@@ -840,7 +914,8 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
           ) : (
             <div className="flex aspect-[16/10] w-full items-center justify-center overflow-hidden rounded-lg bg-slate-950">
               <img
-                src={`${cleanPiBase}/map_feed`}
+                key={`map-${streamNonce}`}
+                src={`${cleanPiBase}/map_feed?r=${streamNonce}`}
                 alt="Live Raspberry Pi BEV field map"
                 referrerPolicy="no-referrer"
                 className="h-full w-full object-contain"
@@ -1011,6 +1086,45 @@ export const LiveRoverStreamScreen: React.FC<Props> = ({
             </div>
           </div>
         </section>
+      </div>
+
+      {/* Pinned Sticky E-STOP Bar — always visible while scrolling telemetry */}
+      <div className="sticky bottom-3 z-20 rounded-xl border border-red-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            {eStopError ? (
+              <p className="text-xs font-bold text-red-700">{eStopError}</p>
+            ) : (
+              <p className="text-xs text-slate-600 font-mono tabular-nums">
+                {streamMode === 'LIVE_PI'
+                  ? `LIVE PI SAFETY BAR · State: ${displayState} · R1:${displayRelay1 ? 'ON' : 'OFF'} · R2:${displayRelay2 ? 'ON' : 'OFF'}`
+                  : `ROVER SAFETY BAR · State: ${displayState} · Drive: ${displayDrive}`}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleEStop}
+            className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-xs font-bold text-white whitespace-nowrap shrink-0 ${
+              snap.eStopped && streamMode === 'SIMULATOR'
+                ? 'bg-amber-600 hover:bg-amber-700'
+                : 'bg-red-600 hover:bg-red-700'
+            }`}
+          >
+            {snap.eStopped && streamMode === 'SIMULATOR' ? (
+              <ShieldCheck className="h-4 w-4" />
+            ) : (
+              <ShieldAlert className="h-4 w-4" />
+            )}
+            {snap.eStopped && streamMode === 'SIMULATOR'
+              ? isBn
+                ? 'ই-স্টপ রিসেট'
+                : 'Reset E-Stop'
+              : isBn
+              ? 'জরুরি থামুন (E-STOP)'
+              : 'EMERGENCY STOP (E-STOP)'}
+          </button>
+        </div>
       </div>
     </div>
   );

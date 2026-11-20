@@ -12,6 +12,7 @@ export function App() {
   const [lang, setLang] = useState<AppLanguage>('EN');
   const [tab, setTab] = useState<AppTab>('CAPTURE');
   const [piHost, setPiHost] = useState('http://192.168.4.1:8000');
+  const [apiToken, setApiToken] = useState('');
   const [launchConfig, setLaunchConfig] = useState<LaunchMissionConfig | null>(null);
 
   const handleLaunchRover = (config: LaunchMissionConfig) => {
@@ -19,24 +20,31 @@ export function App() {
     setTab('LIVE');
   };
 
+  const toggleLanguage = () => {
+    setLang((prev) => (prev === 'EN' ? 'BN' : 'EN'));
+  };
+
   return (
     <div className="flex min-h-screen flex-col bg-[#F8FAFC] text-[#0F172A]">
-      {/* Strict 3-Zone Top Bar Contract: Wordmark — 4 Single-Line Nav Links — Primary Language Action */}
-      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur-xs">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-8 px-4 py-3 sm:px-6">
+      {/* Strict 3-Zone Top Bar: Wordmark — 4 Concise Single-Line Nav Links — 1 Primary Action */}
+      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-8 px-4 sm:px-6">
           <button
             type="button"
             onClick={() => setTab('CAPTURE')}
-            className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
           >
             {Strings.appTitle(lang)}
           </button>
 
-          <nav className="flex items-center gap-5 overflow-x-auto text-sm font-medium">
+          <nav
+            aria-label="Primary navigation"
+            className="flex items-center gap-6 text-sm font-medium min-w-0"
+          >
             <NavLink
               active={tab === 'CAPTURE'}
               onClick={() => setTab('CAPTURE')}
-              label={lang === 'BN' ? 'ছবি ও শুরু' : 'Capture & Launch'}
+              label={lang === 'BN' ? 'লঞ্চ' : 'Launch'}
             />
             <NavLink
               active={tab === 'LIVE'}
@@ -51,30 +59,18 @@ export function App() {
             <NavLink
               active={tab === 'ABOUT'}
               onClick={() => setTab('ABOUT')}
-              label={lang === 'BN' ? 'পরিচিতি' : 'Developer'}
+              label={lang === 'BN' ? 'পরিচিতি' : 'About'}
             />
           </nav>
 
-          <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-0.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setLang('BN')}
-              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition whitespace-nowrap ${
-                lang === 'BN' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              বাং
-            </button>
-            <button
-              type="button"
-              onClick={() => setLang('EN')}
-              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition whitespace-nowrap ${
-                lang === 'EN' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              EN
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={toggleLanguage}
+            aria-label="Switch language"
+            className="rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-slate-800 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+          >
+            {lang === 'EN' ? 'বাংলা' : 'English'}
+          </button>
         </div>
       </header>
 
@@ -84,6 +80,8 @@ export function App() {
             lang={lang}
             piHost={piHost}
             onPiHostChange={setPiHost}
+            apiToken={apiToken}
+            onApiTokenChange={setApiToken}
             onLaunchRover={handleLaunchRover}
           />
         )}
@@ -92,6 +90,8 @@ export function App() {
             lang={lang}
             piHost={piHost}
             onPiHostChange={setPiHost}
+            apiToken={apiToken}
+            onApiTokenChange={setApiToken}
             launchConfig={launchConfig}
           />
         )}
@@ -112,7 +112,7 @@ const NavLink: React.FC<NavLinkProps> = ({ active, onClick, label }) => (
   <button
     type="button"
     onClick={onClick}
-    className={`border-b-2 py-1 text-sm transition whitespace-nowrap shrink-0 ${
+    className={`border-b-2 py-1 text-sm transition whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 ${
       active
         ? 'border-emerald-700 font-semibold text-slate-900'
         : 'border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-900'

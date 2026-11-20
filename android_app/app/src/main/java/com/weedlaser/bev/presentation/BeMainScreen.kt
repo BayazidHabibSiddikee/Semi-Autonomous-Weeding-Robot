@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -31,10 +33,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -49,11 +53,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.weedlaser.bev.core.opencv.AutoFieldBoundaryDetector
-import com.weedlaser.bev.data.remote.NormalizedPoint
-import com.weedlaser.bev.data.remote.PiLiveClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -70,72 +73,61 @@ enum class AppTab {
 fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
     var selectedLanguage by rememberSaveable { mutableStateOf(AppLanguage.BN) }
     var currentTab by rememberSaveable { mutableStateOf(AppTab.CAPTURE) }
-    var piIp by rememberSaveable { mutableStateOf("192.168.4.1") }
-    var piPort by rememberSaveable { mutableStateOf("8000") }
 
     CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
         WeedLaserTheme {
             Scaffold(
                 topBar = {
-                    TopAppBar(
-                        title = {
-                            Column {
+                    Column {
+                        TopAppBar(
+                            title = {
                                 Text(
                                     text = Strings.appTitle(selectedLanguage),
                                     style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 )
-                                Text(
-                                    text = "Semi-Autonomous Weeding Robot",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        },
-                        actions = {
-                            Row(
-                                modifier = Modifier.padding(end = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                FilterChip(
-                                    selected = selectedLanguage == AppLanguage.BN,
-                                    onClick = { selectedLanguage = AppLanguage.BN },
-                                    label = { Text("বাং", fontWeight = FontWeight.Bold) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                            },
+                            actions = {
+                                TextButton(
+                                    onClick = {
+                                        selectedLanguage = if (selectedLanguage == AppLanguage.BN) {
+                                            AppLanguage.EN
+                                        } else {
+                                            AppLanguage.BN
+                                        }
+                                    },
+                                    modifier = Modifier.padding(end = 4.dp),
+                                ) {
+                                    Text(
+                                        text = if (selectedLanguage == AppLanguage.BN) "English" else "বাংলা",
+                                        fontWeight = FontWeight.SemiBold,
                                     )
-                                )
-                                FilterChip(
-                                    selected = selectedLanguage == AppLanguage.EN,
-                                    onClick = { selectedLanguage = AppLanguage.EN },
-                                    label = { Text("EN", fontWeight = FontWeight.Bold) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                )
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                            ),
                         )
-                    )
+                        androidx.compose.material3.HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    }
                 },
                 bottomBar = {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                         NavigationBarItem(
                             selected = currentTab == AppTab.CAPTURE,
                             onClick = { currentTab = AppTab.CAPTURE },
-                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Capture") },
-                            label = { Text(if (selectedLanguage == AppLanguage.BN) "শুরু করুন" else "Launch", fontSize = 11.sp) }
+                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Launch") },
+                            label = { Text(Strings.navLaunch(selectedLanguage), fontSize = 11.sp) }
                         )
                         NavigationBarItem(
                             selected = currentTab == AppTab.LIVE,
                             onClick = { currentTab = AppTab.LIVE },
                             icon = { Icon(Icons.Default.LocationOn, contentDescription = "Live Rover") },
-                            label = { Text(if (selectedLanguage == AppLanguage.BN) "লাইভ রোভার" else "Live Feed", fontSize = 11.sp) }
+                            label = { Text(Strings.navLive(selectedLanguage), fontSize = 11.sp) }
                         )
                         NavigationBarItem(
                             selected = currentTab == AppTab.PROJECT,
@@ -161,18 +153,9 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
                     when (currentTab) {
                         AppTab.CAPTURE -> BeMainScreen(
                             viewModel = viewModel,
-                            piIp = piIp,
-                            piPort = piPort,
-                            onPiIpChanged = { piIp = it },
-                            onPiPortChanged = { piPort = it },
                             onNavigateToLive = { currentTab = AppTab.LIVE },
                         )
-                        AppTab.LIVE -> LiveRoverMonitorScreen(
-                            piIp = piIp,
-                            piPort = piPort.toIntOrNull() ?: 8000,
-                            onPiIpChanged = { piIp = it },
-                            onPiPortChanged = { piPort = it },
-                        )
+                        AppTab.LIVE -> LiveRoverMonitorScreen(viewModel = viewModel)
                         AppTab.PROJECT -> ProjectDetailsScreen()
                         AppTab.ABOUT -> AboutDeveloperScreen()
                     }
@@ -183,62 +166,21 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
 }
 
 /**
- * Zero-corner Capture & Launch screen:
- *   1. Snap 1 photo -> POST /image to Pi (auto ExG + minAreaRect boundary & furrow segmentation).
- *   2. Tap only [Start] (and optional [End]) on the map.
- *   3. Send & Start Rover -> opens Live Rover tab streaming /video_feed, /map_feed, /cut_plan.
+ * Zero-corner Capture & Launch screen backed by BeViewModel so state survives tab switches and rotation:
+ *   1. Connect / bind to Pi Wi-Fi hotspot (optional UDP :8081 auto-discovery & Bearer token).
+ *   2. Snap 1 photo -> Pi auto-warps to 2D Top-Down BEV (/image + /bev_image) & detects real furrows.
+ *   3. Tap Start (and optional End) directly on the warped BEV map.
+ *   4. Launch mission (strictly gated on Pi BEV upload + confidence >= 45% + Start pin).
  */
 @Composable
 fun BeMainScreen(
     viewModel: BeViewModel = koinViewModel(),
-    piIp: String = "192.168.4.1",
-    piPort: String = "8000",
-    onPiIpChanged: (String) -> Unit = {},
-    onPiPortChanged: (String) -> Unit = {},
     onNavigateToLive: () -> Unit = {},
 ) {
     val lang = LocalAppLanguage.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val piClient = remember { PiLiveClient() }
-
-    var imagePath by rememberSaveable { mutableStateOf<String?>(null) }
-    var furrowsNx by remember { mutableStateOf<List<Float>>(emptyList()) }
-    var startPoint by remember { mutableStateOf<NormalizedPoint?>(NormalizedPoint(0.22f, 0.88f)) }
-    var endPoint by remember { mutableStateOf<NormalizedPoint?>(NormalizedPoint(0.80f, 0.14f)) }
-    var relayMode by rememberSaveable { mutableStateOf("grinder") }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
-    var isSending by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
-
-    fun handleNewPhoto(path: String) {
-        imagePath = path
-        statusMessage = if (lang == AppLanguage.BN) {
-            "Pi-তে ছবি পাঠানো হচ্ছে (স্বয়ংক্রিয় সীমানা ও সারি শনাক্তকরণ)..."
-        } else {
-            "Uploading photo to Pi (/image) for automatic boundary & furrow detection..."
-        }
-        scope.launch {
-            val portNum = piPort.toIntOrNull() ?: 8000
-            piClient.uploadFieldPhoto(piIp, portNum, File(path))
-                .onSuccess { resp ->
-                    furrowsNx = resp.furrowsNx
-                    statusMessage = "Pi detected ${resp.furrowsNx.size} furrows (${(resp.confidence * 100).toInt()}% confidence). Tap Start & End, then launch."
-                }
-                .onFailure {
-                    // On-device ExG + minAreaRect fallback if Pi hotspot isn't connected yet
-                    val auto = withContext(Dispatchers.Default) {
-                        AutoFieldBoundaryDetector.detectFromImageFile(path)
-                    }
-                    furrowsNx = listOf(0.22f, 0.42f, 0.62f, 0.80f)
-                    statusMessage = if (auto.isSuccess) {
-                        "Pi offline — local ExG auto-boundary ready. Tap Start & End, then connect Pi hotspot to start."
-                    } else {
-                        "Photo ready. Connect to Pi hotspot ($piIp:$portNum), tap Start & End, and send."
-                    }
-                }
-        }
-    }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -246,7 +188,7 @@ fun BeMainScreen(
         if (uri != null) {
             scope.launch {
                 val copiedPath = withContext(Dispatchers.IO) { copyUriToInternalFile(context, uri) }
-                if (copiedPath != null) handleNewPhoto(copiedPath)
+                if (copiedPath != null) viewModel.onNewFieldPhoto(copiedPath)
             }
         }
     }
@@ -258,7 +200,7 @@ fun BeMainScreen(
         if (success && uri != null) {
             scope.launch {
                 val copiedPath = withContext(Dispatchers.IO) { copyUriToInternalFile(context, uri) }
-                if (copiedPath != null) handleNewPhoto(copiedPath)
+                if (copiedPath != null) viewModel.onNewFieldPhoto(copiedPath)
             }
         }
     }
@@ -292,44 +234,81 @@ fun BeMainScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Pi Wi-Fi Hotspot Endpoint
+        // Pi Wi-Fi Hotspot Endpoint + Bind & Discover tools
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedTextField(
-                value = piIp,
-                onValueChange = onPiIpChanged,
-                label = { Text("Raspberry Pi IP") },
+                value = viewModel.piIp,
+                onValueChange = viewModel::updatePiIp,
+                label = { Text(Strings.piIpLabel(lang)) },
                 singleLine = true,
                 modifier = Modifier.weight(0.68f),
             )
             OutlinedTextField(
-                value = piPort,
-                onValueChange = onPiPortChanged,
-                label = { Text("Port") },
+                value = viewModel.piPortText,
+                onValueChange = viewModel::updatePiPortText,
+                label = { Text(Strings.piPortLabel(lang)) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.weight(0.32f),
             )
         }
 
-        // Step 1 & 2: Snap photo (zero corners) + Tap Start & End points
+        OutlinedTextField(
+            value = viewModel.apiToken,
+            onValueChange = viewModel::updateApiToken,
+            label = { Text(Strings.apiTokenLabel(lang)) },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = viewModel::bindPiWifiHotspot,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(Strings.bindWifiButton(lang, viewModel.wifiBound), maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = viewModel::discoverPiOnLan,
+                enabled = !viewModel.isDiscovering,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(Strings.discoverPiButton(lang), maxLines = 1)
+            }
+        }
+
+        if (viewModel.discoveredDevices.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                viewModel.discoveredDevices.forEach { dev ->
+                    TextButton(onClick = { viewModel.selectDiscoveredDevice(dev) }) {
+                        Text("${dev.name} (${dev.ipAddress}:${dev.port})")
+                    }
+                }
+            }
+        }
+
+        // Step 1 & 2: Snap photo -> Warped 2D Top-Down BEV -> Tap Start & End points
         Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.padding(12.dp)) {
                 Text(
-                    text = if (lang == AppLanguage.BN) {
-                        "১. ছবি তুলুন এবং শুধু শুরুর ও শেষ বিন্দু ট্যাপ করুন"
-                    } else {
-                        "1. Snap Photo & Tap Start / End Points"
-                    },
+                    text = Strings.step1Header(lang),
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Spacer(Modifier.height(8.dp))
                 StartEndPointCard(
-                    imagePath = imagePath,
-                    furrowsNx = furrowsNx,
-                    startPoint = startPoint,
-                    endPoint = endPoint,
+                    bevImagePath = viewModel.bevImagePath,
+                    isPiBev = viewModel.isPiBevReady,
+                    isUploading = viewModel.isUploading,
+                    furrowsNx = viewModel.furrowsNx,
+                    startPoint = viewModel.startPoint,
+                    endPoint = viewModel.endPoint,
                     onTakePhotoClick = {
                         val hasPerm = androidx.core.content.ContextCompat.checkSelfPermission(
                             context,
@@ -343,9 +322,19 @@ fun BeMainScreen(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
-                    onStartPointChanged = { startPoint = it },
-                    onEndPointChanged = { endPoint = it },
+                    onStartPointChanged = viewModel::updateStartPoint,
+                    onEndPointChanged = viewModel::updateEndPoint,
                 )
+
+                if (viewModel.sourcePhotoPath != null && !viewModel.isPiBevReady && !viewModel.isUploading) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = viewModel::uploadCurrentPhotoToPi,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(Strings.reuploadToPi(lang))
+                    }
+                }
             }
         }
 
@@ -354,57 +343,62 @@ fun BeMainScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            listOf("grinder" to "Relay 1: Grinder", "flame" to "Relay 2: Flame", "both" to "Dual Relay").forEach { (mode, label) ->
+            listOf(
+                "grinder" to Strings.relayGrinder(lang),
+                "flame" to Strings.relayFlame(lang),
+                "both" to Strings.relayDual(lang),
+            ).forEach { (mode, label) ->
                 FilterChip(
-                    selected = relayMode == mode,
-                    onClick = { relayMode = mode },
-                    label = { Text(label, fontSize = 11.sp) },
+                    selected = viewModel.relayMode == mode,
+                    onClick = { viewModel.updateRelayMode(mode) },
+                    label = { Text(label, fontSize = 11.sp, maxLines = 1) },
                     modifier = Modifier.weight(1f),
                 )
             }
         }
 
-        // Step 3: Send photo + Start/End to Pi & open Live Rover stream
+        // Error card (never hidden or swallowed)
+        viewModel.errorMessage?.let { err ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = err,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
+
+        // Step 3: Strictly gated Launch button (only navigates to Live tab on real Pi success)
         Button(
-            onClick = {
-                val img = imagePath ?: return@Button
-                val start = startPoint ?: return@Button
-                isSending = true
-                scope.launch {
-                    val portNum = piPort.toIntOrNull() ?: 8000
-                    // Ensure photo is uploaded, then start mission at Start -> End
-                    piClient.uploadFieldPhoto(piIp, portNum, File(img))
-                    val result = piClient.startMission(piIp, portNum, start, endPoint, relayMode)
-                    isSending = false
-                    result.onSuccess {
-                        statusMessage = "Mission started on Pi — opening Live Rover video stream..."
-                        onNavigateToLive()
-                    }.onFailure { err ->
-                        statusMessage = "Pi unreachable (${err.message}). Switching to Live Monitor."
-                        onNavigateToLive()
-                    }
-                }
-            },
-            enabled = imagePath != null && startPoint != null && !isSending,
-            modifier = Modifier.fillMaxWidth().height(50.dp),
+            onClick = { viewModel.launchMission(onSuccessNavigateToLive = onNavigateToLive) },
+            enabled = viewModel.canStartMission,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
         ) {
             Text(
-                text = if (isSending) {
-                    "Sending to Pi..."
-                } else if (lang == AppLanguage.BN) {
-                    "Pi-তে পাঠান এবং রোভার চালু করুন"
-                } else {
-                    "Send Image & Start Rover (Open Live Feed)"
-                },
+                text = Strings.launchMissionButton(lang, viewModel.isStartingMission),
                 style = MaterialTheme.typography.labelLarge,
             )
         }
 
-        statusMessage?.let { msg ->
+        if (!viewModel.canStartMission) {
+            Text(
+                text = Strings.launchDisabledHint(lang),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        viewModel.statusMessage?.let { msg ->
             Text(
                 text = msg,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
     }

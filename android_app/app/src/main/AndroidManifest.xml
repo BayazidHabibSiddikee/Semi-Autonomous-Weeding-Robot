@@ -6,9 +6,10 @@
     <!-- Camera for field photo capture -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Wi-Fi / network for sending mission JSON to the Pi -->
+    <!-- Wi-Fi / network for sending mission JSON and binding to no-internet Pi hotspot -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 

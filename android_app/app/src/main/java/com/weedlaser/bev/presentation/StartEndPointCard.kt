@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -38,13 +39,15 @@ import com.weedlaser.bev.data.remote.NormalizedPoint
 import java.io.File
 
 /**
- * Zero-corner farmer interface:
- *   1. Snap or pick 1 field photo (boundary detection & BEV warp happen automatically on Pi/device).
- *   2. Tap only 2 points on the field map: [Start] (where rover sits) and optional [End].
+ * Zero-corner farmer interface rendering ONLY the warped 2D Top-Down BEV image
+ * (downloaded from Pi's GET /bev_image or generated locally when offline) so
+ * auto-segmented furrow lines and Start/End taps live in exact BEV coordinates.
  */
 @Composable
 fun StartEndPointCard(
-    imagePath: String?,
+    bevImagePath: String?,
+    isPiBev: Boolean,
+    isUploading: Boolean,
     furrowsNx: List<Float>,
     startPoint: NormalizedPoint?,
     endPoint: NormalizedPoint?,
@@ -54,10 +57,10 @@ fun StartEndPointCard(
     onEndPointChanged: (NormalizedPoint?) -> Unit,
 ) {
     val lang = LocalAppLanguage.current
-    var selectingEnd by remember { mutableStateOf(false) }
+    var selectingEnd by remember(bevImagePath) { mutableStateOf(false) }
 
-    val bitmap = remember(imagePath) {
-        imagePath?.let { path ->
+    val bitmap = remember(bevImagePath) {
+        bevImagePath?.let { path ->
             val f = File(path)
             if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
         }
@@ -71,19 +74,47 @@ fun StartEndPointCard(
         ) {
             Button(
                 onClick = onTakePhotoClick,
+                enabled = !isUploading,
                 modifier = Modifier.weight(1f),
             ) {
-                Text(if (lang == AppLanguage.BN) "ছবি তুলুন" else "Snap Field Photo")
+                Text(Strings.snapPhoto(lang))
             }
             OutlinedButton(
                 onClick = onPickPhotoClick,
+                enabled = !isUploading,
                 modifier = Modifier.weight(1f),
             ) {
-                Text(if (lang == AppLanguage.BN) "গ্যালারি" else "Pick Photo")
+                Text(Strings.pickPhoto(lang))
             }
         }
 
         Spacer(Modifier.height(10.dp))
+
+        if (isUploading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = if (lang == AppLanguage.BN) {
+                            "Pi-তে ছবি প্রক্রিয়াকরণ ও BEV ম্যাপ ডাউনলোড হচ্ছে..."
+                        } else {
+                            "Uploading photo & downloading Pi top-down BEV map..."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            return
+        }
 
         if (bitmap == null) {
             Box(
@@ -95,11 +126,7 @@ fun StartEndPointCard(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = if (lang == AppLanguage.BN) {
-                        "১টি জমির ছবি তুলুন — Pi স্বয়ংক্রিয়ভাবে সীমানা ও সারি শনাক্ত করবে"
-                    } else {
-                        "Snap 1 field photo — Pi automatically detects boundaries & furrows"
-                    },
+                    text = Strings.emptyMapHint(lang),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
@@ -108,7 +135,7 @@ fun StartEndPointCard(
             return
         }
 
-        // Toggle between placing Start vs End point
+        // Toggle between placing Start vs End point on the top-down BEV map
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -119,8 +146,9 @@ fun StartEndPointCard(
                 modifier = Modifier.weight(1f),
             ) {
                 Text(
-                    text = if (!selectingEnd) "• Tap Start Point" else "Set Start Point",
+                    text = Strings.tapStartMode(lang, active = !selectingEnd),
                     fontWeight = if (!selectingEnd) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
                 )
             }
             OutlinedButton(
@@ -128,13 +156,14 @@ fun StartEndPointCard(
                 modifier = Modifier.weight(1f),
             ) {
                 Text(
-                    text = if (selectingEnd) "• Tap End Point" else "Set End Point",
+                    text = Strings.tapEndMode(lang, active = selectingEnd),
                     fontWeight = if (selectingEnd) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
                 )
             }
             if (endPoint != null) {
                 TextButton(onClick = { onEndPointChanged(null) }) {
-                    Text("Clear End")
+                    Text(Strings.clearEnd(lang))
                 }
             }
         }
@@ -190,44 +219,48 @@ fun StartEndPointCard(
                     dstSize = IntSize(drawW.toInt(), drawH.toInt()),
                 )
 
-                // Overlay auto-segmented traversable furrows
+                // Overlay auto-segmented traversable furrows (exact BEV X columns)
                 furrowsNx.forEach { fx ->
                     val x = dx + fx * drawW
                     drawLine(
-                        color = Color(0x88FFEB3B),
+                        color = Color(0xAAFFEB3B),
                         start = Offset(x, dy),
                         end = Offset(x, dy + drawH),
-                        strokeWidth = 2f,
+                        strokeWidth = 2.5f,
                     )
                 }
 
-                // Draw Start marker (green)
+                // Draw Start marker (green) once user taps
                 startPoint?.let { sp ->
                     val cx = dx + sp.nx * drawW
                     val cy = dy + sp.ny * drawH
-                    drawCircle(color = Color(0xFF00E676), radius = 14f, center = Offset(cx, cy))
-                    drawCircle(color = Color.White, radius = 5f, center = Offset(cx, cy))
+                    drawCircle(color = Color(0xFF00E676), radius = 15f, center = Offset(cx, cy))
+                    drawCircle(color = Color.White, radius = 5.5f, center = Offset(cx, cy))
                 }
 
-                // Draw End marker (amber/red)
+                // Draw End marker (red) if placed
                 endPoint?.let { ep ->
                     val cx = dx + ep.nx * drawW
                     val cy = dy + ep.ny * drawH
-                    drawCircle(color = Color(0xFFFF5252), radius = 14f, center = Offset(cx, cy))
-                    drawCircle(color = Color.White, radius = 5f, center = Offset(cx, cy))
+                    drawCircle(color = Color(0xFFFF5252), radius = 15f, center = Offset(cx, cy))
+                    drawCircle(color = Color.White, radius = 5.5f, center = Offset(cx, cy))
                 }
             }
         }
 
         Spacer(Modifier.height(6.dp))
         Text(
-            text = if (lang == AppLanguage.BN) {
-                "সবুজ বিন্দু = রোবটের শুরুর অবস্থান (Start) · লাল বিন্দু = শেষ অবস্থান (End, ঐচ্ছিক)"
-            } else {
-                "Green pin = Rover Start position · Red pin = End point (optional)"
-            },
+            text = Strings.bevCoordinateLegend(lang, isPiBev),
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (isPiBev) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         )
+        if (startPoint == null) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = Strings.tapToPlaceStartHint(lang),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
