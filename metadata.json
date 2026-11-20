@@ -1,4 +1,5 @@
 {
-  "name": "Weed Laser BEV Robot",
-  "description": "Semi-Autonomous Weeding Robot Android App with Bird's Eye View, OpenCV, and Mission Control."
+  "name": "Semi-Autonomous Weeding Robot",
+  "description": "BEV mission planner, Boustrophedon path generator, live rover field simulator, and 3D chassis inspector for the Semi-Autonomous Weeding Robot.",
+  "requestFramePermissions": []
 }

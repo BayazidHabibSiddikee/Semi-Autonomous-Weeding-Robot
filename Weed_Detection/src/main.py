@@ -220,8 +220,7 @@ def main():
     if args.detect_only:
         # Just run detection on camera feed
         from src.detection_pipeline import WeedDetector
-        yolo_path = "models/yolo_weeds.pt" if Path("models/yolo_weeds.pt").exists() else None
-        detector = WeedDetector(yolo_path=yolo_path, use_clip=True, use_dino=False)
+        detector = WeedDetector(use_clip=True, use_dino=False)
         cap = cv2.VideoCapture(0)
 
         print("Detection-only mode (no robot). Press 'q' to quit.")
