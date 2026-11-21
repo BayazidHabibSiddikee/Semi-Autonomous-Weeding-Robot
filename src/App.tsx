@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { OctagonAlert, RotateCcw, Terminal } from 'lucide-react';
 import { NavigationWorkbench } from './components/NavigationWorkbench';
 import { HardwareAuditView } from './components/HardwareAuditView';
@@ -7,6 +7,7 @@ import { WeedVisionView } from './components/WeedVisionView';
 import { MobileCameraPublisher } from './components/MobileCameraPublisher';
 
 type TabId = 'navigation' | 'hardware' | 'ros2' | 'vision' | 'calibration';
+type RobotLinkMode = 'sim_only' | 'pi_live' | 'pi_unreachable';
 
 const NAV_ITEMS: Array<{ id: TabId; label: string }> = [
   { id: 'navigation', label: 'Navigation' },
@@ -24,11 +25,12 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<TabId>('navigation');
   const [estopActive, setEstopActive] = useState<boolean>(false);
+  const [estopBusy, setEstopBusy] = useState<boolean>(false);
+  const [robotLinkMode, setRobotLinkMode] = useState<RobotLinkMode>('sim_only');
   const [eventLog, setEventLog] = useState<string[]>([
-    '[Audit] Navigation sector resolved (NAV-01..NAV-12 & HW-01..HW-09): 8/8 unittest PASS, 99.9% sim coverage.',
-    '[Bridge] Single shared /dev/ttyUSB0 ESP32Bridge active (NAV-06); zero GPIO 25/22 pin collisions.',
-    '[Vision] Streaming /crop_row/alignment (Lateral Offset m, Heading Error rad) from CropRowTracker.',
-    '[Decoupled] Navigation-only mode active (legacy laser retired; modular Flame/Grinder hook detached).',
+    '[System] Checking Raspberry Pi robot controller link (/api/robot/status)...',
+    '[Safety] Browser Software E-Stop dispatches POST /api/robot/stop when Pi is connected; it is NOT a replacement for the physical GPIO 13 power cutoff switch.',
+    '[Decoupled] Navigation-only mode active by default (treatment actuators detached until real YOLO weights and homography calibration are loaded).',
   ]);
 
   const appendLog = (msg: string) => {
@@ -36,16 +38,102 @@ export default function App() {
     setEventLog((prev) => [`[${ts}] ${msg}`, ...prev.slice(0, 19)]);
   };
 
-  const toggleEstop = () => {
-    setEstopActive((prev) => {
-      const next = !prev;
-      appendLog(
-        next
-          ? '[SAFETY] HARDWARE E-STOP ENGAGED (GPIO 13) — Motor rail de-energized immediately.'
-          : '[SAFETY] Hardware E-stop loop reset — Supervisor awaiting explicit operator resume.'
-      );
-      return next;
-    });
+  useEffect(() => {
+    let active = true;
+    const pollRobotStatus = async (isInitial: boolean) => {
+      try {
+        const res = await fetch('/api/robot/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!active) return;
+        const nextMode: RobotLinkMode =
+          data.mode === 'pi_live' ? 'pi_live' : data.configured ? 'pi_unreachable' : 'sim_only';
+        setRobotLinkMode(nextMode);
+        if (isInitial) {
+          if (nextMode === 'pi_live') {
+            appendLog('[RobotLink] Connected to live Raspberry Pi controller via /api/robot/* proxy.');
+          } else if (nextMode === 'pi_unreachable') {
+            appendLog(`[RobotLink] PI_ROBOT_URL configured but unreachable (${data.detail || 'timeout'}) — simulation mode only.`);
+          } else {
+            appendLog('[RobotLink] Running in Simulation-Only mode (PI_ROBOT_URL not set on server). Dashboard commands will not move physical hardware.');
+          }
+        }
+      } catch {
+        if (active) setRobotLinkMode('sim_only');
+      }
+    };
+
+    void pollRobotStatus(true);
+    const id = window.setInterval(() => void pollRobotStatus(false), 10000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const toggleEstop = async () => {
+    if (estopBusy) return;
+    setEstopBusy(true);
+
+    if (!estopActive) {
+      // Immediately halt local UI simulation regardless of network latency
+      setEstopActive(true);
+      try {
+        const res = await fetch('/api/robot/stop', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ackVerified) {
+          appendLog(
+            `[SAFETY] Software E-Stop ACK verified by Pi/ESP32 (${data.esp32Response || 'OK:ESTOP_LATCHED'}${
+              data.simulated ? ', Pi simulator' : ', live UART'
+            }). Physical GPIO 13 cutoff switch remains primary safety rail.`
+          );
+        } else {
+          appendLog(
+            `[SAFETY] UI Simulation Halted ONLY — ${
+              data.detail || 'No physical Pi/ESP32 stop ACK verified'
+            }. Browser button is NOT a physical emergency stop.`
+          );
+        }
+      } catch {
+        appendLog(
+          '[SAFETY] UI Simulation Halted ONLY — Failed to reach /api/robot/stop. Use the physical GPIO 13 E-stop switch to cut motor power.'
+        );
+      } finally {
+        setEstopBusy(false);
+      }
+      return;
+    }
+
+    // Resetting Software E-Stop: if connected to live Pi, require explicit operator-authorized /api/robot/recover
+    if (robotLinkMode === 'pi_live') {
+      try {
+        const res = await fetch('/api/robot/recover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_confirmed: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.recovered) {
+          setEstopActive(false);
+          appendLog(
+            `[SAFETY] Operator recovery verified by Pi/ESP32 (state=${data.state || 'PAUSED'}). Explicit mission resume still required.`
+          );
+        } else {
+          appendLog(
+            `[SAFETY] Hardware recovery REJECTED by Pi (${data.reason || `HTTP ${res.status}`}). Check physical GPIO 13 E-stop switch and sensors.`
+          );
+        }
+      } catch {
+        appendLog('[SAFETY] Recovery request failed — Pi controller unreachable.');
+      } finally {
+        setEstopBusy(false);
+      }
+      return;
+    }
+
+    setEstopActive(false);
+    appendLog('[SAFETY] Local UI simulation halt cleared (no physical Pi/ESP32 connected).');
+    setEstopBusy(false);
   };
 
   return (
@@ -80,11 +168,13 @@ export default function App() {
           })}
         </nav>
 
-        {/* Zone 3: 1 primary action (Hardware E-Stop override) */}
+        {/* Zone 3: 1 primary action (Honest Software E-Stop dispatching POST /api/robot/stop) */}
         <div className="shrink-0">
           <button
-            onClick={toggleEstop}
-            className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+            onClick={() => void toggleEstop()}
+            disabled={estopBusy}
+            title="Sends POST /api/robot/stop to the Raspberry Pi when connected. Browser UI is NOT a replacement for the physical GPIO 13 emergency-stop cutoff."
+            className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-60 ${
               estopActive
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
                 : 'bg-rose-600 hover:bg-rose-700 text-white'
@@ -93,12 +183,12 @@ export default function App() {
             {estopActive ? (
               <>
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset E-Stop</span>
+                <span>{robotLinkMode === 'pi_live' ? 'Recover Stop' : 'Clear Sim Halt'}</span>
               </>
             ) : (
               <>
                 <OctagonAlert className="w-3.5 h-3.5" />
-                <span>Emergency Stop</span>
+                <span>Software E-Stop</span>
               </>
             )}
           </button>
@@ -123,10 +213,25 @@ export default function App() {
 
         {/* Shared Engineering Event Console */}
         <section className="bg-white border border-emerald-900/10 rounded-lg p-4 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-700">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 text-xs font-mono text-slate-700">
               <Terminal className="w-4 h-4 text-emerald-600" />
-              <span>ROS 2 Mission &amp; Hardware Event Log</span>
+              <span>Mission &amp; Hardware Event Log</span>
+              <span
+                className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                  robotLinkMode === 'pi_live'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : robotLinkMode === 'pi_unreachable'
+                    ? 'bg-amber-50 text-amber-800 border-amber-200'
+                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                }`}
+              >
+                {robotLinkMode === 'pi_live'
+                  ? 'PI LIVE'
+                  : robotLinkMode === 'pi_unreachable'
+                  ? 'PI UNREACHABLE'
+                  : 'SIM ONLY'}
+              </span>
             </div>
             <button
               onClick={() => setEventLog([`[${new Date().toLocaleTimeString()}] [Log] Cleared.`])}

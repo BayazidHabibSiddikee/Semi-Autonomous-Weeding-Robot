@@ -62,6 +62,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
   onLogEvent,
 }) => {
   const [sourceMode, setSourceMode] = useState<'maixsense' | 'webcam'>('maixsense');
+  const [maixTriggerSeq, setMaixTriggerSeq] = useState<number>(0);
   const [status, setStatus] = useState<'idle' | 'requesting' | 'active' | 'error'>('idle');
   const [errorText, setErrorText] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
@@ -390,11 +391,17 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     lastTriggerSeqRef.current = externalTrigger.seq;
     if (externalTrigger.action === 'start') {
       sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      void startCamera();
+      if (sourceMode === 'maixsense') {
+        setMaixTriggerSeq((n) => n + 1);
+      } else {
+        void startCamera();
+      }
     } else if (externalTrigger.action === 'stop') {
-      stopCamera(true);
+      if (sourceMode === 'webcam') {
+        stopCamera(true);
+      }
     }
-  }, [externalTrigger, startCamera, stopCamera]);
+  }, [externalTrigger, sourceMode, startCamera, stopCamera]);
 
   // Stop MediaStream tracks cleanly on unmount
   useEffect(() => {
@@ -970,6 +977,11 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
           rowWidthM={rowWidthM}
           stanleyGain={stanleyGain}
           speedLimit={speedLimit}
+          triggerSeq={maixTriggerSeq}
+          onSwitchToWebcam={() => {
+            setSourceMode('webcam');
+            window.setTimeout(() => void startCamera(), 60);
+          }}
           onAlignmentUpdate={onAlignmentUpdate}
           onLogEvent={onLogEvent}
         />

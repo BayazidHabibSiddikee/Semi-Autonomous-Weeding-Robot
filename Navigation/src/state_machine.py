@@ -44,6 +44,7 @@ class RoverStateMachine:
         mission_tracker: MissionTracker,
         safety_check_fn: Callable[[], bool] | None = None,
         treatment_hook: Callable[[tuple[float, float, float]], dict] | None = None,
+        visual_row_end_fn: Callable[[], float] | None = None,
     ):
         self.rover = rover
         self.navigator = row_navigator
@@ -52,6 +53,8 @@ class RoverStateMachine:
         self.safety_check_fn = safety_check_fn or (lambda: True)
         # Optional modular treatment callback (Flame / Grinder); None = navigation-only
         self.treatment_hook = treatment_hook
+        # Optional visual row-end confidence provider (0.0..1.0) from live navigation camera
+        self.visual_row_end_fn = visual_row_end_fn
 
         self.state = RoverState.IDLE
         self.running = False
@@ -187,7 +190,16 @@ class RoverStateMachine:
             if not ok:
                 return
 
-            outcome = self.navigator.step_along_row(abort_check_fn=self._preflight_safety_and_sensors)
+            vis_conf = 0.0
+            if self.visual_row_end_fn is not None:
+                try:
+                    vis_conf = max(0.0, min(1.0, float(self.visual_row_end_fn())))
+                except Exception:
+                    vis_conf = 0.0
+            outcome = self.navigator.step_along_row(
+                abort_check_fn=self._preflight_safety_and_sensors,
+                visual_row_end_conf=vis_conf,
+            )
 
             if outcome.distance_cm > 0.0:
                 self.stats["steps"] += 1

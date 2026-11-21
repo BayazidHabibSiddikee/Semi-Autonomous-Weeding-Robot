@@ -323,6 +323,243 @@ class NavigationAuditTestSuite(unittest.TestCase):
         self.assertEqual(code, 412)
         self.assertIn("SAMPLE_IMAGE_FORBIDDEN_ON_LIVE_HARDWARE", body["blockers"])
 
+    def test_audit_c_cold_boot_standby_and_explicit_watchdog_recovery(self):
+        from pi_server import HardenedNavigationController
+
+        # 1. Cold-boot ESP32 waits >1.5s before Pi connects: motors stay stopped, NO phantom latch
+        fw = RoverFirmwareController()
+        fw.last_cmd_ms -= 2000
+        fw.step_control(0.02)
+        self.assertFalse(fw.watchdog_tripped)
+        self.assertEqual(fw.target_l, 0.0)
+        self.assertEqual(fw.target_r, 0.0)
+
+        # 2. Pi connects via PING -> PONG 1 1 (estop_ok=1, watchdog_ok=1) and syncs host
+        self.assertEqual(fw.handle_command("PING"), "PONG 1 1")
+        self.assertTrue(fw.host_synced)
+
+        # 3. Subsequent host silence > 250 ms MUST latch watchdog and resist PING
+        fw.last_cmd_ms -= 400
+        fw.step_control(0.02)
+        self.assertTrue(fw.watchdog_tripped)
+        self.assertEqual(fw.handle_command("PING"), "PONG 1 0")
+        self.assertEqual(fw.handle_command("VEL 1.0 1.0"), "ERR:WATCHDOG_LATCHED")
+
+        # 4. Pi controller explicit recovery requires operator_confirmed=True
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.esp32.watchdog_ok = False
+        ctrl.sm.state = RoverState.FAULT
+
+        code_deny, body_deny = ctrl.handle_recover(operator_confirmed=False)
+        self.assertEqual(code_deny, 400)
+        self.assertFalse(body_deny["recovered"])
+        self.assertFalse(ctrl.esp32.watchdog_ok)
+
+        code_ok, body_ok = ctrl.handle_recover(operator_confirmed=True)
+        self.assertEqual(code_ok, 200, body_ok)
+        self.assertTrue(body_ok["recovered"])
+        self.assertEqual(body_ok["state"], RoverState.PAUSED)
+        self.assertTrue(ctrl.esp32.watchdog_ok)
+
+    def test_audit_b_camera_ingestion_visual_row_end_and_background_worker(self):
+        import time
+        from pi_server import BackgroundControlWorker, HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        self.assertFalse(ctrl.get_status()["hardware"]["camera_healthy"])
+
+        # Ingest live JPEG bytes + visual row-end confidence
+        code, resp = ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9", visual_row_end_conf=0.92)
+        self.assertEqual(code, 200)
+        self.assertTrue(resp["camera_healthy"])
+        self.assertAlmostEqual(resp["visual_row_end_conf"], 0.92, places=2)
+
+        # Start mission and verify visual row-end confidence triggers HEADLAND_TURN
+        start_code, start_data = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True)
+        self.assertEqual(start_code, 200, start_data)
+        ctrl.step_control_loop()
+        self.assertEqual(ctrl.sm.state, RoverState.HEADLAND_TURN)
+
+        # Verify BackgroundControlWorker thread executes control ticks autonomously
+        worker = BackgroundControlWorker(ctrl, hz=25.0)
+        ticks_before = ctrl.worker_ticks
+        worker.start()
+        try:
+            time.sleep(0.18)
+            self.assertTrue(worker.is_running)
+        finally:
+            worker.stop()
+        self.assertGreater(ctrl.worker_ticks, ticks_before)
+
+    def test_audit_d_imu_heading_wired_into_navigation_stack(self):
+        esp32, sm = build_navigation_stack(self.config, simulate=True)
+        self.assertIsNotNone(sm.rover.imu_heading_fn)
+        self.assertIsNotNone(sm.rover.imu_sensor)
+
+        # Inject sudden skid-steer yaw divergence on simulated IMU -> localizer detects slip
+        sm.rover.imu_sensor.injected_yaw_offset_deg = 0.0
+        sm.rover.move_distance(target_cm=8.0, target_heading_deg=0.0)
+        sm.rover.imu_sensor.injected_yaw_offset_deg = 60.0
+        ok, _, _ = sm.rover.move_distance(target_cm=8.0, target_heading_deg=0.0)
+        pose = sm.rover.localizer.get_pose()
+        self.assertGreater(pose.slip_residual_cm, 5.0)
+
+    def test_audit_e_ros2_colcon_workspace_manifests_and_collision_monitor_wiring(self):
+        import xml.etree.ElementTree as ET
+
+        expected_pkgs = [
+            "crop_row_navigation",
+            "robot_bringup",
+            "robot_safety",
+            "rover_description",
+            "rover_hardware",
+            "rover_localization",
+            "rover_navigation",
+            "weeding_controller",
+        ]
+        for pkg in expected_pkgs:
+            pkg_dir = os.path.join(REPO, "ros2_ws", "src", pkg)
+            pkg_xml = os.path.join(pkg_dir, "package.xml")
+            setup_py = os.path.join(pkg_dir, "setup.py")
+            setup_cfg = os.path.join(pkg_dir, "setup.cfg")
+            res_file = os.path.join(pkg_dir, "resource", pkg)
+            self.assertTrue(os.path.exists(pkg_xml), f"Missing {pkg_xml}")
+            self.assertTrue(os.path.exists(setup_py), f"Missing {setup_py}")
+            self.assertTrue(os.path.exists(setup_cfg), f"Missing {setup_cfg}")
+            self.assertTrue(os.path.exists(res_file), f"Missing {res_file}")
+            tree = ET.parse(pkg_xml)
+            self.assertEqual(tree.getroot().findtext("name"), pkg)
+
+        launch_path = os.path.join(
+            REPO, "ros2_ws", "src", "robot_bringup", "launch", "rover_bringup.launch.py"
+        )
+        with open(launch_path, "r", encoding="utf-8") as fh:
+            launch_src = fh.read()
+        self.assertIn("nav2_collision_monitor", launch_src)
+        self.assertIn("/cmd_vel_nav", launch_src)
+        self.assertIn("/cmd_vel_safe", launch_src)
+
+    def test_audit_f_detections_remain_fail_closed_until_calibrated_and_loaded(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True, model_loaded=False)
+        code, body = ctrl.handle_detection(
+            class_name="weed_dandelion", confidence=0.95, u_px=640, v_px=360
+        )
+        self.assertEqual(code, 412)
+        self.assertEqual(body["reason"], "WEED_MODEL_NOT_LOADED")
+
+        ctrl.model_loaded = True
+        code2, body2 = ctrl.handle_detection(
+            class_name="weed_dandelion", confidence=0.95, u_px=640, v_px=360
+        )
+        self.assertEqual(code2, 412)
+        self.assertEqual(body2["reason"], "HOMOGRAPHY_NOT_CALIBRATED")
+
+        cal_code, cal_body = ctrl.set_homography_matrix([
+            [0.421, -0.012, -260.0],
+            [0.015, 0.418, 10.0],
+            [0.0, 0.0, 1.0],
+        ])
+        self.assertEqual(cal_code, 200)
+        self.assertTrue(cal_body["homography_calibrated"])
+
+        crop_code, crop_body = ctrl.handle_detection(
+            class_name="crop_tomato", confidence=0.99, u_px=640, v_px=360
+        )
+        self.assertEqual(crop_code, 200)
+        self.assertFalse(crop_body["accepted"])
+        self.assertIn("REJECTED_PROTECTED_CROP", crop_body["reason"])
+
+        weed_code, weed_body = ctrl.handle_detection(
+            class_name="weed_dandelion", confidence=0.92, u_px=640, v_px=360
+        )
+        self.assertEqual(weed_code, 200)
+        self.assertTrue(weed_body["accepted"])
+
+    def test_startup_handshake_clears_latch_and_validates_ready_state(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        # Simulate previously latched watchdog & FAULT state on startup
+        ctrl.esp32.watchdog_ok = False
+        ctrl.sm.state = RoverState.FAULT
+
+        # Without camera frames, ESP32 CLEAR_LATCH succeeds & initializes watchdog,
+        # while navigation_dispatch_unlocked stays False until camera is healthy.
+        code, body = ctrl.handle_startup_handshake(operator_confirmed=True)
+        self.assertEqual(code, 200, body)
+        self.assertTrue(body["esp32_ready"])
+        self.assertTrue(body["watchdog_initialized"])
+        self.assertTrue(body["estop_ok"])
+        self.assertFalse(body["camera_healthy"])
+        self.assertFalse(body["navigation_dispatch_unlocked"])
+        self.assertEqual(ctrl.sm.state, RoverState.PAUSED)
+        commands = [s["command"] for s in body["steps"]]
+        self.assertIn("PING", commands)
+        self.assertIn("CLEAR_LATCH", commands)
+        self.assertIn("TELEM?", commands)
+
+    def test_startup_handshake_unlocks_dispatch_when_camera_healthy(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9")
+
+        # Refuses CLEAR_LATCH when operator_confirmed=False
+        deny_code, deny_body = ctrl.handle_startup_handshake(operator_confirmed=False)
+        self.assertEqual(deny_code, 400)
+        self.assertFalse(deny_body["watchdog_initialized"])
+        self.assertFalse(deny_body["navigation_dispatch_unlocked"])
+
+        # Unlocks dispatch once CLEAR_LATCH + TELEM? ready-state AND camera are healthy
+        ok_code, ok_body = ctrl.handle_startup_handshake(operator_confirmed=True)
+        self.assertEqual(ok_code, 200, ok_body)
+        self.assertTrue(ok_body["watchdog_initialized"])
+        self.assertTrue(ok_body["camera_healthy"])
+        self.assertTrue(ok_body["navigation_dispatch_unlocked"])
+
+    def test_async_control_loop_worker_drives_mission_continuously(self):
+        import asyncio
+        from pi_server import AsyncControlLoopWorker, HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9")
+        start_x = ctrl.get_status()["pose_measured"]["x_cm"]
+
+        code, body = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True)
+        self.assertEqual(code, 200, body)
+
+        async def _exercise():
+            worker = AsyncControlLoopWorker(ctrl, hz=25.0)
+            task = worker.start()
+            self.assertTrue(worker.is_running)
+            self.assertIsNotNone(task)
+            # Keep camera frames fresh while the async background worker ticks the mission
+            for _ in range(4):
+                ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9")
+                await asyncio.sleep(0.06)
+            await worker.stop()
+            self.assertFalse(worker.is_running)
+
+        asyncio.run(_exercise())
+        self.assertGreater(ctrl.worker_ticks, 2)
+        end_x = ctrl.get_status()["pose_measured"]["x_cm"]
+        self.assertGreater(end_x, start_x)
+
+    def test_global_app_boot_survives_unplugged_usb_esp32_fail_closed(self):
+        from pi_server import HardenedNavigationController
+
+        cfg = load_config()
+        cfg["serial"]["esp32_port"] = "/dev/nonexistent_esp32_port_xyz"
+        # Must NOT raise RuntimeError during module import/boot when USB cable is unplugged
+        ctrl = HardenedNavigationController(cfg, simulate=False)
+        self.assertFalse(ctrl.esp32.connected)
+        # Launch interlock MUST remain strictly fail-closed until ESP32 connects
+        code, body = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True)
+        self.assertEqual(code, 412)
+        self.assertIn("ESP32_NOT_CONNECTED", body["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

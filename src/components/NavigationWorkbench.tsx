@@ -38,6 +38,13 @@ import {
   RowEndVisionInput,
   formatTurnLabel,
 } from '../services/rowEndDetectionService';
+import {
+  CompletedTurnRecord,
+  INITIAL_LIVE_TURN_TELEMETRY,
+  LiveTurnTelemetry,
+  TurnAccuracyDashboard,
+  TurnTrajectorySample,
+} from './TurnAccuracyDashboard';
 
 interface Props {
   estopActive: boolean;
@@ -312,6 +319,67 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     }))
   );
 
+  const [liveTurnTelemetry, setLiveTurnTelemetry] = useState<LiveTurnTelemetry>(
+    INITIAL_LIVE_TURN_TELEMETRY
+  );
+  const [turnSamples, setTurnSamples] = useState<TurnTrajectorySample[]>([]);
+  const [completedTurns, setCompletedTurns] = useState<CompletedTurnRecord[]>([]);
+
+  const onLogEventRef = useRef(onLogEvent);
+  onLogEventRef.current = onLogEvent;
+
+  const turnTrackerRef = useRef<{
+    active: boolean;
+    turnCounter: number;
+    fromRow: number;
+    toRow: number;
+    direction: 'RIGHT' | 'LEFT';
+    turnSign: number;
+    startYaw: number;
+    targetEndYaw: number;
+    startSimSec: number;
+    waypoints: Array<{ x: number; y: number }>;
+    segLengths: number[];
+    totalLen: number;
+    prevImuYaw: number;
+    prevRawYaw: number;
+    imuCumRad: number;
+    rawCumRad: number;
+    calcCumRad: number;
+    calcHeadingRad: number;
+    sqErrorDegSum: number;
+    sampleCount: number;
+    maxCrossTrackCm: number;
+    lastSampleProgress: number;
+    samples: TurnTrajectorySample[];
+    latestTelemetry: LiveTurnTelemetry;
+  }>({
+    active: false,
+    turnCounter: 0,
+    fromRow: 1,
+    toRow: 2,
+    direction: 'RIGHT',
+    turnSign: 1,
+    startYaw: 0,
+    targetEndYaw: Math.PI,
+    startSimSec: 0,
+    waypoints: [],
+    segLengths: [],
+    totalLen: 1,
+    prevImuYaw: 0,
+    prevRawYaw: 0,
+    imuCumRad: 0,
+    rawCumRad: 0,
+    calcCumRad: 0,
+    calcHeadingRad: 0,
+    sqErrorDegSum: 0,
+    sampleCount: 0,
+    maxCrossTrackCm: 0,
+    lastSampleProgress: -10,
+    samples: [],
+    latestTelemetry: INITIAL_LIVE_TURN_TELEMETRY,
+  });
+
   const fieldCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const camCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -471,6 +539,78 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     [cameraFeedState.active, liveVisionState.active]
   );
 
+  const initTurnTracker = useCallback(
+    (
+      s: typeof simRef.current,
+      nextRowIdx: number,
+      turnWaypoints: Array<{ x: number; y: number; yaw: number }>,
+      nextYaw: number
+    ) => {
+      const pts = [{ x: s.x, y: s.y }, ...turnWaypoints.map((w) => ({ x: w.x, y: w.y }))];
+      const segLengths: number[] = [];
+      let totalLen = 0;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        segLengths.push(len);
+        totalLen += len;
+      }
+      const direction: 'RIGHT' | 'LEFT' = s.dir > 0 ? 'RIGHT' : 'LEFT';
+      const initialSample: TurnTrajectorySample = {
+        progressPct: 0,
+        label: '0%',
+        calculatedDeg: 0,
+        imuDeg: 0,
+        rawOdomDeg: 0,
+        errorDeg: 0,
+        crossTrackCm: 0,
+      };
+      const initialLive: LiveTurnTelemetry = {
+        active: true,
+        fromRow: s.rowIdx + 1,
+        toRow: nextRowIdx + 1,
+        direction,
+        progressPct: 0,
+        calculatedYawDeg: 0,
+        imuYawDeg: 0,
+        rawOdomYawDeg: 0,
+        headingErrorDeg: 0,
+        imuWzRadS: 0,
+        imuGyroBiasDegS: 0.04,
+        crossTrackCm: 0,
+        liveAccuracyPct: 100,
+      };
+      turnTrackerRef.current = {
+        active: true,
+        turnCounter: turnTrackerRef.current.turnCounter,
+        fromRow: s.rowIdx + 1,
+        toRow: nextRowIdx + 1,
+        direction,
+        turnSign: s.dir > 0 ? 1 : -1,
+        startYaw: s.yaw,
+        targetEndYaw: nextYaw,
+        startSimSec: s.simSeconds,
+        waypoints: pts,
+        segLengths,
+        totalLen: Math.max(0.2, totalLen),
+        prevImuYaw: s.yaw,
+        prevRawYaw: s.rawYaw,
+        imuCumRad: 0,
+        rawCumRad: 0,
+        calcCumRad: 0,
+        calcHeadingRad: s.yaw,
+        sqErrorDegSum: 0,
+        sampleCount: 0,
+        maxCrossTrackCm: 0,
+        lastSampleProgress: 0,
+        samples: [initialSample],
+        latestTelemetry: initialLive,
+      };
+      setTurnSamples([initialSample]);
+      setLiveTurnTelemetry(initialLive);
+    },
+    []
+  );
+
   const dispatchHeadlandTurn = useCallback(
     (triggerOrigin: 'operator' | 'auto') => {
       const s = simRef.current;
@@ -499,20 +639,22 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       const nextYaw = s.dir > 0 ? Math.PI : 0;
 
       s.rowProgress[s.rowIdx] = 1.0;
-      s.turnWaypoints = [
+      const waypoints = [
         { x: exitX, y: yFrom, yaw: Math.PI / 2 },
         { x: exitX, y: yTo, yaw: nextYaw },
         { x: entryX, y: yTo, yaw: nextYaw },
       ];
+      s.turnWaypoints = waypoints;
       s.turnWpIdx = 0;
       s.phase = 'NAV2_HEADLAND_TURN';
+      initTurnTracker(s, nextRowIdx, waypoints, nextYaw);
       setRunning(true);
       setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart(triggerOrigin));
       onLogEvent(
         `[row_end_detection] State transition ROW_END_STOP → NAV2_HEADLAND_TURN (${triggerOrigin}): Row ${s.rowIdx + 1} → Row ${nextRowIdx + 1} (${s.dir > 0 ? 'RIGHT_U_TURN' : 'LEFT_U_TURN'}).`
       );
     },
-    [onLogEvent]
+    [onLogEvent, initTurnTracker]
   );
 
   // Continuously feed active vision frames (Live <video>, WebRTC/WS, or Field Sim) into row_end_detection
@@ -611,7 +753,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     if (estopActive || faultReason !== null || sensorFaultInjected) return;
     const s = simRef.current;
     const rw = rowWidthCm / 100;
-    if (s.phase === 'MISSION_COMPLETE') {
+    if (s.phase === 'MISSION_COMPLETE' || s.rowIdx >= NUM_ROWS - 1) {
       s.rowIdx = 0;
       s.dir = 1;
       s.rowProgress = [0, 0, 0, 0];
@@ -627,6 +769,8 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     s.turnWaypoints = [];
     s.rowEndConf = 0.08;
     s.distToFurrowEndM = 1.15;
+    turnTrackerRef.current.active = false;
+    setLiveTurnTelemetry((prev) => ({ ...prev, active: false, imuWzRadS: 0 }));
     setRowEndSnapshot(rowEndServiceRef.current.reset());
     setRunning(true);
     onLogEvent(
@@ -674,6 +818,13 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     };
     syncVisionTracker(0.05, 0.06);
     setRowEndSnapshot(rowEndServiceRef.current.reset());
+    turnTrackerRef.current.active = false;
+    turnTrackerRef.current.turnCounter = 0;
+    turnTrackerRef.current.samples = [];
+    turnTrackerRef.current.latestTelemetry = INITIAL_LIVE_TURN_TELEMETRY;
+    setLiveTurnTelemetry(INITIAL_LIVE_TURN_TELEMETRY);
+    setTurnSamples([]);
+    setCompletedTurns([]);
     setHistory(
       Array.from({ length: 24 }, (_, idx) => ({
         t: `-${24 - idx}s`,
@@ -977,20 +1128,114 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                 const exitX = s.dir > 0 ? ROW_END_X + 0.62 : ROW_START_X - 0.62;
                 const entryX = s.dir > 0 ? ROW_END_X - 0.1 : ROW_START_X + 0.1;
                 const nextYaw = s.dir > 0 ? Math.PI : 0;
-                s.turnWaypoints = [
+                const waypoints = [
                   { x: exitX, y: yFrom, yaw: Math.PI / 2 },
                   { x: exitX, y: yTo, yaw: nextYaw },
                   { x: entryX, y: yTo, yaw: nextYaw },
                 ];
+                s.turnWaypoints = waypoints;
                 s.turnWpIdx = 0;
                 s.phase = 'NAV2_HEADLAND_TURN';
+                initTurnTracker(s, nextRowIdx, waypoints, nextYaw);
                 setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart('auto'));
               }
             }
           }
         } else if (s.phase === 'NAV2_HEADLAND_TURN') {
+          const finalizeCompletedTurn = () => {
+            const tr = turnTrackerRef.current;
+            if (!tr.active) return;
+            tr.active = false;
+            tr.turnCounter += 1;
+            const imuDeltaDeg = Number(((tr.imuCumRad * 180) / Math.PI).toFixed(1));
+            const rawOdomDeltaDeg = Number(((tr.rawCumRad * 180) / Math.PI).toFixed(1));
+            const finalHeadingErrorDeg = Number(
+              ((tr.turnSign * wrapAngle(s.yaw - tr.targetEndYaw) * 180) / Math.PI).toFixed(2)
+            );
+            const rmsHeadingErrorDeg = Number(
+              Math.sqrt(tr.sqErrorDegSum / Math.max(1, tr.sampleCount)).toFixed(2)
+            );
+            const maxCrossTrackCm = Number(tr.maxCrossTrackCm.toFixed(1));
+            const accuracyPct = Number(
+              Math.max(
+                0,
+                Math.min(
+                  100,
+                  100 -
+                    Math.abs(finalHeadingErrorDeg) * 0.65 -
+                    rmsHeadingErrorDeg * 0.45 -
+                    Math.max(0, maxCrossTrackCm - 3.0) * 0.25
+                )
+              ).toFixed(1)
+            );
+            const durationSec = Number(Math.max(0.5, s.simSeconds - tr.startSimSec).toFixed(1));
+            const passed =
+              accuracyPct >= 95.0 &&
+              Math.abs(finalHeadingErrorDeg) <= 5.0 &&
+              maxCrossTrackCm <= 12.0;
+
+            const finalSample: TurnTrajectorySample = {
+              progressPct: 100,
+              label: '100%',
+              calculatedDeg: 180,
+              imuDeg: Number(Math.max(0, imuDeltaDeg).toFixed(1)),
+              rawOdomDeg: Number(Math.max(0, rawOdomDeltaDeg).toFixed(1)),
+              errorDeg: finalHeadingErrorDeg,
+              crossTrackCm: maxCrossTrackCm,
+            };
+            tr.samples = [...tr.samples.filter((pt) => pt.progressPct < 100), finalSample];
+
+            const record: CompletedTurnRecord = {
+              id: tr.turnCounter,
+              fromRow: tr.fromRow,
+              toRow: tr.toRow,
+              direction: tr.direction,
+              targetDeltaDeg: 180,
+              imuDeltaDeg,
+              rawOdomDeltaDeg,
+              finalHeadingErrorDeg,
+              rmsHeadingErrorDeg,
+              maxCrossTrackCm,
+              accuracyPct,
+              durationSec,
+              passed,
+              completedAt: new Date().toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              }),
+            };
+
+            tr.latestTelemetry = {
+              ...tr.latestTelemetry,
+              active: false,
+              progressPct: 100,
+              calculatedYawDeg: 180,
+              imuYawDeg: imuDeltaDeg,
+              rawOdomYawDeg: rawOdomDeltaDeg,
+              headingErrorDeg: finalHeadingErrorDeg,
+              imuWzRadS: 0,
+              crossTrackCm: maxCrossTrackCm,
+              liveAccuracyPct: accuracyPct,
+            };
+
+            setTurnSamples([...tr.samples]);
+            setLiveTurnTelemetry(tr.latestTelemetry);
+            setCompletedTurns((prev) => [record, ...prev.slice(0, 11)]);
+            onLogEventRef.current(
+              `[Turn Accuracy] Turn #${record.id} (R${record.fromRow}→R${record.toRow} ${record.direction}): ${record.accuracyPct.toFixed(
+                1
+              )}% ${record.passed ? 'PASS' : 'WARN'} · IMU Δψ=${record.imuDeltaDeg.toFixed(
+                1
+              )}° vs 180.0° (err ${record.finalHeadingErrorDeg >= 0 ? '+' : ''}${record.finalHeadingErrorDeg.toFixed(
+                2
+              )}°, Max CTE ${record.maxCrossTrackCm.toFixed(1)} cm).`
+            );
+          };
+
           const wp = s.turnWaypoints[s.turnWpIdx];
           if (!wp) {
+            finalizeCompletedTurn();
             s.rowIdx += 1;
             s.dir *= -1;
             s.phase = 'FOLLOW_CROP_ROW';
@@ -1002,6 +1247,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             if (dist < 0.08) {
               s.turnWpIdx += 1;
               if (s.turnWpIdx >= s.turnWaypoints.length) {
+                finalizeCompletedTurn();
                 s.rowIdx += 1;
                 s.dir *= -1;
                 s.phase = 'FOLLOW_CROP_ROW';
@@ -1037,6 +1283,102 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         s.rawYaw = wrapAngle(s.rawYaw + wz * dt + rawSlipBias);
         s.rawX += vx * 1.035 * Math.cos(s.rawYaw) * dt;
         s.rawY += vx * 1.035 * Math.sin(s.rawYaw) * dt;
+
+        // Track live IMU vs. calculated trajectory progress during active headland turn
+        if (s.phase === 'NAV2_HEADLAND_TURN' && turnTrackerRef.current.active) {
+          const tr = turnTrackerRef.current;
+          const dImu = wrapAngle(s.yaw - tr.prevImuYaw);
+          const dRaw = wrapAngle(s.rawYaw - tr.prevRawYaw);
+          tr.prevImuYaw = s.yaw;
+          tr.prevRawYaw = s.rawYaw;
+
+          // Integrate IMU gyro with minor realistic MEMS bias/jitter (rad)
+          const imuGyroBiasRadS = (0.04 + Math.sin(s.simSeconds * 0.5) * 0.015) * (Math.PI / 180);
+          tr.imuCumRad += tr.turnSign * (dImu + imuGyroBiasRadS * dt);
+          tr.rawCumRad += tr.turnSign * dRaw;
+
+          // Compute ideal calculated trajectory heading along active segment
+          const segIdx = Math.min(s.turnWpIdx, Math.max(0, tr.segLengths.length - 1));
+          const pA = tr.waypoints[segIdx];
+          const pB = tr.waypoints[segIdx + 1];
+          let crossTrackCm = 0;
+          let traversedLen = 0;
+          for (let i = 0; i < segIdx; i++) {
+            traversedLen += tr.segLengths[i];
+          }
+          if (pA && pB) {
+            const segDx = pB.x - pA.x;
+            const segDy = pB.y - pA.y;
+            const segLen = Math.max(1e-4, tr.segLengths[segIdx]);
+            const proj = Math.max(
+              0,
+              Math.min(1, ((s.x - pA.x) * segDx + (s.y - pA.y) * segDy) / (segLen * segLen))
+            );
+            traversedLen += proj * segLen;
+            const footX = pA.x + proj * segDx;
+            const footY = pA.y + proj * segDy;
+            crossTrackCm = Math.hypot(s.x - footX, s.y - footY) * 100;
+
+            const segYaw = Math.atan2(segDy, segDx);
+            const calcErr = wrapAngle(segYaw - tr.calcHeadingRad);
+            const calcWz = Math.max(-0.95, Math.min(0.95, calcErr * 2.35));
+            tr.calcHeadingRad = wrapAngle(tr.calcHeadingRad + calcWz * dt);
+            tr.calcCumRad = Math.min(Math.PI, Math.max(0, tr.calcCumRad + tr.turnSign * calcWz * dt));
+          }
+
+          const progressPct = Math.max(0, Math.min(99.5, (traversedLen / tr.totalLen) * 100));
+          const calcDeg = Math.min(180, Math.max(0, (tr.calcCumRad * 180) / Math.PI));
+          const imuDeg = Math.max(0, (tr.imuCumRad * 180) / Math.PI);
+          const rawOdomDeg = Math.max(0, (tr.rawCumRad * 180) / Math.PI);
+          const headingErrDeg = imuDeg - calcDeg;
+
+          tr.sqErrorDegSum += headingErrDeg * headingErrDeg;
+          tr.sampleCount += 1;
+          if (crossTrackCm > tr.maxCrossTrackCm) {
+            tr.maxCrossTrackCm = crossTrackCm;
+          }
+
+          const liveRms = Math.sqrt(tr.sqErrorDegSum / Math.max(1, tr.sampleCount));
+          const liveAccuracyPct = Math.max(
+            0,
+            Math.min(
+              100,
+              100 -
+                Math.abs(headingErrDeg) * 0.55 -
+                liveRms * 0.45 -
+                Math.max(0, tr.maxCrossTrackCm - 3.0) * 0.25
+            )
+          );
+
+          tr.latestTelemetry = {
+            active: true,
+            fromRow: tr.fromRow,
+            toRow: tr.toRow,
+            direction: tr.direction,
+            progressPct,
+            calculatedYawDeg: calcDeg,
+            imuYawDeg: imuDeg,
+            rawOdomYawDeg: rawOdomDeg,
+            headingErrorDeg: headingErrDeg,
+            imuWzRadS: wz + imuGyroBiasRadS,
+            imuGyroBiasDegS: Number(((imuGyroBiasRadS * 180) / Math.PI).toFixed(2)),
+            crossTrackCm,
+            liveAccuracyPct,
+          };
+
+          if (progressPct - tr.lastSampleProgress >= 4.5) {
+            tr.lastSampleProgress = progressPct;
+            tr.samples.push({
+              progressPct: Number(progressPct.toFixed(0)),
+              label: `${Math.round(progressPct)}%`,
+              calculatedDeg: Number(calcDeg.toFixed(1)),
+              imuDeg: Number(imuDeg.toFixed(1)),
+              rawOdomDeg: Number(rawOdomDeg.toFixed(1)),
+              errorDeg: Number(headingErrDeg.toFixed(2)),
+              crossTrackCm: Number(crossTrackCm.toFixed(1)),
+            });
+          }
+        }
 
         const lastEkf = s.ekfPath[s.ekfPath.length - 1];
         if (!lastEkf || Math.hypot(s.x - lastEkf.x, s.y - lastEkf.y) > 0.06) {
@@ -1090,6 +1432,11 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
           cmdWz: s.cmdWz,
           boundaryOk: s.boundaryOk,
         });
+
+        if (turnTrackerRef.current.active) {
+          setLiveTurnTelemetry({ ...turnTrackerRef.current.latestTelemetry });
+          setTurnSamples([...turnTrackerRef.current.samples]);
+        }
 
         if (now - s.lastChartSync > 650) {
           s.lastChartSync = now;
@@ -1594,6 +1941,15 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
               </ResponsiveContainer>
             </div>
           </div>
+
+          {/* Headland Turn-Completion Accuracy Telemetry Dashboard (IMU vs. Calculated Trajectory) */}
+          <TurnAccuracyDashboard
+            liveTurn={liveTurnTelemetry}
+            samples={turnSamples}
+            completedTurns={completedTurns}
+            onTestHeadlandTurn={handleJumpToRowEndTest}
+            disabled={estopActive || isFaulted}
+          />
         </div>
       </div>
     </div>

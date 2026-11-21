@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config_loader import load_yaml_config
 from esp32_bridge import ESP32Bridge, ESP32Simulator
 from field_boundary import FieldBoundaryGuard
+from imu_bno055 import BNO055HeadingReader, SimulatedImuHeading
 from localizer import FieldLocalizer
 from mission_checkpoint import MissionTracker
 from rover_motors import create_rover
@@ -30,8 +31,15 @@ from state_machine import RoverStateMachine
 from ultrasonic import UltrasonicSensor, UltrasonicSimulator
 
 
-def build_navigation_stack(config: dict, simulate: bool = True, resume_path: str | None = None):
-    """Assemble the complete decoupled navigation stack over ONE ESP32Bridge."""
+def build_navigation_stack(
+    config: dict,
+    simulate: bool = True,
+    resume_path: str | None = None,
+    imu_heading_fn=None,
+    visual_row_end_fn=None,
+    allow_disconnected_esp32: bool = False,
+):
+    """Assemble the complete decoupled navigation stack over ONE ESP32Bridge with IMU & visual hooks."""
     geo = config["rover"]["geometry"]
     enc = config["rover"]["encoders"]
     obs_cfg = config["rover"]["obstacle_sensor"]
@@ -49,7 +57,7 @@ def build_navigation_stack(config: dict, simulate: bool = True, resume_path: str
             baudrate=ser_cfg["esp32_baud"],
             timeout=ser_cfg["esp32_timeout_s"],
         )
-        if not esp32.connect():
+        if not esp32.connect() and not allow_disconnected_esp32:
             raise RuntimeError(f"Failed to connect to ESP32 on {ser_cfg['esp32_port']}")
         step_physics_fn = None
 
@@ -62,6 +70,23 @@ def build_navigation_stack(config: dict, simulate: bool = True, resume_path: str
         max_slip_residual_cm=nav_cfg["max_slip_residual_cm"],
     )
 
+    # 2b. Wire BNO055 IMU heading feedback (or physics-coupled SimulatedImuHeading in sim mode)
+    imu_sensor = None
+    if imu_heading_fn is None:
+        if simulate:
+            imu_sensor = SimulatedImuHeading(
+                esp32_sim=esp32,
+                wheel_radius_cm=geo["wheel_radius_cm"],
+                wheel_separation_cm=geo["wheel_separation_cm"],
+                skid_multiplier=geo["skid_steer_multiplier"],
+                ticks_per_rev=enc["ticks_per_rev"],
+            )
+            imu_heading_fn = imu_sensor.read_heading_deg
+        else:
+            imu_sensor = BNO055HeadingReader.from_config(config)
+            if imu_sensor.available:
+                imu_heading_fn = imu_sensor.read_heading_deg
+
     # 3. Field boundary polygon guard (NAV-08)
     boundary = FieldBoundaryGuard.from_rectangle(
         length_cm=nav_cfg["field_length_cm"],
@@ -69,13 +94,15 @@ def build_navigation_stack(config: dict, simulate: bool = True, resume_path: str
         safety_margin_cm=geo["boundary_margin_cm"],
     )
 
-    # 4. Closed-loop differential-drive motors sharing the single ESP32Bridge
+    # 4. Closed-loop differential-drive motors sharing the single ESP32Bridge + IMU fusion
     rover = create_rover(
         esp32_bridge=esp32,
         localizer=localizer,
         config=config,
+        imu_heading_fn=imu_heading_fn,
         step_physics_fn=step_physics_fn,
     )
+    rover.imu_sensor = imu_sensor
 
     # 5. Structured serpentine RowNavigator (NAV-04, NAV-07)
     navigator = RowNavigator(rover=rover, boundary_guard=boundary, config=config)
@@ -126,6 +153,7 @@ def build_navigation_stack(config: dict, simulate: bool = True, resume_path: str
         mission_tracker=tracker,
         safety_check_fn=lambda: esp32.read_telemetry().estop_ok,
         treatment_hook=None,  # Attach modular Flame / Grinder controller only after nav passes
+        visual_row_end_fn=visual_row_end_fn,
     )
 
     return esp32, sm

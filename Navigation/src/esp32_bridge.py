@@ -47,26 +47,66 @@ class ESP32Bridge:
         self._lock = threading.Lock()
         self.last_rx_time = 0.0
         self.consecutive_errors = 0
+        self.last_telemetry: Esp32Telemetry | None = None
+
+    @staticmethod
+    def _candidate_usb_ports(preferred_port: str) -> list[str]:
+        import os
+        import re
+
+        candidates: list[str] = []
+        if preferred_port:
+            candidates.append(preferred_port)
+        if os.path.isdir("/dev"):
+            pattern = re.compile(r"^(ttyUSB\d+|ttyACM\d+|cu\.usb\S+|cu\.SLAB\S+|cu\.wchusb\S+)$")
+            try:
+                for entry in sorted(os.listdir("/dev")):
+                    if pattern.match(entry):
+                        full = f"/dev/{entry}"
+                        if full not in candidates:
+                            candidates.append(full)
+            except OSError:
+                pass
+        return candidates
 
     def connect(self) -> bool:
-        import serial
+        try:
+            import serial
+        except ImportError:
+            self.connected = False
+            print("[ESP32Bridge] pyserial not installed; ESP32 USB bridge remains disconnected.")
+            return False
         with self._lock:
             if self.connected and self.serial and self.serial.is_open:
                 return True
-            try:
-                self.serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-                time.sleep(1.5)
-                self.serial.reset_input_buffer()
-                self.connected = True
-                resp = self._send_unlocked("PING")
-                if not resp.startswith("PONG"):
-                    raise RuntimeError(f"Unexpected ESP32 handshake: {resp!r}")
-                self.consecutive_errors = 0
-                return True
-            except Exception as exc:
-                self.connected = False
-                print(f"[ESP32Bridge] Connection failed on {self.port}: {exc}")
-                return False
+            last_exc: Exception | None = None
+            for candidate_port in self._candidate_usb_ports(self.port):
+                try:
+                    self.serial = serial.Serial(candidate_port, self.baudrate, timeout=self.timeout)
+                    time.sleep(1.5)
+                    self.serial.reset_input_buffer()
+                    self.port = candidate_port
+                    self.connected = True
+                    resp = self._send_unlocked("PING")
+                    if not resp.startswith("PONG"):
+                        raise RuntimeError(f"Unexpected ESP32 handshake on {candidate_port}: {resp!r}")
+                    # Inspect immediate telemetry so latch state (estop_ok / watchdog_ok) is known
+                    # right after handshake without ever silently clearing an emergency latch.
+                    telem_raw = self._send_unlocked("TELEM?")
+                    self.last_telemetry = self._parse_telemetry(telem_raw)
+                    self.consecutive_errors = 0
+                    return True
+                except Exception as exc:
+                    last_exc = exc
+                    if self.serial and self.serial.is_open:
+                        try:
+                            self.serial.close()
+                        except Exception:
+                            pass
+                    self.serial = None
+                    self.connected = False
+            print(f"[ESP32Bridge] Connection failed on {self.port}: {last_exc}")
+            return False
 
     def disconnect(self):
         with self._lock:
@@ -131,11 +171,33 @@ class ESP32Bridge:
         except Exception as exc:
             return False, f"UART_ERR:{exc}"
 
+    def recover_watchdog_latch(self, operator_confirmed: bool = False) -> tuple[bool, str]:
+        """
+        Explicit operator-authorized recovery procedure for ESP32 watchdog/E-stop latches.
+        Never clears a latch silently; verifies physical GPIO 13 E-stop loop via firmware
+        CLEAR_LATCH response and confirms healthy TELEM? afterwards.
+        """
+        if not operator_confirmed:
+            return False, "ERR:OPERATOR_CONFIRMATION_REQUIRED"
+        if not self.connected:
+            return False, "ERR:DISCONNECTED"
+        ok, resp = self.clear_latch()
+        if not ok:
+            return False, resp
+        telem = self.read_telemetry()
+        if not telem.valid:
+            return False, "ERR:TELEM_INVALID_AFTER_CLEAR"
+        if not telem.estop_ok:
+            return False, "ERR:PHYSICAL_ESTOP_OPEN"
+        if not telem.watchdog_ok:
+            return False, "ERR:WATCHDOG_STILL_LATCHED"
+        return True, "OK:LATCH_CLEARED"
+
     def reset_encoders(self) -> bool:
         return self.send("RESET_ENC") == "OK"
 
-    def read_telemetry(self) -> Esp32Telemetry:
-        resp = self.send("TELEM?")
+    @staticmethod
+    def _parse_telemetry(resp: str) -> Esp32Telemetry:
         if not resp.startswith("TELEM "):
             return Esp32Telemetry(0, 0, 0.0, 0.0, -1, False, False, valid=False)
         parts = resp.split()
@@ -154,6 +216,12 @@ class ESP32Bridge:
             )
         except ValueError:
             return Esp32Telemetry(0, 0, 0.0, 0.0, -1, False, False, valid=False)
+
+    def read_telemetry(self) -> Esp32Telemetry:
+        resp = self.send("TELEM?")
+        telem = self._parse_telemetry(resp)
+        self.last_telemetry = telem
+        return telem
 
     def read_distance_mm(self) -> int:
         resp = self.send("DIST?")
@@ -262,6 +330,13 @@ class ESP32Simulator:
     def clear_latch(self) -> tuple[bool, str]:
         resp = self.send("CLEAR_LATCH")
         return resp == "OK:LATCH_CLEARED", resp
+
+    def recover_watchdog_latch(self, operator_confirmed: bool = False) -> tuple[bool, str]:
+        if not operator_confirmed:
+            return False, "ERR:OPERATOR_CONFIRMATION_REQUIRED"
+        if not self.connected:
+            return False, "ERR:DISCONNECTED"
+        return self.clear_latch()
 
     def reset_encoders(self) -> bool:
         return self.send("RESET_ENC") == "OK"

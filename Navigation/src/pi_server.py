@@ -1,36 +1,43 @@
 """
 Hardened Closed-Loop Navigation Pi Server (Port 8000).
 
-Resolves every Navigation, Firmware, and Safety critical finding from the
-21 November 2026 Repository Audit:
+Resolves every Navigation, Firmware, Contract, and Safety finding:
   - 1A: ZERO virtual pose stepping. Rover pose (x, y, yaw) updates strictly from
-        measured wheel encoder ticks + IMU heading via FieldLocalizer.
+        measured wheel encoder ticks + BNO055 IMU heading via FieldLocalizer.
   - 1B: Real 3-stage closed-loop headland crossing via RowNavigator (turn ->
-        encoder-measured furrow translation -> opposite-row alignment), never
-        pivot-only fake row transitions.
-  - 1C: CameraHealthMonitor fail-closed guard. Missing, disconnected, failed read(),
-        or stale (> 500 ms) navigation frames immediately command STOP and transition
-        to FAULT_CAMERA_LOSS (no blind wall-distance or zero-lateral fallback).
-  - 1D: One-shot weed TargetExecutionManager with class whitelist, homography gate,
-        spatial deduplication, bounded dwell, and cooldown.
-  - 1E: /stop validates physical ESP32 ACK (OK:ESTOP_LATCHED / OK:STOPPED). Returns
-        HTTP 503 if UART fails, times out, or returns SIM/NO_ACK/UART_ERR on live HW.
-  - 2B/3A: /start_mission enforces all 6 hardware launch interlocks (ESP32 serial,
-        live camera, E-stop ready, valid obstacle/IMU sensors, model loaded unless
-        nav_only=True, and no demo/sample image on live hardware).
-  - 2C: Blocks sample/demo field images (/media/field_render.png) from starting
-        live physical rover missions.
-  - 2D: Configurable CORS origins via WEED_ROVER_CORS_ORIGINS environment variable.
+        encoder-measured furrow translation -> opposite-row alignment).
+  - 1C: CameraHealthMonitor fail-closed guard + real frame ingestion endpoints
+        (POST /camera/frame and Android-compatible POST /image). Missing or stale
+        (> 500 ms) frames immediately command STOP and transition to FAULT.
+  - 1D: One-shot weed TargetExecutionManager with class whitelist, calibrated 3x3
+        homography gate, spatial deduplication, bounded dwell, and cooldown.
+  - 1E: POST /stop validates physical ESP32 ACK (OK:ESTOP_LATCHED / OK:STOPPED).
+        Returns HTTP 503 if UART fails, times out, or returns unverified ACK.
+  - 2B/3A: POST /start_mission enforces all 6 hardware launch interlocks AND keeps
+        nav_only=True as safe default until real YOLO weights + homography are loaded.
+  - Background worker thread runs step_control_loop() + ESP32 keepalive telemetry
+        when mounted via FastAPI lifespan/startup, and exports a ready-made module
+        `app` object so `uvicorn Navigation.src.pi_server:app --port 8000` works.
+  - Explicit operator-authorized recovery endpoint (POST /recover) clears latched
+        ESP32 watchdog/E-stop faults ONLY when `operator_confirmed=True` and physical
+        GPIO 13 E-stop loop is closed.
 """
 
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import math
 import os
 import sys
+import threading
 import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from config_loader import load_yaml_config
 from esp32_bridge import ESP32Bridge, ESP32Simulator, StopAckResult
 from rover_main import build_navigation_stack
 from state_machine import RoverState
@@ -44,6 +51,8 @@ SAMPLE_IMAGE_MARKERS = (
     "field_render_live.png",
     "sample_field",
 )
+
+MAX_INGEST_FRAME_BYTES = 5 * 1024 * 1024  # 5 MB upper bound on uploaded JPEG/PNG frames
 
 
 @dataclass
@@ -115,9 +124,9 @@ class CameraHealthMonitor:
 
 class HardenedNavigationController:
     """
-    Authoritative closed-loop controller backing the Pi FastAPI endpoints (/start_mission,
-    /stop, /cut_plan, /heartbeat). Decoupled from FastAPI so it can be thoroughly verified
-    in automated integration tests without network mocks.
+    Authoritative closed-loop controller backing the Pi FastAPI endpoints.
+    Thread-safe so the background control worker and HTTP handlers never race on
+    the shared ESP32 serial bus or state machine.
     """
 
     def __init__(
@@ -126,17 +135,36 @@ class HardenedNavigationController:
         simulate: bool = False,
         model_loaded: bool = False,
         homography_matrix: list[list[float]] | None = None,
+        imu_heading_fn=None,
     ):
         self.config = config
         self.simulate = simulate
         self.model_loaded = model_loaded
+        self._lock = threading.RLock()
 
-        self.esp32, self.sm = build_navigation_stack(config, simulate=simulate)
+        self._latest_visual_row_end_conf: float = 0.0
+        self._latest_visual_lateral_error_m: float = 0.0
+        self._latest_frame_bytes: bytes | None = None
+        self._latest_frame_mime: str = "image/jpeg"
+        self._frames_ingested: int = 0
+
+        self.esp32, self.sm = build_navigation_stack(
+            config,
+            simulate=simulate,
+            imu_heading_fn=imu_heading_fn,
+            visual_row_end_fn=self._get_visual_row_end_conf,
+            allow_disconnected_esp32=True,
+        )
         self.camera_monitor = CameraHealthMonitor(max_frame_age_s=0.5, max_read_failures=2)
         self.target_mgr = TargetExecutionManager(homography_matrix=homography_matrix)
         self.mission_active = False
         self.nav_only_mode = True
         self.last_stop_ack: StopAckResult | None = None
+        self.worker_ticks: int = 0
+        self.last_mission_request: dict[str, Any] = {}
+
+    def _get_visual_row_end_conf(self) -> float:
+        return self._latest_visual_row_end_conf
 
     @staticmethod
     def is_sample_image(source_type: str | None, image_url: str | None) -> bool:
@@ -147,6 +175,118 @@ class HardenedNavigationController:
             return any(marker in low for marker in SAMPLE_IMAGE_MARKERS)
         return False
 
+    def ingest_camera_frame(
+        self,
+        frame_bytes: bytes | None = None,
+        *,
+        mime_type: str = "image/jpeg",
+        visual_row_end_conf: float | None = None,
+        lateral_error_m: float | None = None,
+        now: float | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Ingest a live camera frame (from MaixSense bridge, USB cam, or Android POST /image),
+        refreshing CameraHealthMonitor and optional visual row-end confidence.
+        """
+        with self._lock:
+            if frame_bytes is not None:
+                if len(frame_bytes) == 0:
+                    self.camera_monitor.record_read_failure()
+                    return 400, {"ok": False, "error": "EMPTY_FRAME_PAYLOAD"}
+                if len(frame_bytes) > MAX_INGEST_FRAME_BYTES:
+                    return 413, {"ok": False, "error": "FRAME_TOO_LARGE"}
+                self._latest_frame_bytes = frame_bytes
+                self._latest_frame_mime = mime_type if mime_type in ("image/jpeg", "image/png") else "image/jpeg"
+
+            if visual_row_end_conf is not None and math.isfinite(visual_row_end_conf):
+                self._latest_visual_row_end_conf = max(0.0, min(1.0, float(visual_row_end_conf)))
+            if lateral_error_m is not None and math.isfinite(lateral_error_m):
+                self._latest_visual_lateral_error_m = max(-1.0, min(1.0, float(lateral_error_m)))
+
+            self._frames_ingested += 1
+            self.camera_monitor.record_frame_ok(now=now)
+            cam = self.camera_monitor.evaluate(now=now)
+            return 200, {
+                "ok": True,
+                "frames_ingested": self._frames_ingested,
+                "camera_healthy": cam.healthy,
+                "visual_row_end_conf": round(self._latest_visual_row_end_conf, 3),
+                "lateral_error_m": round(self._latest_visual_lateral_error_m, 4),
+            }
+
+    def set_homography_matrix(self, matrix: Any) -> tuple[int, dict[str, Any]]:
+        """Validate and load a calibrated 3x3 pixel-to-ground homography matrix."""
+        if not isinstance(matrix, list) or len(matrix) != 3:
+            return 400, {"ok": False, "error": "HOMOGRAPHY_MUST_BE_3X3_MATRIX"}
+        parsed: list[list[float]] = []
+        for row in matrix:
+            if not isinstance(row, list) or len(row) != 3:
+                return 400, {"ok": False, "error": "HOMOGRAPHY_MUST_BE_3X3_MATRIX"}
+            prow: list[float] = []
+            for v in row:
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    return 400, {"ok": False, "error": "HOMOGRAPHY_NON_NUMERIC"}
+                if not math.isfinite(fv):
+                    return 400, {"ok": False, "error": "HOMOGRAPHY_NON_FINITE"}
+                prow.append(fv)
+            parsed.append(prow)
+
+        with self._lock:
+            self.target_mgr.homography = parsed
+            return 200, {"ok": True, "homography_calibrated": self.target_mgr.is_calibrated}
+
+    def handle_detection(
+        self,
+        *,
+        class_name: str,
+        confidence: float,
+        u_px: float,
+        v_px: float,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Gate incoming weed detections through model_loaded + calibrated homography +
+        TargetExecutionManager class whitelist & spatial deduplication.
+        """
+        with self._lock:
+            if not self.model_loaded:
+                return 412, {
+                    "accepted": False,
+                    "reason": "WEED_MODEL_NOT_LOADED",
+                    "detail": "Trained weed-vs-crop detector weights are not loaded.",
+                }
+            if not self.target_mgr.is_calibrated:
+                return 412, {
+                    "accepted": False,
+                    "reason": "HOMOGRAPHY_NOT_CALIBRATED",
+                    "detail": "Camera-to-ground 3x3 homography calibration is required before targeting.",
+                }
+            try:
+                conf_f = float(confidence)
+                u_f = float(u_px)
+                v_f = float(v_px)
+            except (TypeError, ValueError):
+                return 400, {"accepted": False, "reason": "INVALID_DETECTION_NUMBERS"}
+            if not (math.isfinite(conf_f) and math.isfinite(u_f) and math.isfinite(v_f)):
+                return 400, {"accepted": False, "reason": "NON_FINITE_DETECTION_NUMBERS"}
+
+            target, reason = self.target_mgr.ingest_detection(class_name, conf_f, u_f, v_f)
+            if target is None:
+                return 200, {"accepted": False, "reason": reason}
+            return 200, {
+                "accepted": True,
+                "reason": reason,
+                "target": {
+                    "target_id": target.target_id,
+                    "class_name": target.class_name,
+                    "confidence": target.confidence,
+                    "x_lat_mm": round(target.x_lat_mm, 2),
+                    "y_fwd_mm": round(target.y_fwd_mm, 2),
+                    "state": target.state.value,
+                },
+            }
+
     def evaluate_launch_interlocks(
         self,
         *,
@@ -156,59 +296,63 @@ class HardenedNavigationController:
         operator_confirmed: bool = True,
         now: float | None = None,
     ) -> tuple[bool, list[str], dict[str, Any]]:
-        """
-        Strict hardware & safety pre-flight checklist (Audit 2B, 2C, 3A).
-        """
-        blockers: list[str] = []
+        """Strict hardware & safety pre-flight checklist (Audit 2B, 2C, 3A)."""
+        with self._lock:
+            blockers: list[str] = []
 
-        # 1. Sample-image-to-live-robot guard (Audit 2C)
-        if not self.simulate and self.is_sample_image(source_type, image_url):
-            blockers.append("SAMPLE_IMAGE_FORBIDDEN_ON_LIVE_HARDWARE")
+            # 1. Sample-image-to-live-robot guard (Audit 2C)
+            if not self.simulate and self.is_sample_image(source_type, image_url):
+                blockers.append("SAMPLE_IMAGE_FORBIDDEN_ON_LIVE_HARDWARE")
 
-        if not self.simulate and not operator_confirmed:
-            blockers.append("OPERATOR_CONFIRMATION_REQUIRED")
+            if not self.simulate and not operator_confirmed:
+                blockers.append("OPERATOR_CONFIRMATION_REQUIRED")
 
-        # 2. ESP32 serial connection check
-        esp32_ok = bool(self.esp32.connected)
-        if not esp32_ok:
-            blockers.append("ESP32_NOT_CONNECTED")
+            # 2. ESP32 serial connection check
+            esp32_ok = bool(self.esp32.connected)
+            if not esp32_ok:
+                blockers.append("ESP32_NOT_CONNECTED")
 
-        # 3. Hardware E-stop & telemetry validity check
-        telem = self.esp32.read_telemetry() if esp32_ok else None
-        estop_ready = bool(telem and telem.valid and telem.estop_ok and telem.watchdog_ok)
-        if not estop_ready:
-            blockers.append("ESTOP_OR_WATCHDOG_NOT_READY")
+            # 3. Hardware E-stop & watchdog telemetry validity check
+            telem = self.esp32.read_telemetry() if esp32_ok else None
+            estop_ok = bool(telem and telem.valid and telem.estop_ok)
+            watchdog_ok = bool(telem and telem.valid and telem.watchdog_ok)
+            estop_ready = estop_ok and watchdog_ok
+            if not estop_ready:
+                blockers.append("ESTOP_OR_WATCHDOG_NOT_READY")
 
-        # 4. Live camera health check (Audit 1C)
-        cam_status = self.camera_monitor.evaluate(now=now)
-        if not cam_status.healthy:
-            blockers.append(f"CAMERA_UNHEALTHY:{cam_status.reason}")
+            # 4. Live camera health check (Audit 1C)
+            cam_status = self.camera_monitor.evaluate(now=now)
+            if not cam_status.healthy:
+                blockers.append(f"CAMERA_UNHEALTHY:{cam_status.reason}")
 
-        # 5. Obstacle sensor health check
-        obs = self.sm.obstacle_sensor.evaluate()
-        sensor_ok = obs.status != ObstacleStatus.SENSOR_FAULT
-        if not sensor_ok:
-            blockers.append(f"OBSTACLE_SENSOR_FAULT:{obs.reason}")
+            # 5. Obstacle sensor health check
+            obs = self.sm.obstacle_sensor.evaluate()
+            sensor_ok = obs.status != ObstacleStatus.SENSOR_FAULT
+            if not sensor_ok:
+                blockers.append(f"OBSTACLE_SENSOR_FAULT:{obs.reason}")
 
-        # 6. Weed detection model & calibration check when actuators/weeding enabled (Audit 3A/3D)
-        if not nav_only:
-            if not self.model_loaded:
-                blockers.append("WEED_MODEL_NOT_LOADED")
-            if not self.target_mgr.is_calibrated:
-                blockers.append("HOMOGRAPHY_NOT_CALIBRATED")
+            # 6. Weed detection model & calibration check when actuators/weeding enabled (Audit 3A/3D)
+            if not nav_only:
+                if not self.model_loaded:
+                    blockers.append("WEED_MODEL_NOT_LOADED")
+                if not self.target_mgr.is_calibrated:
+                    blockers.append("HOMOGRAPHY_NOT_CALIBRATED")
 
-        status_dict = {
-            "esp32_connected": esp32_ok,
-            "estop_ready": estop_ready,
-            "camera_healthy": cam_status.healthy,
-            "camera_reason": cam_status.reason,
-            "sensors_healthy": sensor_ok,
-            "model_loaded": self.model_loaded,
-            "homography_calibrated": self.target_mgr.is_calibrated,
-            "simulation_mode": self.simulate,
-            "nav_only": nav_only,
-        }
-        return len(blockers) == 0, blockers, status_dict
+            status_dict = {
+                "esp32_connected": esp32_ok,
+                "estop_ok": estop_ok,
+                "watchdog_ok": watchdog_ok,
+                "estop_ready": estop_ready,
+                "camera_healthy": cam_status.healthy,
+                "camera_reason": cam_status.reason,
+                "sensors_healthy": sensor_ok,
+                "imu_connected": bool(getattr(self.sm.rover, "imu_heading_fn", None) is not None),
+                "model_loaded": self.model_loaded,
+                "homography_calibrated": self.target_mgr.is_calibrated,
+                "simulation_mode": self.simulate,
+                "nav_only": nav_only,
+            }
+            return len(blockers) == 0, blockers, status_dict
 
     def handle_start_mission(
         self,
@@ -218,121 +362,560 @@ class HardenedNavigationController:
         nav_only: bool = True,
         operator_confirmed: bool = True,
         now: float | None = None,
+        mission_meta: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """Handler for POST /start_mission with fail-closed launch interlocks."""
-        ok, blockers, interlocks = self.evaluate_launch_interlocks(
-            source_type=source_type,
-            image_url=image_url,
-            nav_only=nav_only,
-            operator_confirmed=operator_confirmed,
-            now=now,
-        )
-        if not ok:
-            return 412, {
-                "started": False,
-                "reason": "LAUNCH_INTERLOCK_BLOCKED",
-                "blockers": blockers,
+        with self._lock:
+            ok, blockers, interlocks = self.evaluate_launch_interlocks(
+                source_type=source_type,
+                image_url=image_url,
+                nav_only=nav_only,
+                operator_confirmed=operator_confirmed,
+                now=now,
+            )
+            if not ok:
+                return 412, {
+                    "started": False,
+                    "reason": "LAUNCH_INTERLOCK_BLOCKED",
+                    "blockers": blockers,
+                    "interlocks": interlocks,
+                }
+
+            self.nav_only_mode = nav_only
+            self.mission_active = True
+            self.last_mission_request = mission_meta or {}
+            self.sm.running = True
+            if self.sm.state in (RoverState.IDLE, RoverState.PAUSED):
+                self.sm.state = RoverState.NAVIGATING_ROW
+
+            return 200, {
+                "started": True,
+                "state": self.sm.state,
+                "nav_only": nav_only,
                 "interlocks": interlocks,
             }
 
-        self.nav_only_mode = nav_only
-        self.mission_active = True
-        self.sm.running = True
-        if self.sm.state in (RoverState.IDLE, RoverState.PAUSED):
-            self.sm.state = RoverState.NAVIGATING_ROW
+    def handle_pause(self) -> tuple[int, dict[str, Any]]:
+        """Safe operator pause with atomic checkpoint save."""
+        with self._lock:
+            self.mission_active = False
+            self.sm.pause()
+            return 200, {
+                "paused": True,
+                "state": self.sm.state,
+                "checkpoint": self.sm.tracker.summary(),
+            }
 
-        return 200, {
-            "started": True,
-            "state": self.sm.state,
-            "nav_only": nav_only,
-            "interlocks": interlocks,
-        }
+    def handle_resume(self, now: float | None = None) -> tuple[int, dict[str, Any]]:
+        """Resume from PAUSED or OBSTACLE_HOLD only when camera & safety interlocks pass."""
+        with self._lock:
+            cam = self.camera_monitor.evaluate(now=now)
+            if not cam.healthy:
+                return 412, {
+                    "resumed": False,
+                    "reason": f"CAMERA_UNHEALTHY:{cam.reason}",
+                    "state": self.sm.state,
+                }
+            ok, reason = self.sm.resume()
+            if not ok:
+                return 412, {"resumed": False, "reason": reason, "state": self.sm.state}
+            self.mission_active = True
+            self.sm.running = True
+            return 200, {"resumed": True, "reason": reason, "state": self.sm.state}
+
+    def handle_recover(
+        self,
+        *,
+        operator_confirmed: bool = False,
+        relocalize_pose: tuple[float, float, float] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Explicit operator-authorized recovery from ESP32 watchdog/E-stop latch and
+        navigation FAULT state. Never clears latches silently.
+        """
+        with self._lock:
+            if not operator_confirmed:
+                return 400, {
+                    "recovered": False,
+                    "reason": "OPERATOR_CONFIRMATION_REQUIRED",
+                    "state": self.sm.state,
+                }
+            if not self.esp32.connected:
+                return 503, {
+                    "recovered": False,
+                    "reason": "ESP32_NOT_CONNECTED",
+                    "state": self.sm.state,
+                }
+
+            # 1. Clear ESP32 watchdog/E-stop latch only if physical GPIO 13 switch is closed
+            telem = self.esp32.read_telemetry()
+            if not telem.valid or not telem.estop_ok or not telem.watchdog_ok:
+                ok_latch, latch_msg = self.esp32.recover_watchdog_latch(operator_confirmed=True)
+                if not ok_latch:
+                    return 412, {
+                        "recovered": False,
+                        "reason": f"ESP32_LATCH_RECOVERY_FAILED:{latch_msg}",
+                        "state": self.sm.state,
+                    }
+
+            # 2. Recover navigation state machine into PAUSED (operator must explicitly resume/start)
+            ok_sm, sm_msg = self.sm.recover(relocalize_pose=relocalize_pose)
+            if not ok_sm:
+                return 412, {
+                    "recovered": False,
+                    "reason": sm_msg,
+                    "state": self.sm.state,
+                }
+
+            self.mission_active = False
+            return 200, {
+                "recovered": True,
+                "reason": sm_msg,
+                "state": self.sm.state,
+                "hardware": self.get_status()["hardware"],
+            }
+
+    def handle_startup_handshake(
+        self,
+        *,
+        operator_confirmed: bool = True,
+        now: float | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Zero-config USB ESP32 startup handshake & watchdog initialization sequence:
+          1. Verify/open USB serial link to ESP32.
+          2. Send PING to verify responsiveness and inspect initial latch state.
+          3. Send CLEAR_LATCH (requires operator_confirmed=True and physical GPIO 13 closed)
+             to ensure any boot/idle watchdog latch is explicitly initialized.
+          4. Re-query TELEM? to validate estop_ok=True and watchdog_ok=True.
+          5. Evaluate live camera readiness (CameraHealthMonitor) before unlocking dispatch.
+        """
+        with self._lock:
+            steps: list[dict[str, Any]] = []
+            usb_port = getattr(self.esp32, "port", "USB-SIM" if self.simulate else "/dev/ttyUSB0")
+
+            # Step 1: Verify USB serial connection
+            if not self.esp32.connected:
+                try:
+                    self.esp32.connect()
+                except Exception as exc:
+                    steps.append({
+                        "id": "usb_connect",
+                        "command": f"OPEN {usb_port}",
+                        "status": "fail",
+                        "response": f"CONNECT_ERR:{exc}",
+                        "detail": f"Unable to open ESP32 USB serial port ({usb_port}).",
+                    })
+                    return 503, {
+                        "ok": False,
+                        "usb_port": usb_port,
+                        "esp32_ready": False,
+                        "watchdog_initialized": False,
+                        "estop_ok": False,
+                        "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
+                        "navigation_dispatch_unlocked": False,
+                        "steps": steps,
+                        "status": self.get_status(now=now),
+                    }
+
+            if not self.esp32.connected:
+                steps.append({
+                    "id": "usb_connect",
+                    "command": f"OPEN {usb_port}",
+                    "status": "fail",
+                    "response": "ERR:DISCONNECTED",
+                    "detail": f"ESP32 USB serial bridge on {usb_port} is disconnected.",
+                })
+                return 503, {
+                    "ok": False,
+                    "usb_port": usb_port,
+                    "esp32_ready": False,
+                    "watchdog_initialized": False,
+                    "estop_ok": False,
+                    "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
+                    "navigation_dispatch_unlocked": False,
+                    "steps": steps,
+                    "status": self.get_status(now=now),
+                }
+
+            steps.append({
+                "id": "usb_connect",
+                "command": f"USB {usb_port}",
+                "status": "pass",
+                "response": "CONNECTED",
+                "detail": f"ESP32 USB link active on {usb_port} (auto-configured 115200 baud).",
+            })
+
+            # Step 2: PING handshake
+            try:
+                ping_resp = self.esp32.send("PING")
+            except Exception as exc:
+                ping_resp = f"UART_ERR:{exc}"
+            ping_ok = ping_resp.startswith("PONG")
+            steps.append({
+                "id": "ping",
+                "command": "PING",
+                "status": "pass" if ping_ok else "fail",
+                "response": ping_resp,
+                "detail": "ESP32 responded to initial PING." if ping_ok else "ESP32 did not acknowledge PING.",
+            })
+            if not ping_ok:
+                return 503, {
+                    "ok": False,
+                    "usb_port": usb_port,
+                    "esp32_ready": False,
+                    "watchdog_initialized": False,
+                    "estop_ok": False,
+                    "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
+                    "navigation_dispatch_unlocked": False,
+                    "steps": steps,
+                    "status": self.get_status(now=now),
+                }
+
+            # Step 3: CLEAR_LATCH command sequence to initialize watchdog safely
+            if not operator_confirmed:
+                steps.append({
+                    "id": "clear_latch",
+                    "command": "CLEAR_LATCH",
+                    "status": "fail",
+                    "response": "ERR:OPERATOR_CONFIRMATION_REQUIRED",
+                    "detail": "Operator confirmation is required before dispatching CLEAR_LATCH.",
+                })
+                return 400, {
+                    "ok": False,
+                    "usb_port": usb_port,
+                    "esp32_ready": False,
+                    "watchdog_initialized": False,
+                    "estop_ok": False,
+                    "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
+                    "navigation_dispatch_unlocked": False,
+                    "steps": steps,
+                    "status": self.get_status(now=now),
+                }
+
+            latch_ok, latch_resp = self.esp32.recover_watchdog_latch(operator_confirmed=True)
+            steps.append({
+                "id": "clear_latch",
+                "command": "CLEAR_LATCH",
+                "status": "pass" if latch_ok else "fail",
+                "response": latch_resp,
+                "detail": (
+                    "Watchdog/E-stop latch cleared and physical GPIO 13 safety loop verified closed."
+                    if latch_ok
+                    else f"CLEAR_LATCH rejected ({latch_resp}). Verify physical GPIO 13 E-stop switch is closed."
+                ),
+            })
+
+            # Step 4: Validate post-clear ready-state via TELEM?
+            telem = self.esp32.read_telemetry()
+            estop_ok = bool(telem.valid and telem.estop_ok)
+            watchdog_ok = bool(telem.valid and telem.watchdog_ok)
+            esp32_ready = bool(latch_ok and estop_ok and watchdog_ok)
+            steps.append({
+                "id": "ready_validate",
+                "command": "TELEM?",
+                "status": "pass" if esp32_ready else "fail",
+                "response": (
+                    f"estop_ok={int(estop_ok)} watchdog_ok={int(watchdog_ok)} dist_mm={telem.distance_mm}"
+                    if telem.valid
+                    else "ERR:TELEM_INVALID"
+                ),
+                "detail": (
+                    "ESP32 watchdog initialized and ready-state validated for navigation commands."
+                    if esp32_ready
+                    else "ESP32 ready-state check failed; navigation dispatch remains locked."
+                ),
+            })
+
+            # If state machine was previously latched in FAULT/ESTOP and ESP32 is now healthy, recover to PAUSED
+            if esp32_ready and self.sm.state in (RoverState.FAULT, RoverState.ESTOP):
+                self.sm.recover()
+
+            # Step 5: Camera health readiness check
+            cam = self.camera_monitor.evaluate(now=now)
+            steps.append({
+                "id": "camera_ready",
+                "command": "CAMERA_HEALTH",
+                "status": "pass" if cam.healthy else "warn",
+                "response": cam.reason,
+                "detail": (
+                    f"Navigation camera healthy ({self._frames_ingested} frames ingested)."
+                    if cam.healthy
+                    else f"Camera not ready ({cam.reason}) — start MaixSense bridge or attach live feed before launching mission."
+                ),
+            })
+
+            nav_unlocked = bool(esp32_ready and cam.healthy)
+            http_code = 200 if esp32_ready else 412
+            return http_code, {
+                "ok": esp32_ready,
+                "usb_port": usb_port,
+                "simulated": self.simulate,
+                "esp32_ready": esp32_ready,
+                "watchdog_initialized": watchdog_ok and latch_ok,
+                "estop_ok": estop_ok,
+                "camera_healthy": cam.healthy,
+                "camera_reason": cam.reason,
+                "frames_ingested": self._frames_ingested,
+                "navigation_dispatch_unlocked": nav_unlocked,
+                "steps": steps,
+                "status": self.get_status(now=now),
+            }
 
     def handle_stop(self) -> tuple[int, dict[str, Any]]:
         """
         Handler for POST /stop (Audit 1E).
         Verifies actual ESP32 stop ACK. Returns HTTP 503 if hardware stop cannot be confirmed!
         """
-        self.mission_active = False
-        self.sm.running = False
-        ack = self.esp32.send_emergency_stop()
-        self.last_stop_ack = ack
+        with self._lock:
+            self.mission_active = False
+            self.sm.running = False
+            ack = self.esp32.send_emergency_stop()
+            self.last_stop_ack = ack
 
-        # On live hardware, a simulated ACK or unverified UART response MUST NOT report HTTP 200!
-        hw_verified = ack.verified and (self.simulate or not ack.simulated)
-        if not hw_verified:
-            self.sm.state = RoverState.FAULT
-            self.sm.fault_reason = f"ESTOP_ACK_FAILED:{ack.response}"
-            return 503, {
-                "stopped": False,
-                "ack_verified": False,
+            # On live hardware, a simulated ACK or unverified UART response MUST NOT report HTTP 200!
+            hw_verified = ack.verified and (self.simulate or not ack.simulated)
+            if not hw_verified:
+                self.sm.state = RoverState.FAULT
+                self.sm.fault_reason = f"ESTOP_ACK_FAILED:{ack.response}"
+                return 503, {
+                    "stopped": False,
+                    "ack_verified": False,
+                    "esp32_response": ack.response,
+                    "simulated": ack.simulated,
+                    "error": "ESP32 stop acknowledgement NOT verified — engage physical power cutoff immediately!",
+                }
+
+            self.sm.state = RoverState.ESTOP
+            self.sm.fault_reason = "OPERATOR_ESTOP"
+            return 200, {
+                "stopped": True,
+                "ack_verified": True,
                 "esp32_response": ack.response,
+                "estop_latched": ack.estop_latched,
                 "simulated": ack.simulated,
-                "error": "ESP32 stop acknowledgement NOT verified — engage physical power cutoff immediately!",
             }
 
-        self.sm.state = RoverState.ESTOP
-        self.sm.fault_reason = "OPERATOR_ESTOP"
-        return 200, {
-            "stopped": True,
-            "ack_verified": True,
-            "esp32_response": ack.response,
-            "estop_latched": ack.estop_latched,
-            "simulated": ack.simulated,
-        }
+    def send_keepalive(self) -> None:
+        """Keep the ESP32 250 ms serial watchdog alive while Pi server is running."""
+        with self._lock:
+            if self.esp32.connected:
+                try:
+                    self.esp32.read_telemetry()
+                except Exception:
+                    pass
 
     def step_control_loop(self, now: float | None = None) -> dict[str, Any]:
         """
         Single closed-loop control tick:
           1. Verifies live camera health (stops immediately on camera loss/stale frame — Audit 1C).
-          2. Steps RoverStateMachine, which updates pose ONLY from encoder+IMU feedback (Audit 1A)
-             and executes real 3-stage headland crossing (Audit 1B).
+          2. Steps RoverStateMachine, updating pose ONLY from encoder+IMU feedback (Audit 1A)
+             and executing real 3-stage headland crossing (Audit 1B).
         """
-        if not self.mission_active:
+        with self._lock:
+            self.worker_ticks += 1
+            if not self.mission_active:
+                self.send_keepalive()
+                return self.get_status(now=now)
+
+            cam = self.camera_monitor.evaluate(now=now)
+            if not cam.healthy:
+                self.mission_active = False
+                self.sm.running = False
+                self.esp32.send_stop()
+                self.sm.state = RoverState.FAULT
+                self.sm.fault_reason = f"CAMERA_LOSS:{cam.reason}"
+                return self.get_status(now=now)
+
+            self.sm.tick()
+            if self.sm.state in (RoverState.FAULT, RoverState.ESTOP, RoverState.DONE):
+                self.mission_active = False
+
             return self.get_status(now=now)
 
-        cam = self.camera_monitor.evaluate(now=now)
-        if not cam.healthy:
-            self.mission_active = False
-            self.sm.running = False
-            self.esp32.send_stop()
-            self.sm.state = RoverState.FAULT
-            self.sm.fault_reason = f"CAMERA_LOSS:{cam.reason}"
-            return self.get_status(now=now)
-
-        self.sm.tick()
-        if self.sm.state in (RoverState.FAULT, RoverState.ESTOP, RoverState.DONE):
-            self.mission_active = False
-
-        return self.get_status(now=now)
+    def render_map_svg(self) -> str:
+        """Render a clean SVG live field map showing measured encoder+IMU rover pose."""
+        with self._lock:
+            pose = self.sm.rover.localizer.get_pose()
+            nav = self.sm.navigator
+            w = max(100.0, nav.field_length_cm)
+            h = max(100.0, nav.field_width_cm)
+            px = max(0.0, min(w, pose.x_cm))
+            py = max(0.0, min(h, pose.y_cm))
+            rows_svg = "".join(
+                f'<line x1="{nav.headland_margin_cm:.1f}" y1="{ry:.1f}" '
+                f'x2="{w - nav.headland_margin_cm:.1f}" y2="{ry:.1f}" '
+                f'stroke="#10b981" stroke-width="2" stroke-dasharray="6,4" opacity="0.55"/>'
+                for ry in nav.row_centers_y
+            )
+            return (
+                f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.0f} {h:.0f}" '
+                f'width="600" height="400" style="background:#f4f8f5">'
+                f'<rect x="{nav.headland_margin_cm:.1f}" y="{nav.boundary.safety_margin_cm:.1f}" '
+                f'width="{w - 2*nav.headland_margin_cm:.1f}" height="{h - 2*nav.boundary.safety_margin_cm:.1f}" '
+                f'fill="none" stroke="#047857" stroke-width="2"/>'
+                f"{rows_svg}"
+                f'<circle cx="{px:.1f}" cy="{py:.1f}" r="8" fill="#059669" stroke="#ffffff" stroke-width="2"/>'
+                f"</svg>"
+            )
 
     def get_status(self, now: float | None = None) -> dict[str, Any]:
-        pose = self.sm.rover.localizer.get_pose()
-        cam = self.camera_monitor.evaluate(now=now)
-        telem = self.esp32.read_telemetry() if self.esp32.connected else None
-        return {
-            "state": self.sm.state,
-            "fault_reason": self.sm.fault_reason,
-            "mission_active": self.mission_active,
-            "pose_measured": {
-                "x_cm": round(pose.x_cm, 2),
-                "y_cm": round(pose.y_cm, 2),
-                "heading_deg": round(pose.heading_deg, 2),
-                "localized": pose.localized,
-                "slip_residual_cm": round(pose.slip_residual_cm, 2),
-            },
-            "hardware": {
-                "esp32_connected": self.esp32.connected,
-                "estop_ok": bool(telem and telem.valid and telem.estop_ok),
-                "watchdog_ok": bool(telem and telem.valid and telem.watchdog_ok),
-                "camera_healthy": cam.healthy,
-                "camera_reason": cam.reason,
-                "model_loaded": self.model_loaded,
-                "homography_calibrated": self.target_mgr.is_calibrated,
-            },
-            "weeds_eliminated": self.target_mgr.weeds_eliminated,
-            "rejected_crops": self.target_mgr.rejected_crops,
-        }
+        with self._lock:
+            pose = self.sm.rover.localizer.get_pose()
+            cam = self.camera_monitor.evaluate(now=now)
+            telem = self.esp32.read_telemetry() if self.esp32.connected else None
+            return {
+                "state": self.sm.state,
+                "fault_reason": self.sm.fault_reason,
+                "mission_active": self.mission_active,
+                "nav_only_mode": self.nav_only_mode,
+                "simulation_mode": self.simulate,
+                "worker_ticks": self.worker_ticks,
+                "frames_ingested": self._frames_ingested,
+                "pose_measured": {
+                    "x_cm": round(pose.x_cm, 2),
+                    "y_cm": round(pose.y_cm, 2),
+                    "heading_deg": round(pose.heading_deg, 2),
+                    "localized": pose.localized,
+                    "slip_residual_cm": round(pose.slip_residual_cm, 2),
+                },
+                "row_progress": self.sm.navigator.get_status(),
+                "coverage": self.sm.tracker.summary(),
+                "hardware": {
+                    "esp32_connected": self.esp32.connected,
+                    "estop_ok": bool(telem and telem.valid and telem.estop_ok),
+                    "watchdog_ok": bool(telem and telem.valid and telem.watchdog_ok),
+                    "distance_mm": telem.distance_mm if (telem and telem.valid) else -1,
+                    "imu_connected": bool(getattr(self.sm.rover, "imu_heading_fn", None) is not None),
+                    "camera_healthy": cam.healthy,
+                    "camera_reason": cam.reason,
+                    "visual_row_end_conf": round(self._latest_visual_row_end_conf, 3),
+                    "model_loaded": self.model_loaded,
+                    "homography_calibrated": self.target_mgr.is_calibrated,
+                },
+                "weeds_eliminated": self.target_mgr.weeds_eliminated,
+                "rejected_crops": self.target_mgr.rejected_crops,
+            }
+
+
+class BackgroundControlWorker:
+    """Daemon worker thread that continuously executes step_control_loop() at target Hz."""
+
+    def __init__(self, controller: HardenedNavigationController, hz: float = 10.0):
+        self.controller = controller
+        self.period_s = 1.0 / max(1.0, min(50.0, float(hz)))
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="rover-control-loop",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout_s: float = 2.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout_s)
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            t0 = time.monotonic()
+            try:
+                self.controller.step_control_loop()
+            except Exception as exc:
+                self.controller.sm.fault_reason = f"WORKER_LOOP_EXCEPTION:{exc}"
+                self.controller.mission_active = False
+                try:
+                    self.controller.esp32.send_stop()
+                except Exception:
+                    pass
+            elapsed = time.monotonic() - t0
+            sleep_s = max(0.005, self.period_s - elapsed)
+            self._stop_event.wait(sleep_s)
+
+
+class AsyncControlLoopWorker:
+    """
+    Asyncio background worker task for FastAPI lifespan.
+    Continuously invokes controller.step_control_loop() off the event loop via
+    asyncio.to_thread() so HTTP endpoints stay responsive while missions run.
+    """
+
+    def __init__(self, controller: HardenedNavigationController, hz: float = 10.0):
+        self.controller = controller
+        self.hz = max(1.0, min(50.0, float(hz)))
+        self.period_s = 1.0 / self.hz
+        self._task: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
+        self.last_tick_ts: float = 0.0
+        self.last_error: str | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        return self._task
+
+    def start(self) -> asyncio.Task[None]:
+        if self.is_running and self._task is not None:
+            return self._task
+        self._stop_event = asyncio.Event()
+        self._task = asyncio.create_task(self._run(), name="rover-navigation-control-loop")
+        return self._task
+
+    async def stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+
+    async def _run(self) -> None:
+        stop_event = self._stop_event
+        assert stop_event is not None
+        try:
+            while not stop_event.is_set():
+                t0 = time.monotonic()
+                try:
+                    await asyncio.to_thread(self.controller.step_control_loop)
+                    self.last_tick_ts = time.monotonic()
+                    self.last_error = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    self.controller.sm.fault_reason = f"WORKER_LOOP_EXCEPTION:{exc}"
+                    self.controller.mission_active = False
+                    try:
+                        await asyncio.to_thread(self.controller.esp32.send_stop)
+                    except Exception:
+                        pass
+
+                elapsed = time.monotonic() - t0
+                sleep_s = max(0.005, self.period_s - elapsed)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=sleep_s)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
 
 
 def get_allowed_cors_origins() -> list[str]:
@@ -347,14 +930,41 @@ def get_allowed_cors_origins() -> list[str]:
     ]
 
 
-def create_fastapi_app(config: dict, simulate: bool = False):
-    """Optional FastAPI app factory for Raspberry Pi 5 runtime on port 8000."""
-    from fastapi import FastAPI
+def create_fastapi_app(
+    config: dict,
+    simulate: bool = False,
+    start_worker: bool = True,
+    worker_hz: float = 10.0,
+):
+    """FastAPI app factory for Raspberry Pi 5 runtime on port 8000 with asyncio background control loop."""
+    from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
 
     controller = HardenedNavigationController(config=config, simulate=simulate)
-    app = FastAPI(title="Weeding Rover Hardened Navigation Server")
+    worker = AsyncControlLoopWorker(controller, hz=worker_hz)
+
+    @asynccontextmanager
+    async def lifespan(fastapi_app: FastAPI):
+        if start_worker:
+            fastapi_app.state.control_loop_task = worker.start()
+        else:
+            fastapi_app.state.control_loop_task = None
+        try:
+            yield
+        finally:
+            await worker.stop()
+            fastapi_app.state.control_loop_task = None
+            try:
+                await asyncio.to_thread(controller.esp32.send_stop)
+            except Exception:
+                pass
+
+    app = FastAPI(title="Weeding Rover Hardened Navigation Server", lifespan=lifespan)
+    app.state.controller = controller
+    app.state.worker = worker
+    app.state.control_loop_task = None
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_allowed_cors_origins(),
@@ -363,6 +973,18 @@ def create_fastapi_app(config: dict, simulate: bool = False):
         allow_headers=["*"],
     )
 
+    @app.get("/health")
+    def get_health():
+        status = controller.get_status()
+        return {
+            "ok": True,
+            "worker_running": worker.is_running,
+            "worker_hz": worker.hz,
+            "worker_ticks": controller.worker_ticks,
+            "worker_last_error": worker.last_error,
+            "status": status,
+        }
+
     @app.get("/cut_plan")
     def get_cut_plan():
         return controller.get_status()
@@ -370,11 +992,59 @@ def create_fastapi_app(config: dict, simulate: bool = False):
     @app.post("/start_mission")
     def post_start_mission(payload: dict[str, Any] | None = None):
         body = payload or {}
+        # Support both canonical payload and Android PiLiveClient payload (start/end/relay_mode)
+        # while strictly preserving fail-closed operator_confirmed & nav_only safety gates.
+        relay_mode = str(body.get("relay_mode", "")).strip().lower()
+        if "nav_only" in body:
+            nav_only = bool(body.get("nav_only"))
+        else:
+            nav_only = relay_mode not in ("grinder", "flame", "treatment")
+
         code, data = controller.handle_start_mission(
             source_type=str(body.get("source_type", "live_capture")),
             image_url=body.get("image_url"),
-            nav_only=bool(body.get("nav_only", True)),
+            nav_only=nav_only,
             operator_confirmed=bool(body.get("operator_confirmed", False)),
+            mission_meta={
+                k: body[k] for k in ("start", "end", "relay_mode", "start_row", "end_row") if k in body
+            },
+        )
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/pause")
+    def post_pause():
+        code, data = controller.handle_pause()
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/resume")
+    def post_resume():
+        code, data = controller.handle_resume()
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/recover")
+    def post_recover(payload: dict[str, Any] | None = None):
+        body = payload or {}
+        pose_raw = body.get("relocalize_pose")
+        pose_tuple = None
+        if isinstance(pose_raw, (list, tuple)) and len(pose_raw) == 3:
+            try:
+                pose_tuple = (float(pose_raw[0]), float(pose_raw[1]), float(pose_raw[2]))
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"recovered": False, "reason": "INVALID_RELOCALIZE_POSE"},
+                )
+        code, data = controller.handle_recover(
+            operator_confirmed=bool(body.get("operator_confirmed", False)),
+            relocalize_pose=pose_tuple,
+        )
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/handshake")
+    def post_handshake(payload: dict[str, Any] | None = None):
+        body = payload or {}
+        code, data = controller.handle_startup_handshake(
+            operator_confirmed=bool(body.get("operator_confirmed", True)),
         )
         return JSONResponse(status_code=code, content=data)
 
@@ -384,7 +1054,134 @@ def create_fastapi_app(config: dict, simulate: bool = False):
         return JSONResponse(status_code=code, content=data)
 
     @app.get("/heartbeat")
-    def get_heartbeat():
-        return {"ok": True, "status": controller.get_status()}
+    @app.post("/heartbeat")
+    def handle_heartbeat():
+        controller.send_keepalive()
+        return {"ok": True, "worker_running": worker.is_running, "status": controller.get_status()}
+
+    async def _ingest_frame_request(request: Request):
+        ctype = (request.headers.get("content-type") or "").lower()
+        vis_conf_hdr = request.headers.get("x-visual-row-end-conf")
+        lat_err_hdr = request.headers.get("x-lateral-error-m")
+        vis_conf = float(vis_conf_hdr) if vis_conf_hdr is not None else None
+        lat_err = float(lat_err_hdr) if lat_err_hdr is not None else None
+
+        if "application/json" in ctype:
+            body = await request.json()
+            if isinstance(body, dict):
+                if "visual_row_end_conf" in body:
+                    vis_conf = float(body["visual_row_end_conf"])
+                if "lateral_error_m" in body:
+                    lat_err = float(body["lateral_error_m"])
+            code, data = controller.ingest_camera_frame(
+                None,
+                visual_row_end_conf=vis_conf,
+                lateral_error_m=lat_err,
+            )
+            return JSONResponse(status_code=code, content=data)
+
+        raw = await request.body()
+        mime = "image/png" if "png" in ctype else "image/jpeg"
+        code, data = controller.ingest_camera_frame(
+            raw,
+            mime_type=mime,
+            visual_row_end_conf=vis_conf,
+            lateral_error_m=lat_err,
+        )
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/camera/frame")
+    async def post_camera_frame(request: Request):
+        return await _ingest_frame_request(request)
+
+    @app.post("/image")
+    async def post_image(request: Request):
+        return await _ingest_frame_request(request)
+
+    @app.get("/video_feed")
+    def get_video_feed():
+        if controller._latest_frame_bytes is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "CAMERA_NOT_ATTACHED"},
+            )
+        return Response(content=controller._latest_frame_bytes, media_type=controller._latest_frame_mime)
+
+    @app.get("/bev_image")
+    def get_bev_image():
+        if controller._latest_frame_bytes is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "BEV_FRAME_UNAVAILABLE"},
+            )
+        return Response(content=controller._latest_frame_bytes, media_type=controller._latest_frame_mime)
+
+    @app.get("/map_feed")
+    def get_map_feed():
+        return Response(content=controller.render_map_svg(), media_type="image/svg+xml")
+
+    @app.post("/calibration/homography")
+    def post_homography(payload: dict[str, Any] | None = None):
+        body = payload or {}
+        code, data = controller.set_homography_matrix(body.get("matrix"))
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/detections")
+    def post_detections(payload: dict[str, Any] | None = None):
+        body = payload or {}
+        code, data = controller.handle_detection(
+            class_name=str(body.get("class_name", "")),
+            confidence=body.get("confidence", 0.0),
+            u_px=body.get("u_px", 0.0),
+            v_px=body.get("v_px", 0.0),
+        )
+        return JSONResponse(status_code=code, content=data)
 
     return app
+
+
+def create_default_app(simulate: bool | None = None, worker_hz: float | None = None):
+    """
+    Build the ready-to-run global FastAPI ASGI app for Raspberry Pi 5:
+      uvicorn Navigation.src.pi_server:app --host 0.0.0.0 --port 8000
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    cfg_rel = os.environ.get("WEED_ROVER_CONFIG", "Navigation/rover_config.yaml")
+    cfg_path = cfg_rel if os.path.isabs(cfg_rel) else os.path.join(repo_root, cfg_rel)
+    config = load_yaml_config(cfg_path)
+    sim_flag = (
+        simulate
+        if simulate is not None
+        else os.environ.get("WEED_ROVER_SIMULATE", "false").strip().lower() in ("1", "true", "yes")
+    )
+    hz_val = (
+        worker_hz
+        if worker_hz is not None
+        else float(os.environ.get("WEED_ROVER_LOOP_HZ", "10.0"))
+    )
+    return create_fastapi_app(
+        config=config,
+        simulate=sim_flag,
+        start_worker=True,
+        worker_hz=hz_val,
+    )
+
+
+# Export global, ready-to-run FastAPI application object for ASGI servers (uvicorn/gunicorn).
+# Only falls back to None when FastAPI itself is not installed in a minimal unit-test environment.
+try:
+    import fastapi as _fastapi_check  # noqa: F401
+except ImportError:
+    app = None
+else:
+    app = create_default_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    if app is None:
+        raise RuntimeError("FastAPI is not installed. Run: pip install -r Navigation/requirements.txt")
+    port = int(os.environ.get("WEED_ROVER_PORT", "8000"))
+    host = os.environ.get("WEED_ROVER_HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)

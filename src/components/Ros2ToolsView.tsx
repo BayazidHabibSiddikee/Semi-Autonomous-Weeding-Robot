@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Terminal, ShieldAlert, Send, FileCode2, CheckCircle2, XCircle } from 'lucide-react';
 import { ROS2_TOOLS, WORKSPACE_SNIPPETS, Ros2ToolDef } from '../data/ros2Artifacts';
 
@@ -44,25 +44,44 @@ export const Ros2ToolsView: React.FC<Props> = ({ estopActive, onLogEvent }) => {
   const [paramJson, setParamJson] = useState<string>(JSON.stringify(ROS2_TOOLS[0].defaultParams, null, 2));
   const [sensorsHealthy, setSensorsHealthy] = useState<boolean>(true);
   const [treatmentHookAttached, setTreatmentHookAttached] = useState<boolean>(false);
+  const [piConnected, setPiConnected] = useState<boolean>(false);
+  const [dispatching, setDispatching] = useState<boolean>(false);
   const [traces, setTraces] = useState<DispatchTrace[]>([
     {
       id: 1,
       timestamp: 'Init',
       toolName: 'get_robot_status',
       accepted: true,
-      summary: 'Mission Supervisor online · FieldLocalizer Nominal · 9 bounded tools registered · Treatment decoupled.',
-      payload: '{"state": "READY", "current_row": 1, "sensor_status": "CLEAR", "estop_ok": true, "treatment_hook": null}',
+      summary: 'Policy validator ready · Checks /api/robot/status to dispatch live Pi commands when configured, or runs local dry-run policy checks when disconnected.',
+      payload: '{"mode": "checking_pi_link", "treatment_hook": null}',
     },
   ]);
 
   const [activeSnippetKey, setActiveSnippetKey] = useState<string>('state_machine');
+
+  useEffect(() => {
+    let mounted = true;
+    fetch('/api/robot/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (mounted && data) {
+          setPiConnected(Boolean(data.connected && data.mode === 'pi_live'));
+        }
+      })
+      .catch(() => {
+        if (mounted) setPiConnected(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const handleSelectTool = (tool: Ros2ToolDef) => {
     setSelectedTool(tool);
     setParamJson(JSON.stringify(tool.defaultParams, null, 2));
   };
 
-  const dispatchToSupervisor = () => {
+  const dispatchToSupervisor = async () => {
     const now = new Date().toLocaleTimeString();
     let parsed: Record<string, any> = {};
     try {
@@ -165,16 +184,93 @@ export const Ros2ToolsView: React.FC<Props> = ({ estopActive, onLogEvent }) => {
       }
     }
 
+    // If a live Raspberry Pi robot backend is connected, dispatch supported commands over /api/robot/*
+    const liveEndpoints: Record<string, { method: 'GET' | 'POST'; path: string; body?: Record<string, unknown> }> = {
+      get_robot_status: { method: 'GET', path: '/api/robot/status' },
+      start_navigation_mission: {
+        method: 'POST',
+        path: '/api/robot/start_mission',
+        body: {
+          source_type: 'live_capture',
+          nav_only: !Boolean(parsed.enable_treatment_hook),
+          operator_confirmed: true,
+          start_row: Number(parsed.start_row ?? 1),
+          end_row: Number(parsed.end_row ?? 1),
+        },
+      },
+      pause_and_checkpoint: { method: 'POST', path: '/api/robot/pause', body: {} },
+      recover_from_fault: {
+        method: 'POST',
+        path: '/api/robot/recover',
+        body: {
+          operator_confirmed: true,
+          ...(parsed.relocalize_x_cm !== undefined && parsed.relocalize_y_cm !== undefined
+            ? {
+                relocalize_pose: [
+                  Number(parsed.relocalize_x_cm),
+                  Number(parsed.relocalize_y_cm),
+                  Number(parsed.relocalize_yaw_deg ?? 0),
+                ],
+              }
+            : {}),
+        },
+      },
+    };
+
+    const liveTarget = piConnected ? liveEndpoints[selectedTool.name] : undefined;
+    if (liveTarget && selectedTool.category !== 'Forbidden Test' && !selectedTool.name.startsWith('motor_pwm')) {
+      setDispatching(true);
+      try {
+        const resp = await fetch(liveTarget.path, {
+          method: liveTarget.method,
+          ...(liveTarget.method === 'POST'
+            ? {
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(liveTarget.body ?? {}),
+              }
+            : {}),
+        });
+        const respJson = await resp.json().catch(() => ({}));
+        const liveAccepted = resp.ok && respJson.started !== false && respJson.recovered !== false;
+        const liveSummary = `[LIVE PI API HTTP ${resp.status}] ${liveTarget.method} ${liveTarget.path} -> ${
+          liveAccepted ? 'ACCEPTED' : respJson.reason || 'REJECTED'
+        }`;
+        const trace: DispatchTrace = {
+          id: Date.now(),
+          timestamp: now,
+          toolName: selectedTool.name,
+          accepted: liveAccepted,
+          summary: liveSummary,
+          payload: JSON.stringify(respJson, null, 2),
+        };
+        setTraces((prev) => [trace, ...prev.slice(0, 7)]);
+        onLogEvent(`[Pi Robot API] ${selectedTool.name}: ${liveSummary}`);
+      } catch {
+        const trace: DispatchTrace = {
+          id: Date.now(),
+          timestamp: now,
+          toolName: selectedTool.name,
+          accepted: false,
+          summary: `[LIVE PI API ERROR] Failed to reach ${liveTarget.path}.`,
+          payload: '{"accepted": false, "error": "PI_PROXY_NETWORK_ERROR"}',
+        };
+        setTraces((prev) => [trace, ...prev.slice(0, 7)]);
+      } finally {
+        setDispatching(false);
+      }
+      return;
+    }
+
     const trace: DispatchTrace = {
       id: Date.now(),
       timestamp: now,
       toolName: selectedTool.name,
       accepted,
-      summary,
-      payload: JSON.stringify(resultObj, null, 2),
+      summary: `[POLICY DRY-RUN — NOT SENT TO ROBOT] ${summary}`,
+      payload: JSON.stringify({ dry_run_only: true, ...resultObj }, null, 2),
     };
     setTraces((prev) => [trace, ...prev.slice(0, 7)]);
-    onLogEvent(`[ROS 2 Supervisor] ${selectedTool.name}: ${summary}`);
+    onLogEvent(`[Policy Validator Dry-Run] ${selectedTool.name}: ${summary}`);
   };
 
   const activeSnippet = WORKSPACE_SNIPPETS[activeSnippetKey] || WORKSPACE_SNIPPETS.state_machine;
@@ -323,11 +419,18 @@ export const Ros2ToolsView: React.FC<Props> = ({ estopActive, onLogEvent }) => {
             </div>
 
             <button
-              onClick={dispatchToSupervisor}
-              className="w-full py-2.5 px-4 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              onClick={() => void dispatchToSupervisor()}
+              disabled={dispatching}
+              className="w-full py-2.5 px-4 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-60"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Validate &amp; Dispatch to Supervisor</span>
+              <span>
+                {dispatching
+                  ? 'Dispatching to Pi...'
+                  : piConnected
+                  ? 'Validate & Dispatch to Live Pi API'
+                  : 'Validate Policy (Local Dry-Run Only)'}
+              </span>
             </button>
           </div>
 

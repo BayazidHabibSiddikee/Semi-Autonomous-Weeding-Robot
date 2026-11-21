@@ -16,6 +16,7 @@ import {
   EyeOff,
   FolderSearch,
   Radio,
+  ExternalLink,
 } from 'lucide-react';
 import type { VisionAlignmentData } from './CropRowAlignmentGauge';
 import { detectCropRowFromFrame } from '../vision/cropRowVision';
@@ -25,6 +26,8 @@ interface Props {
   rowWidthM: number;
   stanleyGain: number;
   speedLimit: number;
+  triggerSeq?: number;
+  onSwitchToWebcam?: () => void;
   onAlignmentUpdate?: (alignment: VisionAlignmentData, active: boolean) => void;
   onLogEvent?: (msg: string) => void;
 }
@@ -74,6 +77,23 @@ const PROC_H = 180;
 const IPV4_EXACT_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 const PRIVATE_IPV4_RE = /\b((?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3})\b/g;
 
+function buildMaixSenseSetCfgPayload(): ArrayBuffer {
+  // Official Sipeed MaixSense-A075V <BBBBBBBBi (12 bytes):
+  // trigger_mode=1, deep_mode=1, deep_shift=255, ir_mode=0, status_mode=2, status_mask=7, rgb_mode=1, rgb_res=0, expose_time=0
+  const buf = new ArrayBuffer(12);
+  const view = new DataView(buf);
+  view.setUint8(0, 1);
+  view.setUint8(1, 1);
+  view.setUint8(2, 255);
+  view.setUint8(3, 0);
+  view.setUint8(4, 2);
+  view.setUint8(5, 7);
+  view.setUint8(6, 1);
+  view.setUint8(7, 0);
+  view.setInt32(8, 0, true);
+  return buf;
+}
+
 function extractJpegFromGetdeep(buf: ArrayBuffer): Uint8Array | null {
   const bytes = new Uint8Array(buf);
   let soi = -1;
@@ -96,6 +116,8 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
   rowWidthM,
   stanleyGain,
   speedLimit,
+  triggerSeq,
+  onSwitchToWebcam,
   onAlignmentUpdate,
   onLogEvent,
 }) => {
@@ -136,6 +158,8 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
   const workCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const driveInputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const manualDisconnectRef = useRef<boolean>(false);
   const directTimerRef = useRef<number | null>(null);
   const busyDecodingRef = useRef<boolean>(false);
 
@@ -181,10 +205,18 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
   const bridgeCommand = `python maixsense_bridge.py --ws ${wsBaseUrl} --room ${roomId}`;
   const checkOnlyCommand = `python maixsense_bridge.py --check-only`;
 
-  const processJpegBlob = useCallback(async (blob: Blob, sourceTag: string) => {
+  const processFrameBlob = useCallback(async (rawBlob: Blob, sourceTag: string) => {
     if (busyDecodingRef.current) return;
     busyDecodingRef.current = true;
     try {
+      // Detect PNG vs JPEG magic bytes so both RGB JPEG & ToF Depth PNG frames decode reliably
+      let blob = rawBlob;
+      if (!blob.type) {
+        const hdr = new Uint8Array(await rawBlob.slice(0, 4).arrayBuffer());
+        const isPng = hdr[0] === 0x89 && hdr[1] === 0x50 && hdr[2] === 0x4e && hdr[3] === 0x47;
+        blob = new Blob([rawBlob], { type: isPng ? 'image/png' : 'image/jpeg' });
+      }
+
       const bitmap = await createImageBitmap(blob);
       const dispCanvas = displayCanvasRef.current;
       if (!workCanvasRef.current) {
@@ -328,7 +360,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
   const runServerDiscover = useCallback(async () => {
     setDiscovering(true);
     try {
-      const resp = await fetch('/api/maixsense/discover');
+      const resp = await fetch('/api/maixsense/discover', { cache: 'no-store' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data: DiscoverResponse = await resp.json();
       setDiscoverInfo(data);
@@ -347,16 +379,23 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     }
   }, []);
 
-  const disconnectWs = useCallback(() => {
+  const disconnectWs = useCallback((isManual = false) => {
+    manualDisconnectRef.current = isManual;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (wsRef.current) {
+      wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
     }
     setWsState('disconnected');
   }, []);
 
+  // Stable WebSocket listener: does NOT depend on cameraIp so telemetry IP updates never cause reconnect loops
   const connectWsListener = useCallback(() => {
-    disconnectWs();
+    disconnectWs(false);
     const safeRoom = roomId.replace(/[^a-zA-Z0-9_-]/g, '') || 'rover-01';
     setWsState('connecting');
     const url = `${wsBaseUrl}?room=${encodeURIComponent(safeRoom)}&role=viewer&transport=maixsense`;
@@ -374,15 +413,24 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     ws.onmessage = (evt) => {
       if (evt.data instanceof Blob) {
         setWsState('streaming');
-        void processJpegBlob(evt.data, 'WS BRIDGE');
+        void processFrameBlob(evt.data, 'WS BRIDGE');
         return;
       }
       if (typeof evt.data === 'string') {
         try {
           const msg = JSON.parse(evt.data);
+          if (msg.type === 'frame:jpeg' && typeof msg.data === 'string') {
+            setWsState('streaming');
+            const bin = atob(msg.data);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            void processFrameBlob(new Blob([arr], { type: 'image/jpeg' }), 'WS JSON');
+            return;
+          }
           if (msg.type === 'maixsense:telemetry') {
+            const activeIp = msg.ip || paramsRef.current.cameraIp;
             setMaixTelemetry({
-              ip: msg.ip || cameraIp,
+              ip: activeIp,
               ipSource: msg.ipSource || 'MaixSense Bridge',
               driveFound: Boolean(msg.driveFound),
               drivePath: msg.drivePath || '',
@@ -397,7 +445,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
               rgbBytes: Number(msg.rgbBytes || 0),
               depthBytes: Number(msg.depthBytes || 0),
             });
-            if (msg.ip && IPV4_EXACT_RE.test(msg.ip)) {
+            if (msg.ip && IPV4_EXACT_RE.test(msg.ip) && msg.ip !== paramsRef.current.cameraIp) {
               setCameraIp(msg.ip);
             }
             setWsState('streaming');
@@ -409,6 +457,25 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
             if (!hasMaix) {
               setWsState((prev) => (prev === 'streaming' ? 'waiting' : prev));
             }
+          } else if (msg.type === 'maixsense:reconnect') {
+            if (typeof msg.ip === 'string' && IPV4_EXACT_RE.test(msg.ip)) {
+              setCameraIp(msg.ip);
+            }
+            onLogEventRef.current?.(
+              `[MaixSense Diagnostic] Force-reconnect command received from Hardware Audit — re-establishing live stream listener.`
+            );
+            connectWsListener();
+          } else if (msg.type === 'maixsense:hard_reset') {
+            onLogEventRef.current?.(
+              `[MaixSense Hard Reset] Hardware power-cycle initiated from Hardware Audit — waiting for device re-enumeration to reconnect.`
+            );
+            setWsState('waiting');
+            if (reconnectTimerRef.current !== null) {
+              window.clearTimeout(reconnectTimerRef.current);
+            }
+            reconnectTimerRef.current = window.setTimeout(() => {
+              connectWsListener();
+            }, 2200);
           }
         } catch {
           // Ignore non-JSON messages
@@ -418,12 +485,21 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
 
     ws.onclose = () => {
       setWsState('disconnected');
+      if (!manualDisconnectRef.current) {
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connectWsListener();
+        }, 3000);
+      }
     };
 
     ws.onerror = () => {
-      setWsState('disconnected');
+      try {
+        ws.close();
+      } catch {
+        // Ignore close errors
+      }
     };
-  }, [roomId, wsBaseUrl, cameraIp, disconnectWs, processJpegBlob]);
+  }, [roomId, wsBaseUrl, disconnectWs, processFrameBlob]);
 
   const stopDirectHttpPoll = useCallback(() => {
     if (directTimerRef.current !== null) {
@@ -443,13 +519,23 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     stopDirectHttpPoll();
 
     if (window.location.protocol === 'https:') {
-      const msg = `Browser blocks direct HTTPS -> http://${trimmedIp}/getdeep (Mixed Content). Run maixsense_bridge.py below to relay live RGB + ToF Depth securely over wss://.`;
+      const msg = `Hosted HTTPS browser blocks direct http://${trimmedIp}/getdeep (Mixed Content). Run maixsense_bridge.py on the PC/Pi where MaixSense is plugged in — this console automatically receives the live stream over wss://.`;
       setDirectStatusMsg(msg);
       onLogEventRef.current?.(`[MaixSense Direct IP] ${msg}`);
       return;
     }
 
-    setDirectStatusMsg(`Probing http://${trimmedIp}/getdeep ...`);
+    setDirectStatusMsg(`Configuring RGB+Depth via POST http://${trimmedIp}/set_cfg and probing /getdeep ...`);
+    // Attempt official binary /set_cfg first (best-effort)
+    try {
+      await fetch(`http://${trimmedIp}/set_cfg`, {
+        method: 'POST',
+        body: buildMaixSenseSetCfgPayload(),
+      });
+    } catch {
+      // May be blocked by firmware CORS; /getdeep probe below will report accurately
+    }
+
     const grabOnce = async () => {
       try {
         const resp = await fetch(`http://${trimmedIp}/getdeep`, { cache: 'no-store' });
@@ -458,19 +544,19 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
         const jpeg = extractJpegFromGetdeep(buf);
         if (!jpeg) {
           setDirectStatusMsg(
-            `Connected to http://${trimmedIp}/getdeep (${buf.byteLength} B), but no RGB JPEG found — enable RGB in MaixSense web UI or use maixsense_bridge.py.`
+            `Connected to http://${trimmedIp}/getdeep (${buf.byteLength} B), but RGB JPEG was absent — run maixsense_bridge.py to auto-enable /set_cfg & ToF Depth rendering.`
           );
           return;
         }
         setDirectStatusMsg(`Live direct HTTP stream from http://${trimmedIp}/getdeep`);
         const safeCopy = new Uint8Array(jpeg.byteLength);
         safeCopy.set(jpeg);
-        await processJpegBlob(new Blob([safeCopy.buffer], { type: 'image/jpeg' }), 'DIRECT HTTP');
+        await processFrameBlob(new Blob([safeCopy.buffer], { type: 'image/jpeg' }), 'DIRECT HTTP');
       } catch (err) {
         setDirectStatusMsg(
-          `Direct browser fetch to http://${trimmedIp}/getdeep blocked by CORS or unreachable (${
+          `Direct browser fetch to http://${trimmedIp}/getdeep was blocked by MaixSense firmware CORS or unreachable (${
             err instanceof Error ? err.message : 'network error'
-          }). Run maixsense_bridge.py to stream cleanly into this console.`
+          }). Run maixsense_bridge.py to relay live video cleanly.`
         );
         stopDirectHttpPoll();
       }
@@ -481,9 +567,8 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     directTimerRef.current = window.setInterval(() => {
       void grabOnce();
     }, 140);
-  }, [cameraIp, processJpegBlob, stopDirectHttpPoll]);
+  }, [cameraIp, processFrameBlob, stopDirectHttpPoll]);
 
-  // Client-side scan of user-selected mounted MaixSense USB drive folder
   const handleDriveFolderSelected = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     const list = Array.from(files).slice(0, 60);
@@ -540,26 +625,40 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     }
   }, []);
 
-  // Auto-run host discovery & open WebSocket bridge listener on mount
+  // Auto-run host discovery & open persistent WebSocket bridge listener on mount
   useEffect(() => {
     void runServerDiscover();
     connectWsListener();
     return () => {
-      disconnectWs();
+      disconnectWs(true);
       stopDirectHttpPoll();
     };
   }, [runServerDiscover, connectWsListener, disconnectWs, stopDirectHttpPoll]);
 
-  const handleCopyCommand = useCallback(async (kind: 'stream' | 'check') => {
-    const text = kind === 'stream' ? bridgeCommand : checkOnlyCommand;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedCmd(kind);
-      window.setTimeout(() => setCopiedCmd(null), 2000);
-    } catch {
-      // Clipboard may be restricted
+  // Respond when top-bar "Live Camera Check" button triggers MaixSense check
+  const lastTriggerRef = useRef<number>(0);
+  useEffect(() => {
+    if (!triggerSeq || triggerSeq === lastTriggerRef.current) return;
+    lastTriggerRef.current = triggerSeq;
+    void runServerDiscover();
+    if (wsState === 'disconnected') {
+      connectWsListener();
     }
-  }, [bridgeCommand, checkOnlyCommand]);
+  }, [triggerSeq, runServerDiscover, wsState, connectWsListener]);
+
+  const handleCopyCommand = useCallback(
+    async (kind: 'stream' | 'check') => {
+      const text = kind === 'stream' ? bridgeCommand : checkOnlyCommand;
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopiedCmd(kind);
+        window.setTimeout(() => setCopiedCmd(null), 2000);
+      } catch {
+        // Clipboard may be restricted
+      }
+    },
+    [bridgeCommand, checkOnlyCommand]
+  );
 
   const isStreaming = wsState === 'streaming' || (directPollActive && frameStats.framesReceived > 0);
   const driveDetected = Boolean(
@@ -572,7 +671,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     : localDriveScan?.scanned
     ? `${localDriveScan.driveName}${localDriveScan.foundIp ? ` -> ${localDriveScan.foundIp}` : ''}`
     : discoverInfo?.isCloudContainer
-    ? 'Remote cloud host — scan local PC via script or folder picker'
+    ? 'Cloud host — run bridge script on PC/Pi'
     : 'Not found on host mounts';
 
   const checkCards: Array<{ id: string; label: string; state: CheckState; detail: string }> = [
@@ -600,9 +699,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
       label: '03. Camera Link',
       state: isStreaming
         ? 'pass'
-        : wsState === 'waiting'
-        ? 'checking'
-        : wsState === 'connecting'
+        : wsState === 'waiting' || wsState === 'connecting'
         ? 'checking'
         : 'idle',
       detail: isStreaming
@@ -615,7 +712,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     },
     {
       id: 'frames',
-      label: '04. Live RGB Stream',
+      label: '04. Live Video Stream',
       state: isStreaming && frameStats.framesReceived > 0 ? 'pass' : 'idle',
       detail:
         isStreaming && frameStats.framesReceived > 0
@@ -666,6 +763,8 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
     return <span className="text-[10px] font-mono text-slate-400">STANDBY</span>;
   };
 
+  const safeHttpHref = IPV4_EXACT_RE.test(cameraIp.trim()) ? `http://${cameraIp.trim()}/` : null;
+
   return (
     <div className="space-y-4">
       <input
@@ -709,7 +808,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
 
       {/* Main Split: Live MaixSense Video Viewport + Drive/IP & Script Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-        {/* Left: Live MaixSense RGB + Crop-Row ExG Canvas */}
+        {/* Left: Live MaixSense RGB/ToF + Crop-Row ExG Canvas */}
         <div className="lg:col-span-7 flex flex-col gap-2">
           <div className="relative aspect-video rounded-md border border-emerald-900/15 bg-[#F4F8F5] overflow-hidden flex items-center justify-center">
             <canvas
@@ -726,41 +825,40 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
                 </div>
                 <div className="space-y-1">
                   <div className="text-sm font-semibold text-slate-900">
-                    MaixSense Drive &amp; IP Auto-Discovery Ready ({cameraIp})
+                    MaixSense Bridge Listener Active (Room: {roomId} · IP: {cameraIp})
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    {discoverInfo?.isCloudContainer
-                      ? 'This web console runs in the cloud, so it cannot directly read your PC’s USB drive or 192.168.233.1 RNDIS interface. Run the included MaixSense drive/IP script on the machine where MaixSense is plugged in — this console is already listening and will display the live RGB + ToF stream automatically.'
-                      : 'Scan your mounted MaixSense USB drive or run maixsense_bridge.py to auto-detect the USB drive & 192.168.233.1 RNDIS IP and stream live RGB + ToF depth frames.'}
+                    Download &amp; run <span className="font-mono text-emerald-800">maixsense_bridge.py</span> on the PC or Raspberry Pi where MaixSense is plugged in. It automatically sends <span className="font-mono text-emerald-800">POST /set_cfg</span> to enable RGB + 16-bit ToF Depth and relays live video straight into this viewport.
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => driveInputRef.current?.click()}
-                    className="px-3.5 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <FolderSearch className="w-3.5 h-3.5" />
-                    <span>Check MaixSense Drive</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void runServerDiscover()}
-                    disabled={discovering}
-                    className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${discovering ? 'animate-spin' : ''}`} />
-                    <span>Rescan Host &amp; Bridge</span>
-                  </button>
                   <a
                     href="/api/maixsense/script"
                     download="maixsense_bridge.py"
-                    className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-emerald-800 flex items-center gap-1.5"
+                    className="px-3.5 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5"
                   >
-                    <Download className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Download Script</span>
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download maixsense_bridge.py</span>
                   </a>
+                  <button
+                    type="button"
+                    onClick={() => driveInputRef.current?.click()}
+                    className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FolderSearch className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Check USB Drive</span>
+                  </button>
+                  {onSwitchToWebcam && (
+                    <button
+                      type="button"
+                      onClick={onSwitchToWebcam}
+                      className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Use USB UVC Webcam</span>
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -770,6 +868,21 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
             <span>
               Camera IP: <strong className="text-emerald-700">{cameraIp}</strong> · Room:{' '}
               <strong className="text-slate-800">{roomId}</strong>
+              {safeHttpHref && (
+                <>
+                  {' '}
+                  ·{' '}
+                  <a
+                    href={safeHttpHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-700 hover:underline inline-flex items-center gap-0.5"
+                  >
+                    <span>Device Web UI</span>
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                </>
+              )}
             </span>
             <span>
               {maixTelemetry?.centerDepthMm != null ? (
@@ -807,18 +920,29 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
                   <Network className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Resolved MaixSense IP Address</span>
                 </label>
-                <button
-                  type="button"
-                  onClick={() => setShowHudOverlay((v) => !v)}
-                  className={`px-2 py-0.5 text-[11px] font-mono rounded border flex items-center gap-1 cursor-pointer ${
-                    showHudOverlay
-                      ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                      : 'bg-white border-slate-200 text-slate-500'
-                  }`}
-                >
-                  {showHudOverlay ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-                  <span>HUD</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void runServerDiscover()}
+                    disabled={discovering}
+                    className="px-2 py-0.5 text-[11px] font-mono rounded border border-emerald-900/15 bg-white hover:bg-emerald-50 text-slate-700 flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 text-emerald-600 ${discovering ? 'animate-spin' : ''}`} />
+                    <span>Rescan</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowHudOverlay((v) => !v)}
+                    className={`px-2 py-0.5 text-[11px] font-mono rounded border flex items-center gap-1 cursor-pointer ${
+                      showHudOverlay
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                        : 'bg-white border-slate-200 text-slate-500'
+                    }`}
+                  >
+                    {showHudOverlay ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                    <span>HUD</span>
+                  </button>
+                </div>
               </div>
 
               <div className="flex gap-1.5">
@@ -866,7 +990,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
                   <Radio className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>MaixSense Drive &amp; IP Script</span>
+                  <span>MaixSense Bridge (/set_cfg + RGB/ToF)</span>
                 </span>
                 <a
                   href="/api/maixsense/script"
@@ -880,7 +1004,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
 
               <div className="space-y-1.5">
                 <div className="text-[11px] text-slate-600">
-                  1. Auto-check drive &amp; resolve IP (no extra packages):
+                  1. Verify drive, RNDIS IP &amp; <span className="font-mono">/set_cfg</span> (stdlib only):
                 </div>
                 <div className="flex items-center gap-1.5 bg-[#F4F8F5] border border-emerald-900/10 rounded px-2 py-1.5">
                   <code className="text-[10px] font-mono text-slate-800 truncate flex-1">
@@ -897,7 +1021,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
                 </div>
 
                 <div className="text-[11px] text-slate-600 pt-0.5">
-                  2. Stream live MaixSense RGB + Depth to this console:
+                  2. Stream live RGB / ToF Depth into this console:
                 </div>
                 <div className="flex items-center gap-1.5 bg-[#F4F8F5] border border-emerald-900/10 rounded px-2 py-1.5">
                   <code className="text-[10px] font-mono text-emerald-900 truncate flex-1">
@@ -926,7 +1050,7 @@ export const MaixSenseLiveCheck: React.FC<Props> = ({
                 </span>
                 <button
                   type="button"
-                  onClick={wsState === 'disconnected' ? connectWsListener : disconnectWs}
+                  onClick={() => (wsState === 'disconnected' ? connectWsListener() : disconnectWs(true))}
                   className="text-emerald-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
                 >
                   {wsState === 'disconnected' ? (

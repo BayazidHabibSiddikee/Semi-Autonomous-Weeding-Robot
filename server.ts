@@ -1,6 +1,8 @@
 import express from 'express';
 import fs from 'fs';
 import http from 'http';
+import https from 'https';
+import net from 'net';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -26,6 +28,7 @@ interface CameraPeer {
   bytesRelayed: number;
   lastReportedIp?: string;
   lastInterfaceName?: string;
+  lastLatencyMs?: number;
 }
 
 const rooms = new Map<string, Map<string, CameraPeer>>();
@@ -510,6 +513,1208 @@ async function startServer() {
     });
   });
 
+  // Safe MaixSense hardware accessibility diagnostic: TCP ping + RTSP/MJPEG probe + force stream reconnect
+  app.post('/api/maixsense/diagnose', async (req, res) => {
+    const rawIp = typeof req.body?.ip === 'string' ? req.body.ip.trim() : '';
+    const rawProtocol = typeof req.body?.protocol === 'string' ? req.body.protocol.toLowerCase() : 'auto';
+    const protocol: 'auto' | 'mjpeg' | 'rtsp' =
+      rawProtocol === 'mjpeg' || rawProtocol === 'rtsp' ? rawProtocol : 'auto';
+    const rawRoom = typeof req.body?.room === 'string' ? req.body.room : 'rover-01';
+    const roomId = rawRoom.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'rover-01';
+    const forceReconnect = req.body?.forceReconnect !== false;
+
+    const IPV4_REGEX =
+      /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+    if (!IPV4_REGEX.test(rawIp)) {
+      res.status(400).json({ ok: false, error: 'Invalid IPv4 address format.' });
+      return;
+    }
+
+    const octets = rawIp.split('.').map(Number);
+    const isPrivateLan =
+      octets[0] === 10 ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 192 && octets[1] === 168);
+
+    // Explicitly block loopback (127.x), link-local/metadata (169.254.x), 0.x, multicast, and public IPs
+    if (!isPrivateLan) {
+      res.status(400).json({
+        ok: false,
+        error: 'Diagnostic target must be a local private LAN IPv4 address (e.g. 192.168.233.1).',
+      });
+      return;
+    }
+
+    const isCloudContainer = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+
+    // Collect local host subnets & ARP entries so local probes stay strictly within attached LANs / RNDIS
+    const localPrefixes = new Set<string>(['192.168.233.']);
+    const nets = os.networkInterfaces();
+    for (const addrs of Object.values(nets)) {
+      if (!addrs) continue;
+      for (const addr of addrs) {
+        if (addr.family === 'IPv4' && !addr.internal) {
+          const p = addr.address.split('.');
+          if (p.length === 4) localPrefixes.add(`${p[0]}.${p[1]}.${p[2]}.`);
+        }
+      }
+    }
+    const targetPrefix = `${octets[0]}.${octets[1]}.${octets[2]}.`;
+    const isAttachedLocalSubnet = localPrefixes.has(targetPrefix);
+
+    type StepStatus = 'pass' | 'warn' | 'fail' | 'info';
+    const steps: Array<{
+      id: string;
+      label: string;
+      status: StepStatus;
+      detail: string;
+      durationMs?: number;
+    }> = [];
+
+    const tcpProbe = (
+      host: string,
+      port: number,
+      timeoutMs = 1100
+    ): Promise<{ open: boolean; rttMs: number | null; error?: string }> =>
+      new Promise((resolve) => {
+        const started = Date.now();
+        const socket = new net.Socket();
+        let settled = false;
+        const finish = (open: boolean, error?: string) => {
+          if (settled) return;
+          settled = true;
+          try {
+            socket.destroy();
+          } catch {
+            // Ignore cleanup error
+          }
+          resolve({ open, rttMs: open ? Date.now() - started : null, error });
+        };
+        socket.setTimeout(timeoutMs);
+        socket.once('connect', () => finish(true));
+        socket.once('timeout', () => finish(false, 'timeout'));
+        socket.once('error', (err) => finish(false, err.message));
+        socket.connect(port, host);
+      });
+
+    const rtspOptionsProbe = (
+      host: string,
+      port = 554,
+      timeoutMs = 1300
+    ): Promise<{ ok: boolean; statusLine: string | null; rttMs: number | null }> =>
+      new Promise((resolve) => {
+        const started = Date.now();
+        const socket = new net.Socket();
+        let settled = false;
+        let responseBuf = '';
+        const finish = (ok: boolean, statusLine: string | null) => {
+          if (settled) return;
+          settled = true;
+          try {
+            socket.destroy();
+          } catch {
+            // Ignore cleanup error
+          }
+          resolve({ ok, statusLine, rttMs: ok ? Date.now() - started : null });
+        };
+        socket.setTimeout(timeoutMs);
+        socket.once('connect', () => {
+          socket.write(`OPTIONS rtsp://${host}:${port}/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: WeedingRover-Audit/1.0\r\n\r\n`);
+        });
+        socket.on('data', (chunk) => {
+          responseBuf += chunk.toString('utf8');
+          if (responseBuf.includes('\r\n')) {
+            const firstLine = responseBuf.split('\r\n')[0].trim();
+            finish(firstLine.startsWith('RTSP/'), firstLine);
+          }
+        });
+        socket.once('timeout', () => finish(false, null));
+        socket.once('error', () => finish(false, null));
+        socket.connect(port, host);
+      });
+
+    const httpProbe = (
+      host: string,
+      port: number,
+      urlPath: string,
+      method: 'GET' | 'POST' = 'GET',
+      body?: Buffer,
+      timeoutMs = 1400
+    ): Promise<{ ok: boolean; statusCode: number | null; contentType: string; bytes: number; rttMs: number }> =>
+      new Promise((resolve) => {
+        const started = Date.now();
+        const reqOpts: http.RequestOptions = {
+          hostname: host,
+          port,
+          path: urlPath,
+          method,
+          timeout: timeoutMs,
+          headers: body
+            ? {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': body.byteLength,
+                'User-Agent': 'WeedingRover-Audit/1.0',
+              }
+            : { 'User-Agent': 'WeedingRover-Audit/1.0' },
+        };
+        const hReq = http.request(reqOpts, (hRes) => {
+          let bytes = 0;
+          const contentType = String(hRes.headers['content-type'] || '');
+          const statusCode = hRes.statusCode ?? null;
+          hRes.on('data', (chunk: Buffer) => {
+            bytes += chunk.byteLength;
+            // Cap read for MJPEG infinite streams after confirming stream headers + initial bytes
+            if (bytes >= 8192) {
+              hRes.destroy();
+            }
+          });
+          const done = () =>
+            resolve({
+              ok: statusCode !== null && statusCode >= 200 && statusCode < 400,
+              statusCode,
+              contentType,
+              bytes,
+              rttMs: Date.now() - started,
+            });
+          hRes.once('end', done);
+          hRes.once('close', done);
+        });
+        hReq.once('timeout', () => {
+          hReq.destroy();
+          resolve({ ok: false, statusCode: null, contentType: '', bytes: 0, rttMs: Date.now() - started });
+        });
+        hReq.once('error', () => {
+          resolve({ ok: false, statusCode: null, contentType: '', bytes: 0, rttMs: Date.now() - started });
+        });
+        if (body) hReq.write(body);
+        hReq.end();
+      });
+
+    // 1. Check active WebSocket MaixSense publishers/viewers in /ws/camera and optionally trigger reconnect
+    let wsPublishersSignaled = 0;
+    let wsViewersSignaled = 0;
+    let matchingBridgeFound = false;
+    let matchingBridgeLatencyMs: number | null = null;
+    let activeFramesRelayed = 0;
+
+    const reconnectSignalPayload = JSON.stringify({
+      type: 'maixsense:reconnect',
+      ip: rawIp,
+      protocol,
+      room: roomId,
+      reason: 'hardware_audit_diagnostic',
+      requestedAt: Date.now(),
+    });
+
+    for (const [rId, peers] of rooms.entries()) {
+      for (const peer of peers.values()) {
+        if (peer.ws.readyState !== WebSocket.OPEN) continue;
+        const isMaixPub =
+          peer.role === 'publisher' &&
+          (peer.transport === 'maixsense' || peer.label.toLowerCase().includes('maixsense'));
+        if (isMaixPub) {
+          activeFramesRelayed += peer.framesRelayed;
+          if (peer.lastReportedIp === rawIp || peer.label.includes(rawIp) || rId === roomId) {
+            matchingBridgeFound = true;
+            if (typeof peer.lastLatencyMs === 'number' && Number.isFinite(peer.lastLatencyMs)) {
+              matchingBridgeLatencyMs = Math.round(peer.lastLatencyMs);
+            }
+          }
+          if (forceReconnect) {
+            try {
+              peer.ws.send(reconnectSignalPayload);
+              wsPublishersSignaled += 1;
+            } catch {
+              // Ignore transient send error
+            }
+          }
+        } else if (peer.role === 'viewer' && rId === roomId && forceReconnect) {
+          try {
+            peer.ws.send(reconnectSignalPayload);
+            wsViewersSignaled += 1;
+          } catch {
+            // Ignore transient send error
+          }
+        }
+      }
+    }
+
+    const portMatrix: Array<{ port: number; service: string; open: boolean; rttMs: number | null }> = [
+      { port: 80, service: 'HTTP / MJPEG /getdeep', open: false, rttMs: null },
+      { port: 554, service: 'RTSP Stream', open: false, rttMs: null },
+      { port: 81, service: 'Alt MJPEG :81', open: false, rttMs: null },
+      { port: 8080, service: 'Alt HTTP/MJPEG :8080', open: false, rttMs: null },
+    ];
+
+    let pingReachable = false;
+    let pingRttMs: number | null = null;
+    let pingMethod: 'tcp_socket_probe' | 'ws_bridge_heartbeat' | 'browser_local_required' = 'tcp_socket_probe';
+    let pingDetail = '';
+
+    let streamProtocolFound: 'MJPEG/HTTP' | 'RTSP' | 'WS-Bridge' | 'None' = 'None';
+    let streamEndpointUrl = protocol === 'rtsp' ? `rtsp://${rawIp}:554/` : `http://${rawIp}/getdeep`;
+    let streamAccessible = false;
+    let streamStatusLine: string | null = null;
+    let streamDetail = '';
+    let hardwareSetCfgOk = false;
+
+    if (isCloudContainer) {
+      // Never probe arbitrary internal cloud RFC1918 networks from a remote container
+      pingMethod = matchingBridgeFound ? 'ws_bridge_heartbeat' : 'browser_local_required';
+      pingReachable = matchingBridgeFound;
+      pingRttMs = matchingBridgeFound ? matchingBridgeLatencyMs : null;
+      pingDetail = matchingBridgeFound
+        ? `Verified via live MaixSense WebSocket bridge (${activeFramesRelayed} frames relayed${
+            matchingBridgeLatencyMs !== null ? `, ${matchingBridgeLatencyMs} ms frame RTT` : ''
+          }).`
+        : `Server runs in a cloud container and cannot directly reach local LAN ${rawIp}. Run maixsense_bridge.py locally or open this console on http://localhost:3000.`;
+
+      steps.push({
+        id: 'ping',
+        label: `Ping ${rawIp}`,
+        status: matchingBridgeFound ? 'pass' : 'warn',
+        detail: pingDetail,
+        durationMs: pingRttMs ?? undefined,
+      });
+
+      if (matchingBridgeFound) {
+        streamProtocolFound = 'WS-Bridge';
+        streamEndpointUrl = `/ws/camera?room=${roomId}&transport=maixsense`;
+        streamAccessible = true;
+        streamStatusLine = 'WS_BRIDGE_ACTIVE';
+        streamDetail = `Active MaixSense bridge streaming (${activeFramesRelayed} frames relayed). Sent force-reconnect + POST /set_cfg trigger to ${wsPublishersSignaled} publisher(s).`;
+        steps.push({
+          id: 'stream',
+          label: 'Stream Accessibility & Force Reconnect',
+          status: 'pass',
+          detail: streamDetail,
+        });
+      } else {
+        streamDetail = `No active MaixSense bridge connected in room "${roomId}". Cannot verify RTSP/MJPEG stream from remote cloud container.`;
+        steps.push({
+          id: 'stream',
+          label: 'RTSP / MJPEG Stream Probe',
+          status: 'fail',
+          detail: streamDetail,
+        });
+      }
+    } else if (!isAttachedLocalSubnet) {
+      pingMethod = 'tcp_socket_probe';
+      pingReachable = matchingBridgeFound;
+      pingDetail = `Target ${rawIp} is outside attached host LAN subnets (${Array.from(localPrefixes).join(', ')}). Check USB-RNDIS adapter or LAN routing.`;
+      steps.push({
+        id: 'ping',
+        label: `Subnet & Ping Check (${rawIp})`,
+        status: matchingBridgeFound ? 'warn' : 'fail',
+        detail: pingDetail,
+      });
+    } else {
+      // Local host (PC / Raspberry Pi): safe non-shell TCP socket probes on fixed camera ports
+      const probeResults = await Promise.all(portMatrix.map((entry) => tcpProbe(rawIp, entry.port, 1100)));
+      probeResults.forEach((r, idx) => {
+        portMatrix[idx].open = r.open;
+        portMatrix[idx].rttMs = r.rttMs;
+      });
+
+      const firstOpen = portMatrix.find((p) => p.open);
+      pingReachable = Boolean(firstOpen) || matchingBridgeFound;
+      pingRttMs = firstOpen?.rttMs ?? null;
+      pingMethod = firstOpen ? 'tcp_socket_probe' : matchingBridgeFound ? 'ws_bridge_heartbeat' : 'tcp_socket_probe';
+      pingDetail = firstOpen
+        ? `Host ${rawIp} responded on TCP port ${firstOpen.port} (${firstOpen.service}) in ${firstOpen.rttMs} ms.`
+        : `No response from ${rawIp} on ports 80, 554, 81, or 8080 (timed out after 1100 ms).`;
+
+      steps.push({
+        id: 'ping',
+        label: `TCP Ping ${rawIp}`,
+        status: pingReachable ? 'pass' : 'fail',
+        detail: pingDetail,
+        durationMs: pingRttMs ?? undefined,
+      });
+
+      // Probe RTSP if requested or port 554 is open
+      const port554Open = portMatrix[1].open;
+      if ((protocol === 'rtsp' || protocol === 'auto') && port554Open) {
+        const rtspRes = await rtspOptionsProbe(rawIp, 554, 1300);
+        steps.push({
+          id: 'rtsp',
+          label: `RTSP Handshake (rtsp://${rawIp}:554/)`,
+          status: rtspRes.ok ? 'pass' : 'warn',
+          detail: rtspRes.ok
+            ? `RTSP server responded: ${rtspRes.statusLine} (${rtspRes.rttMs} ms).`
+            : 'Port 554 open, but RTSP OPTIONS handshake did not return an RTSP/1.0 header.',
+          durationMs: rtspRes.rttMs ?? undefined,
+        });
+        if (rtspRes.ok) {
+          streamProtocolFound = 'RTSP';
+          streamEndpointUrl = `rtsp://${rawIp}:554/`;
+          streamAccessible = true;
+          streamStatusLine = rtspRes.statusLine;
+          streamDetail = `RTSP stream endpoint verified (${rtspRes.statusLine}).`;
+        }
+      } else if (protocol === 'rtsp') {
+        steps.push({
+          id: 'rtsp',
+          label: `RTSP Handshake (rtsp://${rawIp}:554/)`,
+          status: 'fail',
+          detail: `RTSP port 554 is closed or unreachable on ${rawIp}. (MaixSense-A075V typically serves HTTP/MJPEG on port 80.)`,
+        });
+      }
+
+      // Probe HTTP / MJPEG / MaixSense /getdeep + force POST /set_cfg reconnection
+      const httpPort = portMatrix[0].open ? 80 : portMatrix[2].open ? 81 : portMatrix[3].open ? 8080 : null;
+      if ((protocol === 'mjpeg' || protocol === 'auto') && httpPort !== null) {
+        if (forceReconnect && httpPort === 80) {
+          // Official 12-byte MaixSense-A075V binary frame_config_encode (<BBBBBBBBi)
+          const setCfgBuf = Buffer.from([1, 1, 255, 0, 2, 7, 1, 0, 0, 0, 0, 0]);
+          const cfgRes = await httpProbe(rawIp, 80, '/set_cfg', 'POST', setCfgBuf, 1400);
+          hardwareSetCfgOk = cfgRes.ok;
+          steps.push({
+            id: 'set_cfg',
+            label: `Force Stream Re-Init (POST http://${rawIp}/set_cfg)`,
+            status: cfgRes.ok ? 'pass' : 'info',
+            detail: cfgRes.ok
+              ? `Re-enabled MaixSense RGB JPEG + 16-bit ToF continuous trigger (HTTP ${cfgRes.statusCode}, ${cfgRes.rttMs} ms).`
+              : `POST /set_cfg returned ${cfgRes.statusCode ?? 'no response'}; continuing MJPEG/HTTP stream probe.`,
+            durationMs: cfgRes.rttMs,
+          });
+        }
+
+        const candidatePaths = ['/getdeep', '/mjpeg', '/stream', '/video', '/get_cfg'];
+        let matchedHttp: { path: string; statusCode: number | null; contentType: string; bytes: number; rttMs: number } | null = null;
+        for (const p of candidatePaths) {
+          const probe = await httpProbe(rawIp, httpPort, p, 'GET', undefined, 1400);
+          if (probe.ok) {
+            matchedHttp = { path: p, ...probe };
+            break;
+          }
+        }
+
+        if (matchedHttp) {
+          streamProtocolFound = 'MJPEG/HTTP';
+          streamEndpointUrl = `http://${rawIp}${httpPort === 80 ? '' : `:${httpPort}`}${matchedHttp.path}`;
+          streamAccessible = true;
+          streamStatusLine = `HTTP ${matchedHttp.statusCode} (${matchedHttp.contentType || 'application/octet-stream'})`;
+          streamDetail = `Verified live camera endpoint ${streamEndpointUrl} (${matchedHttp.bytes} B read in ${matchedHttp.rttMs} ms).`;
+          steps.push({
+            id: 'mjpeg',
+            label: `HTTP / MJPEG Stream Probe (${streamEndpointUrl})`,
+            status: 'pass',
+            detail: streamDetail,
+            durationMs: matchedHttp.rttMs,
+          });
+        } else {
+          steps.push({
+            id: 'mjpeg',
+            label: `HTTP / MJPEG Stream Probe (http://${rawIp}:${httpPort})`,
+            status: 'warn',
+            detail: `Port ${httpPort} is open, but none of /getdeep, /mjpeg, /stream, /video, or /get_cfg returned HTTP 200.`,
+          });
+        }
+      }
+    }
+
+    if (forceReconnect) {
+      steps.push({
+        id: 'ws_reconnect',
+        label: 'WebSocket Stream Force-Reconnect Dispatch',
+        status: wsPublishersSignaled > 0 || wsViewersSignaled > 0 ? 'pass' : 'info',
+        detail:
+          wsPublishersSignaled > 0 || wsViewersSignaled > 0
+            ? `Dispatched maixsense:reconnect to ${wsPublishersSignaled} publisher(s) and ${wsViewersSignaled} viewer(s) in room "${roomId}".`
+            : `No active WebSocket publishers or viewers in room "${roomId}" to signal.`,
+      });
+    }
+
+    const overallStatus: 'accessible' | 'bridge_reconnected' | 'unreachable' =
+      streamAccessible && (hardwareSetCfgOk || pingMethod === 'tcp_socket_probe')
+        ? 'accessible'
+        : matchingBridgeFound
+        ? 'bridge_reconnected'
+        : 'unreachable';
+
+    res.json({
+      ok: true,
+      targetIp: rawIp,
+      room: roomId,
+      protocolRequested: protocol,
+      isCloudContainer,
+      overallStatus,
+      ping: {
+        reachable: pingReachable,
+        rttMs: pingRttMs,
+        method: pingMethod,
+        detail: pingDetail,
+      },
+      ports: portMatrix,
+      streamProbe: {
+        protocol: streamProtocolFound,
+        endpointUrl: streamEndpointUrl,
+        accessible: streamAccessible,
+        httpOrRtspStatus: streamStatusLine,
+        detail: streamDetail || 'No accessible RTSP or MJPEG/HTTP stream detected on target IP.',
+      },
+      reconnection: {
+        attempted: forceReconnect,
+        hardwareSetCfgOk,
+        wsPublishersSignaled,
+        wsViewersSignaled,
+        activeFramesRelayed,
+        detail: hardwareSetCfgOk
+          ? `Hardware stream re-triggered via POST /set_cfg and WebSocket reconnect broadcast to ${wsPublishersSignaled} bridge(s) / ${wsViewersSignaled} viewer(s).`
+          : wsPublishersSignaled > 0
+          ? `Force-reconnect signal delivered to ${wsPublishersSignaled} active MaixSense bridge(s) and ${wsViewersSignaled} viewer(s).`
+          : 'Reconnect requested; start maixsense_bridge.py or connect locally over USB-RNDIS to bring up the stream.',
+      },
+      steps,
+      diagnosedAt: new Date().toISOString(),
+    });
+  });
+
+  // Lower-level MaixSense hardware power-cycle / hard reset endpoint
+  // Strictly validated private LAN IPv4, zero shell execution, sysfs path confinement, cloud-safe dispatch
+  app.post('/api/maixsense/hard-reset', async (req, res) => {
+    const startedAt = Date.now();
+    const rawIp = typeof req.body?.ip === 'string' ? req.body.ip.trim() : '192.168.233.1';
+    const rawRoom = typeof req.body?.room === 'string' ? req.body.room : 'rover-01';
+    const roomId = rawRoom.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'rover-01';
+    const powerOffMs = Math.max(800, Math.min(3000, Number(req.body?.powerOffMs) || 1500));
+
+    const IPV4_REGEX =
+      /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+    if (!IPV4_REGEX.test(rawIp)) {
+      res.status(400).json({ ok: false, error: 'Invalid IPv4 address format.' });
+      return;
+    }
+
+    const octets = rawIp.split('.').map(Number);
+    const isPrivateLan =
+      octets[0] === 10 ||
+      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+      (octets[0] === 192 && octets[1] === 168);
+
+    if (!isPrivateLan) {
+      res.status(400).json({
+        ok: false,
+        error: 'Hard reset target must be a local private LAN IPv4 address (e.g. 192.168.233.1).',
+      });
+      return;
+    }
+
+    const isCloudContainer = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    type ResetStepStatus = 'pass' | 'warn' | 'fail' | 'info';
+    const steps: Array<{
+      id: string;
+      phase: string;
+      status: ResetStepStatus;
+      detail: string;
+      durationMs?: number;
+    }> = [];
+
+    // Helper for bounded HTTP request to local MaixSense module
+    const localHttpSignal = (
+      host: string,
+      urlPath: string,
+      method: 'GET' | 'POST',
+      body?: Buffer,
+      timeoutMs = 1400
+    ): Promise<{ ok: boolean; statusCode: number | null; rttMs: number }> =>
+      new Promise((resolve) => {
+        const t0 = Date.now();
+        const hReq = http.request(
+          {
+            hostname: host,
+            port: 80,
+            path: urlPath,
+            method,
+            timeout: timeoutMs,
+            headers: body
+              ? {
+                  'Content-Type': 'application/octet-stream',
+                  'Content-Length': body.byteLength,
+                  'User-Agent': 'WeedingRover-HardReset/1.0',
+                }
+              : { 'User-Agent': 'WeedingRover-HardReset/1.0' },
+          },
+          (hRes) => {
+            hRes.resume();
+            hRes.once('end', () =>
+              resolve({
+                ok: (hRes.statusCode ?? 0) >= 200 && (hRes.statusCode ?? 0) < 400,
+                statusCode: hRes.statusCode ?? null,
+                rttMs: Date.now() - t0,
+              })
+            );
+          }
+        );
+        hReq.once('timeout', () => {
+          hReq.destroy();
+          resolve({ ok: false, statusCode: null, rttMs: Date.now() - t0 });
+        });
+        hReq.once('error', () => {
+          resolve({ ok: false, statusCode: null, rttMs: Date.now() - t0 });
+        });
+        if (body) hReq.write(body);
+        hReq.end();
+      });
+
+    // 1. Dispatch lower-level hard-reset command over /ws/camera to active MaixSense bridges & viewers
+    let wsPublishersSignaled = 0;
+    let wsViewersSignaled = 0;
+    const hardResetEnvelope = JSON.stringify({
+      type: 'maixsense:hard_reset',
+      ip: rawIp,
+      room: roomId,
+      powerOffMs,
+      reason: 'hardware_audit_hard_reset',
+      requestedAt: Date.now(),
+    });
+
+    for (const [rId, peers] of rooms.entries()) {
+      for (const peer of peers.values()) {
+        if (peer.ws.readyState !== WebSocket.OPEN) continue;
+        const isMaixPub =
+          peer.role === 'publisher' &&
+          (peer.transport === 'maixsense' || peer.label.toLowerCase().includes('maixsense'));
+        if (isMaixPub) {
+          try {
+            peer.ws.send(hardResetEnvelope);
+            wsPublishersSignaled += 1;
+          } catch {
+            // Ignore transient write error
+          }
+        } else if (peer.role === 'viewer' && rId === roomId) {
+          try {
+            peer.ws.send(hardResetEnvelope);
+            wsViewersSignaled += 1;
+          } catch {
+            // Ignore transient write error
+          }
+        }
+      }
+    }
+
+    steps.push({
+      id: 'ws_dispatch',
+      phase: '1. Bridge Hard-Reset Signal',
+      status: wsPublishersSignaled > 0 ? 'pass' : 'info',
+      detail:
+        wsPublishersSignaled > 0
+          ? `Dispatched maixsense:hard_reset (${powerOffMs} ms USB/firmware cycle) to ${wsPublishersSignaled} active MaixSense bridge(s) and notified ${wsViewersSignaled} viewer(s).`
+          : `No active MaixSense WebSocket bridge in room "${roomId}". ${
+              isCloudContainer
+                ? 'Start maixsense_bridge.py on your local PC/Pi so remote hard-reset commands can reach the USB bus.'
+                : 'Proceeding with local USB sysfs & firmware power-cycle.'
+            }`,
+    });
+
+    let usbPowerCycled = false;
+    let usbDeviceMatched: string | null = null;
+    let firmwareResetSent = false;
+    let postResetRecovered = false;
+    let postResetRttMs: number | null = null;
+
+    if (!isCloudContainer) {
+      // 2. Linux sysfs USB device authorization power-cycle (zero shell execution, strict path confinement)
+      const USB_SYSFS_BASE = '/sys/bus/usb/devices';
+      const SAFE_USB_DEV_RE = /^[0-9]+-[0-9]+(?:\.[0-9]+)*$/;
+      const MAIX_VENDOR_IDS = new Set(['1f3a', '0525', '359f']);
+      const MAIX_KEYWORDS = ['maixsense', 'sipeed', 'rndis', 'allwinner', 'a075'];
+
+      const tUsb = Date.now();
+      if (process.platform === 'linux' && fs.existsSync(USB_SYSFS_BASE)) {
+        try {
+          const entries = fs.readdirSync(USB_SYSFS_BASE).filter((name) => SAFE_USB_DEV_RE.test(name));
+          for (const devName of entries.slice(0, 48)) {
+            const devDir = path.resolve(USB_SYSFS_BASE, devName);
+            if (!devDir.startsWith(USB_SYSFS_BASE + path.sep)) continue;
+
+            const readSysAttr = (attr: string): string => {
+              const p = path.resolve(devDir, attr);
+              if (!p.startsWith(devDir + path.sep) || !fs.existsSync(p)) return '';
+              try {
+                return fs.readFileSync(p, 'utf8').trim().toLowerCase();
+              } catch {
+                return '';
+              }
+            };
+
+            const idVendor = readSysAttr('idVendor');
+            const product = readSysAttr('product');
+            const manufacturer = readSysAttr('manufacturer');
+            const combined = `${product} ${manufacturer}`;
+
+            const isMatch =
+              MAIX_VENDOR_IDS.has(idVendor) ||
+              MAIX_KEYWORDS.some((kw) => combined.includes(kw));
+
+            if (isMatch) {
+              usbDeviceMatched = `${devName} (${idVendor || 'usb'}${product ? ` · ${product}` : ''})`;
+              const authPath = path.resolve(devDir, 'authorized');
+              if (authPath.startsWith(devDir + path.sep) && fs.existsSync(authPath)) {
+                try {
+                  fs.writeFileSync(authPath, '0', 'utf8');
+                  await sleep(powerOffMs);
+                  fs.writeFileSync(authPath, '1', 'utf8');
+                  usbPowerCycled = true;
+                  steps.push({
+                    id: 'usb_sysfs',
+                    phase: '2. USB Bus Power-Cycle (sysfs)',
+                    status: 'pass',
+                    detail: `Deauthorized and re-enumerated USB device ${usbDeviceMatched} via sysfs (${powerOffMs} ms power-off hold).`,
+                    durationMs: Date.now() - tUsb,
+                  });
+                } catch (err) {
+                  steps.push({
+                    id: 'usb_sysfs',
+                    phase: '2. USB Bus Power-Cycle (sysfs)',
+                    status: 'warn',
+                    detail: `Matched USB device ${usbDeviceMatched}, but sysfs write requires root/udev permission (${
+                      err instanceof Error ? err.message : 'EACCES'
+                    }). Falling back to firmware HTTP reset.`,
+                    durationMs: Date.now() - tUsb,
+                  });
+                }
+              }
+              break;
+            }
+          }
+
+          if (!usbDeviceMatched) {
+            steps.push({
+              id: 'usb_sysfs',
+              phase: '2. USB Bus Power-Cycle (sysfs)',
+              status: 'info',
+              detail: 'No MaixSense / Allwinner / USB-RNDIS device matched in /sys/bus/usb/devices on this host.',
+              durationMs: Date.now() - tUsb,
+            });
+          }
+        } catch {
+          steps.push({
+            id: 'usb_sysfs',
+            phase: '2. USB Bus Power-Cycle (sysfs)',
+            status: 'info',
+            detail: 'Unable to enumerate /sys/bus/usb/devices on this host; proceeding with firmware reset.',
+            durationMs: Date.now() - tUsb,
+          });
+        }
+      } else {
+        steps.push({
+          id: 'usb_sysfs',
+          phase: '2. USB Bus Power-Cycle',
+          status: 'info',
+          detail: `Host OS (${os.platform()}) does not expose Linux USB sysfs; proceeding with firmware trigger cycle.`,
+        });
+      }
+
+      // 3. Firmware-level halt + reboot + cold re-init (strictly restricted to attached local subnets)
+      const localPrefixes = new Set<string>(['192.168.233.']);
+      for (const addrs of Object.values(os.networkInterfaces())) {
+        if (!addrs) continue;
+        for (const addr of addrs) {
+          if (addr.family === 'IPv4' && !addr.internal) {
+            const p = addr.address.split('.');
+            if (p.length === 4) localPrefixes.add(`${p[0]}.${p[1]}.${p[2]}.`);
+          }
+        }
+      }
+      const targetPrefix = `${octets[0]}.${octets[1]}.${octets[2]}.`;
+
+      if (localPrefixes.has(targetPrefix)) {
+        const tFw = Date.now();
+        // Halt active capture (trigger_mode=0)
+        const stopCfg = Buffer.from([0, 0, 255, 0, 2, 7, 0, 0, 0, 0, 0, 0]);
+        const stopRes = await localHttpSignal(rawIp, '/set_cfg', 'POST', stopCfg, 1000);
+        // Attempt firmware reboot endpoint if exposed by module firmware
+        const rebootRes = await localHttpSignal(rawIp, '/reboot', 'GET', undefined, 900);
+        if (stopRes.ok || rebootRes.ok) {
+          firmwareResetSent = true;
+          await sleep(600);
+        }
+
+        // Cold re-initialize continuous trigger + 16-bit depth + RGB JPEG (trigger_mode=1, deep_mode=1, rgb_mode=1)
+        const startCfg = Buffer.from([1, 1, 255, 0, 2, 7, 1, 0, 0, 0, 0, 0]);
+        const reinitRes = await localHttpSignal(rawIp, '/set_cfg', 'POST', startCfg, 1400);
+        if (reinitRes.ok) {
+          firmwareResetSent = true;
+          postResetRecovered = true;
+          postResetRttMs = reinitRes.rttMs;
+          steps.push({
+            id: 'firmware_cycle',
+            phase: '3. Firmware Trigger Cycle & Cold Re-Init',
+            status: 'pass',
+            detail: `Sent trigger halt + cold POST /set_cfg re-init to http://${rawIp}/set_cfg (HTTP ${reinitRes.statusCode}, ${reinitRes.rttMs} ms).`,
+            durationMs: Date.now() - tFw,
+          });
+        } else {
+          steps.push({
+            id: 'firmware_cycle',
+            phase: '3. Firmware Trigger Cycle & Cold Re-Init',
+            status: 'warn',
+            detail: `MaixSense HTTP control port on ${rawIp}:80 did not acknowledge cold re-init (device may still be rebooting or USB cable is unplugged).`,
+            durationMs: Date.now() - tFw,
+          });
+        }
+      }
+    } else {
+      steps.push({
+        id: 'cloud_notice',
+        phase: '2. Physical USB Bus Scope',
+        status: wsPublishersSignaled > 0 ? 'info' : 'warn',
+        detail:
+          wsPublishersSignaled > 0
+            ? 'Remote cloud console delegated the physical USB/firmware power-cycle to your local maixsense_bridge.py process over /ws/camera.'
+            : 'Cloud container cannot toggle local USB power directly. Run maixsense_bridge.py locally on the rover/PC, or physically unplug and replug the MaixSense USB-C cable for 3 seconds.',
+      });
+    }
+
+    const overallStatus: 'power_cycled' | 'bridge_dispatched' | 'manual_required' =
+      usbPowerCycled || postResetRecovered
+        ? 'power_cycled'
+        : wsPublishersSignaled > 0
+        ? 'bridge_dispatched'
+        : 'manual_required';
+
+    res.json({
+      ok: true,
+      targetIp: rawIp,
+      room: roomId,
+      isCloudContainer,
+      overallStatus,
+      usbDeviceMatched,
+      usbPowerCycled,
+      firmwareResetSent,
+      wsPublishersSignaled,
+      wsViewersSignaled,
+      postResetRecovered,
+      postResetRttMs,
+      totalDurationMs: Date.now() - startedAt,
+      steps,
+      executedAt: new Date().toISOString(),
+    });
+  });
+
+  // ─── Physical Raspberry Pi Robot Mission & Safety Proxy (/api/robot/*) ──────
+  // Strictly proxies ONLY to server-configured process.env.PI_ROBOT_URL (never client-controlled URLs).
+  const getConfiguredPiBaseUrl = (): URL | null => {
+    const raw = (process.env.PI_ROBOT_URL || '').trim();
+    if (!raw) return null;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const proxyPiRequest = (
+    method: 'GET' | 'POST',
+    endpointPath: string,
+    payload?: Buffer | Record<string, unknown>,
+    contentType = 'application/json',
+    timeoutMs = 2500
+  ): Promise<{ reachable: boolean; statusCode: number; body: any; error?: string }> =>
+    new Promise((resolve) => {
+      const base = getConfiguredPiBaseUrl();
+      if (!base) {
+        resolve({ reachable: false, statusCode: 503, body: null, error: 'PI_ROBOT_URL not configured' });
+        return;
+      }
+
+      const target = new URL(endpointPath, base);
+      const isHttps = target.protocol === 'https:';
+      const bodyBuf =
+        payload === undefined
+          ? undefined
+          : Buffer.isBuffer(payload)
+          ? payload
+          : Buffer.from(JSON.stringify(payload), 'utf8');
+
+      const headers: Record<string, string | number> = {
+        'User-Agent': 'WeedingRover-ConsoleProxy/1.0',
+      };
+      if (bodyBuf) {
+        headers['Content-Type'] = contentType;
+        headers['Content-Length'] = bodyBuf.byteLength;
+      }
+
+      const transport = isHttps ? https : http;
+      const hReq = transport.request(
+        {
+          protocol: target.protocol,
+          hostname: target.hostname,
+          port: target.port || (isHttps ? 443 : 80),
+          path: target.pathname + target.search,
+          method,
+          timeout: timeoutMs,
+          headers,
+        },
+        (hRes) => {
+          const chunks: Buffer[] = [];
+          hRes.on('data', (c: Buffer) => {
+            if (chunks.reduce((acc, b) => acc + b.byteLength, 0) < 512 * 1024) {
+              chunks.push(c);
+            }
+          });
+          hRes.once('end', () => {
+            const rawText = Buffer.concat(chunks).toString('utf8');
+            let parsedBody: any = rawText;
+            try {
+              parsedBody = rawText ? JSON.parse(rawText) : {};
+            } catch {
+              parsedBody = { raw: rawText };
+            }
+            resolve({
+              reachable: true,
+              statusCode: hRes.statusCode ?? 502,
+              body: parsedBody,
+            });
+          });
+        }
+      );
+
+      hReq.once('timeout', () => {
+        hReq.destroy();
+        resolve({ reachable: false, statusCode: 504, body: null, error: 'Pi robot API request timed out' });
+      });
+      hReq.once('error', (err) => {
+        resolve({ reachable: false, statusCode: 503, body: null, error: err.message });
+      });
+      if (bodyBuf) hReq.write(bodyBuf);
+      hReq.end();
+    });
+
+  app.get('/api/robot/status', async (_req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.json({
+        ok: true,
+        configured: false,
+        connected: false,
+        mode: 'sim_only',
+        detail: 'PI_ROBOT_URL is not configured. Dashboard is running in local simulation mode only.',
+        status: null,
+      });
+      return;
+    }
+
+    const r = await proxyPiRequest('GET', '/health', undefined, 'application/json', 2000);
+    if (!r.reachable || r.statusCode >= 500) {
+      res.json({
+        ok: false,
+        configured: true,
+        connected: false,
+        mode: 'pi_unreachable',
+        detail: r.error || `Pi server returned HTTP ${r.statusCode}`,
+        status: null,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      configured: true,
+      connected: r.statusCode >= 200 && r.statusCode < 300,
+      mode: 'pi_live',
+      detail: 'Connected to Raspberry Pi navigation controller.',
+      workerRunning: Boolean(r.body?.worker_running),
+      status: r.body?.status ?? r.body,
+    });
+  });
+
+  app.post('/api/robot/stop', async (_req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({
+        ok: false,
+        configured: false,
+        ackVerified: false,
+        hardwareStopped: false,
+        detail:
+          'No physical Raspberry Pi backend configured (PI_ROBOT_URL unset) — UI simulation halted only. Browser button is NOT a physical emergency stop.',
+      });
+      return;
+    }
+
+    const r = await proxyPiRequest('POST', '/stop', {}, 'application/json', 2500);
+    if (!r.reachable) {
+      res.status(503).json({
+        ok: false,
+        configured: true,
+        ackVerified: false,
+        hardwareStopped: false,
+        detail: `Failed to reach Raspberry Pi /stop (${r.error}). Engage physical GPIO 13 E-stop switch immediately!`,
+      });
+      return;
+    }
+
+    const ackVerified = r.statusCode === 200 && Boolean(r.body?.ack_verified);
+    res.status(ackVerified ? 200 : 503).json({
+      ok: ackVerified,
+      configured: true,
+      ackVerified,
+      hardwareStopped: ackVerified && !r.body?.simulated,
+      esp32Response: r.body?.esp32_response ?? null,
+      estopLatched: Boolean(r.body?.estop_latched),
+      simulated: Boolean(r.body?.simulated),
+      detail: ackVerified
+        ? `ESP32 stop ACK verified (${r.body?.esp32_response}).`
+        : r.body?.error || 'ESP32 stop ACK NOT verified — engage physical power cutoff immediately!',
+    });
+  });
+
+  app.post('/api/robot/start_mission', async (req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({
+        ok: false,
+        started: false,
+        configured: false,
+        reason: 'PI_ROBOT_NOT_CONFIGURED',
+        detail: 'PI_ROBOT_URL is not configured; cannot launch a physical rover mission.',
+      });
+      return;
+    }
+
+    const payload = {
+      source_type: typeof req.body?.source_type === 'string' ? req.body.source_type : 'live_capture',
+      nav_only: req.body?.nav_only !== false,
+      operator_confirmed: Boolean(req.body?.operator_confirmed),
+      ...(typeof req.body?.start_row === 'number' ? { start_row: req.body.start_row } : {}),
+      ...(typeof req.body?.end_row === 'number' ? { end_row: req.body.end_row } : {}),
+    };
+    const r = await proxyPiRequest('POST', '/start_mission', payload);
+    if (!r.reachable) {
+      res.status(503).json({ ok: false, started: false, reason: 'PI_UNREACHABLE', detail: r.error });
+      return;
+    }
+    res.status(r.statusCode).json({ ok: r.statusCode === 200, ...r.body });
+  });
+
+  app.post('/api/robot/pause', async (_req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({ ok: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+      return;
+    }
+    const r = await proxyPiRequest('POST', '/pause', {});
+    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
+  });
+
+  app.post('/api/robot/resume', async (_req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({ ok: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+      return;
+    }
+    const r = await proxyPiRequest('POST', '/resume', {});
+    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
+  });
+
+  app.post('/api/robot/recover', async (req, res) => {
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({ ok: false, recovered: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      operator_confirmed: Boolean(req.body?.operator_confirmed),
+    };
+    if (Array.isArray(req.body?.relocalize_pose) && req.body.relocalize_pose.length === 3) {
+      payload.relocalize_pose = req.body.relocalize_pose.map(Number);
+    }
+    const r = await proxyPiRequest('POST', '/recover', payload);
+    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
+  });
+
+  // Zero-config USB ESP32 startup handshake (PING -> CLEAR_LATCH -> TELEM?) + camera readiness check
+  app.post('/api/robot/handshake', async (req, res) => {
+    const startedAt = Date.now();
+    const operatorConfirmed = req.body?.operator_confirmed !== false;
+    const isCloudContainer = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
+
+    // 1. Read-only scan of /dev for USB-connected ESP32 serial bridges (zero shell execution, zero manual config)
+    const detectedUsbPorts: string[] = [];
+    const SAFE_USB_SERIAL_RE = /^(ttyUSB\d+|ttyACM\d+|cu\.usb\S+|cu\.SLAB\S+|cu\.wchusb\S+)$/;
+    if (!isCloudContainer && fs.existsSync('/dev')) {
+      try {
+        const devEntries = fs.readdirSync('/dev');
+        for (const name of devEntries) {
+          if (SAFE_USB_SERIAL_RE.test(name)) {
+            detectedUsbPorts.push(`/dev/${name}`);
+          }
+          if (detectedUsbPorts.length >= 8) break;
+        }
+      } catch {
+        // Ignore unreadable /dev
+      }
+    }
+
+    // 2. Summarize live camera readiness from /ws/camera publishers & USB-RNDIS interfaces
+    let wsCameraPublishers = 0;
+    let wsFramesRelayed = 0;
+    let activeCameraIp: string | null = null;
+    for (const peers of rooms.values()) {
+      for (const peer of peers.values()) {
+        if (peer.role === 'publisher' && peer.ws.readyState === WebSocket.OPEN) {
+          wsCameraPublishers += 1;
+          wsFramesRelayed += peer.framesRelayed;
+          if (!activeCameraIp && peer.lastReportedIp) {
+            activeCameraIp = peer.lastReportedIp;
+          }
+        }
+      }
+    }
+    if (!activeCameraIp) {
+      const nets = os.networkInterfaces();
+      for (const addrs of Object.values(nets)) {
+        if (!addrs) continue;
+        for (const addr of addrs) {
+          if (addr.family === 'IPv4' && !addr.internal && addr.address.startsWith('192.168.233.')) {
+            const p = addr.address.split('.');
+            activeCameraIp = `${p[0]}.${p[1]}.${p[2]}.1`;
+          }
+        }
+      }
+    }
+
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(200).json({
+        ok: false,
+        configured: false,
+        mode: 'usb_unlinked',
+        isCloudContainer,
+        detectedUsbPorts,
+        usbPort: detectedUsbPorts[0] || '/dev/ttyUSB0 (USB auto)',
+        esp32Ready: false,
+        watchdogInitialized: false,
+        estopOk: false,
+        cameraHealthy: wsCameraPublishers > 0,
+        cameraSummary: {
+          wsPublishers: wsCameraPublishers,
+          wsFramesRelayed,
+          resolvedIp: activeCameraIp,
+          piCameraHealthy: false,
+          piCameraReason: 'PI_ROBOT_URL_UNSET',
+        },
+        navigationDispatchUnlocked: false,
+        durationMs: Date.now() - startedAt,
+        steps: [
+          {
+            id: 'usb_detect',
+            command: 'USB AUTO-DETECT',
+            status: detectedUsbPorts.length > 0 ? 'pass' : 'info',
+            response: detectedUsbPorts.length > 0 ? detectedUsbPorts.join(', ') : 'NO_LOCAL_USB_PORT',
+            detail:
+              detectedUsbPorts.length > 0
+                ? `Detected USB serial device(s) on host: ${detectedUsbPorts.join(', ')}. Set PI_ROBOT_URL to run live Pi handshake.`
+                : isCloudContainer
+                ? 'ESP32 connects over USB to your Raspberry Pi. Set PI_ROBOT_URL on the server so CLEAR_LATCH dispatches to the rover.'
+                : 'No USB-serial ESP32 found on /dev/ttyUSB* or /dev/ttyACM*. Plug ESP32 into Raspberry Pi USB and set PI_ROBOT_URL.',
+          },
+          {
+            id: 'clear_latch',
+            command: 'CLEAR_LATCH',
+            status: 'warn',
+            response: 'PI_BRIDGE_UNCONFIGURED',
+            detail:
+              'CLEAR_LATCH was NOT verified on physical ESP32 because PI_ROBOT_URL is not configured. Watchdog gate remains locked.',
+          },
+          {
+            id: 'camera_check',
+            command: 'CAMERA_CHECK',
+            status: wsCameraPublishers > 0 ? 'pass' : 'warn',
+            response:
+              wsCameraPublishers > 0
+                ? `LIVE_STREAM (${wsCameraPublishers} pub · ${wsFramesRelayed} frames)`
+                : activeCameraIp
+                ? `RNDIS_IP_${activeCameraIp}_IDLE`
+                : 'NO_LIVE_CAMERA_STREAM',
+            detail:
+              wsCameraPublishers > 0
+                ? `Live camera publisher active (${wsFramesRelayed} frames relayed${activeCameraIp ? ` from ${activeCameraIp}` : ''}).`
+                : 'No live MaixSense / camera stream publishing to /ws/camera yet. Run maixsense_bridge.py or connect camera below.',
+          },
+        ],
+        executedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // 3. Proxy real CLEAR_LATCH startup handshake to Raspberry Pi navigation controller
+    const r = await proxyPiRequest('POST', '/handshake', { operator_confirmed: operatorConfirmed }, 'application/json', 3500);
+    if (!r.reachable) {
+      res.status(503).json({
+        ok: false,
+        configured: true,
+        mode: 'pi_unreachable',
+        isCloudContainer,
+        detectedUsbPorts,
+        usbPort: detectedUsbPorts[0] || '/dev/ttyUSB0',
+        esp32Ready: false,
+        watchdogInitialized: false,
+        estopOk: false,
+        cameraHealthy: wsCameraPublishers > 0,
+        cameraSummary: {
+          wsPublishers: wsCameraPublishers,
+          wsFramesRelayed,
+          resolvedIp: activeCameraIp,
+          piCameraHealthy: false,
+          piCameraReason: 'PI_UNREACHABLE',
+        },
+        navigationDispatchUnlocked: false,
+        durationMs: Date.now() - startedAt,
+        steps: [
+          {
+            id: 'pi_link',
+            command: 'POST /handshake',
+            status: 'fail',
+            response: 'PI_UNREACHABLE',
+            detail: `Could not reach Raspberry Pi controller (${r.error}). Watchdog initialization could not be verified.`,
+          },
+        ],
+        executedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const piData = r.body || {};
+    const esp32Ready = Boolean(piData.esp32_ready);
+    const watchdogInitialized = Boolean(piData.watchdog_initialized);
+    const piCameraHealthy = Boolean(piData.camera_healthy);
+
+    res.status(r.statusCode).json({
+      ok: esp32Ready,
+      configured: true,
+      mode: piData.simulated ? 'pi_simulated' : 'pi_live',
+      isCloudContainer,
+      detectedUsbPorts,
+      usbPort: piData.usb_port || detectedUsbPorts[0] || '/dev/ttyUSB0',
+      esp32Ready,
+      watchdogInitialized,
+      estopOk: Boolean(piData.estop_ok),
+      cameraHealthy: piCameraHealthy || wsCameraPublishers > 0,
+      cameraSummary: {
+        wsPublishers: wsCameraPublishers,
+        wsFramesRelayed,
+        resolvedIp: activeCameraIp,
+        piCameraHealthy,
+        piCameraReason: piData.camera_reason || (piCameraHealthy ? 'OK' : 'CAMERA_NOT_ATTACHED'),
+        piFramesIngested: Number(piData.frames_ingested ?? 0),
+      },
+      navigationDispatchUnlocked: Boolean(piData.navigation_dispatch_unlocked),
+      durationMs: Date.now() - startedAt,
+      steps: Array.isArray(piData.steps) ? piData.steps : [],
+      executedAt: new Date().toISOString(),
+    });
+  });
+
+  let lastPiFrameForwardMs = 0;
+
   const server = http.createServer(app);
 
   // Real-time WebSocket server on /ws/camera for WebRTC signaling AND CameraX/MJPEG binary frame relay
@@ -597,6 +1802,20 @@ async function startServer() {
         peer.framesRelayed += 1;
         peer.bytesRelayed += byteLen;
 
+        // Forward live camera frames (throttled to ~4 Hz) to Pi /camera/frame when PI_ROBOT_URL is configured
+        const nowMs = Date.now();
+        if (getConfiguredPiBaseUrl() && nowMs - lastPiFrameForwardMs >= 250) {
+          lastPiFrameForwardMs = nowMs;
+          const frameBuf = Buffer.isBuffer(data)
+            ? data
+            : Array.isArray(data)
+            ? Buffer.concat(data)
+            : Buffer.from(data as ArrayBuffer);
+          if (frameBuf.byteLength > 0 && frameBuf.byteLength <= 4 * 1024 * 1024) {
+            void proxyPiRequest('POST', '/camera/frame', frameBuf, 'image/jpeg', 1000);
+          }
+        }
+
         for (const target of currentRoom.values()) {
           if (
             target.role === 'viewer' &&
@@ -657,8 +1876,12 @@ async function startServer() {
 
         const reportedIp = safeStr(msg.ip, 45);
         const reportedIf = safeStr(msg.interfaceName, 96);
+        const reportedLatency = safeNum(msg.latencyMs);
         if (reportedIp) peer.lastReportedIp = reportedIp;
         if (reportedIf) peer.lastInterfaceName = reportedIf;
+        if (reportedLatency !== null && reportedLatency >= 0) {
+          peer.lastLatencyMs = reportedLatency;
+        }
 
         const out = JSON.stringify({
           type: 'maixsense:telemetry',
@@ -672,7 +1895,7 @@ async function startServer() {
           endpoint: safeStr(msg.endpoint, 32),
           frameId: safeNum(msg.frameId) ?? 0,
           fps: safeNum(msg.fps) ?? 0,
-          latencyMs: safeNum(msg.latencyMs) ?? 0,
+          latencyMs: reportedLatency ?? 0,
           centerDepthMm: safeNum(msg.centerDepthMm),
           minDepthMm: safeNum(msg.minDepthMm),
           maxDepthMm: safeNum(msg.maxDepthMm),

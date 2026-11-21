@@ -115,6 +115,7 @@ class RoverFirmwareController:
         self.meas_l = 0.0
         self.meas_r = 0.0
         self.last_dist_mm = -1
+        self.host_synced = False
         self.watchdog_tripped = False
         self.estop_latched = False
 
@@ -233,11 +234,13 @@ class RoverFirmwareController:
         cmd = parts[0].upper()
 
         if cmd == "ESTOP":
+            self.host_synced = True
             self.estop_latched = True
             self.force_stop()
             return "OK:ESTOP_LATCHED"
 
         if cmd == "CLEAR_LATCH":
+            self.host_synced = True
             if not self.estop_ok():
                 self.force_stop()
                 return "ERR:ESTOP_PIN_OPEN"
@@ -247,6 +250,7 @@ class RoverFirmwareController:
             return "OK:LATCH_CLEARED"
 
         if cmd == "VEL":
+            self.host_synced = True
             if len(parts) != 3:
                 return "ERR:ARGS:VEL_REQUIRES_2"
             try:
@@ -274,11 +278,16 @@ class RoverFirmwareController:
             return "OK"
 
         if cmd == "STOP":
+            self.host_synced = True
             self.force_stop()
-            self.last_cmd_ms = self._now_ms()
+            if not self.watchdog_tripped and not self.estop_latched:
+                self.last_cmd_ms = self._now_ms()
             return "OK:STOPPED"
 
         if cmd == "TELEM?":
+            self.host_synced = True
+            if not self.watchdog_tripped and not self.estop_latched:
+                self.last_cmd_ms = self._now_ms()
             self.last_dist_mm = self.read_distance_mm()
             wd_ok = 0 if self.watchdog_tripped else 1
             safe_ok = 1 if (self.estop_ok() and not self.estop_latched) else 0
@@ -300,11 +309,13 @@ class RoverFirmwareController:
             return "OK"
 
         if cmd == "PING":
-            # PING refreshes comms liveness ONLY when not latched in watchdog/E-stop fault
+            # Startup handshake marks host synced; refreshes comms liveness ONLY when not latched
+            self.host_synced = True
             if not self.watchdog_tripped and not self.estop_latched:
                 self.last_cmd_ms = self._now_ms()
             safe_ok = 1 if (self.estop_ok() and not self.estop_latched) else 0
-            return f"PONG {safe_ok}"
+            wd_ok = 0 if self.watchdog_tripped else 1
+            return f"PONG {safe_ok} {wd_ok}"
 
         return f"ERR:UNKNOWN:{cmd}"
 
@@ -317,6 +328,10 @@ class RoverFirmwareController:
             self.estop_latched = True
             self.force_stop()
         elif self.estop_latched:
+            self.force_stop()
+        elif not self.host_synced:
+            # Cold-boot standby: hold motors strictly at zero without tripping a phantom
+            # pre-connection watchdog latch while Raspberry Pi opens the serial port.
             self.force_stop()
         elif elapsed_ms > WATCHDOG_MS:
             self.watchdog_tripped = True
