@@ -119,6 +119,7 @@ interface VisionTelemetrySource {
   latErrM: number;
   headErrRad: number;
   rowEndConf: number;
+  distToFurrowEndM: number;
   rowIdx: number;
   phase: MissionPhase;
   cmdWz: number;
@@ -216,6 +217,8 @@ function useVisionNodeTelemetry(
           0.02,
           Math.min(0.36, 0.27 * (1 - src.rowEndConf * 0.35) + Math.cos(t * 1.9) * 0.008)
         );
+        const distJitter = Math.sin(t * 3.1) * 0.014 + (Math.random() - 0.5) * 0.012;
+        const projectedDistM = Math.max(0.18, src.distToFurrowEndM + distJitter);
 
         setAlignment({
           trackingLocked: true,
@@ -225,6 +228,7 @@ function useVisionNodeTelemetry(
           rawHeadingErrorRad: rawYawRad,
           rowWidthM,
           rowEndConfidence: src.rowEndConf,
+          distanceToFurrowEndM: projectedDistM,
           greenRatioFar: simGreenFar,
           greenRatioNear: simGreenNear,
           missedFrames: 0,
@@ -243,6 +247,7 @@ function useVisionNodeTelemetry(
           rawHeadingErrorRad: tr.trackedYawRad,
           rowWidthM,
           rowEndConfidence: src.rowEndConf,
+          distanceToFurrowEndM: Math.max(0.18, src.distToFurrowEndM),
           greenRatioFar: 0.005,
           greenRatioNear: 0.012,
           missedFrames: tr.missedFrames,
@@ -334,6 +339,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     latErrM: 0.05,
     headErrRad: 0.06,
     rowEndConf: 0,
+    distToFurrowEndM: FIELD_LEN_M - 0.25,
     slipResidualCm: 0.6,
     collisionState: 'CLEAR' as 'CLEAR' | 'SLOWDOWN' | 'STOP' | 'SENSOR_FAULT',
     cmdVx: 0.18,
@@ -443,11 +449,15 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     (align: VisionAlignmentData): RowEndVisionInput => {
       const s = simRef.current;
       const isLiveCamera = cameraFeedState.active || liveVisionState.active;
+      const fallbackDistM = Math.max(0.22, 1.8 * (1 - align.rowEndConfidence));
       return {
         rowEndConfidence: align.rowEndConfidence,
+        distanceToFurrowEndM: align.distanceToFurrowEndM ?? fallbackDistM,
+        furrowEndYPx: align.furrowEndYPx,
         greenRatioFar:
           align.greenRatioFar ?? Math.max(0.004, 0.2 * (1 - align.rowEndConfidence)),
         greenRatioNear: align.greenRatioNear ?? 0.22,
+        roverSpeedMps: Math.abs(s.cmdVx),
         trackingLocked: align.trackingLocked,
         missedFrames: align.missedFrames,
         currentRow: s.rowIdx + 1,
@@ -474,9 +484,9 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         s.phase = 'MISSION_COMPLETE';
         s.cmdVx = 0;
         s.cmdWz = 0;
-        setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+        setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete(true));
         onLogEvent(
-          `[row_end_detection] Final row (Row ${NUM_ROWS}) complete (${triggerOrigin}) — rover halted cleanly at headland.`
+          `[row_end_detection] State transition ROW_END_STOP → MISSION_COMPLETE (${triggerOrigin}) — Row ${NUM_ROWS} finished cleanly.`
         );
         return;
       }
@@ -497,9 +507,9 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       s.turnWpIdx = 0;
       s.phase = 'NAV2_HEADLAND_TURN';
       setRunning(true);
-      setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart());
+      setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart(triggerOrigin));
       onLogEvent(
-        `[row_end_detection] Dispatched Nav2 Headland U-Turn (${triggerOrigin}): Row ${s.rowIdx + 1} → Row ${nextRowIdx + 1} (${s.dir > 0 ? 'RIGHT_U_TURN' : 'LEFT_U_TURN'}).`
+        `[row_end_detection] State transition ROW_END_STOP → NAV2_HEADLAND_TURN (${triggerOrigin}): Row ${s.rowIdx + 1} → Row ${nextRowIdx + 1} (${s.dir > 0 ? 'RIGHT_U_TURN' : 'LEFT_U_TURN'}).`
       );
     },
     [onLogEvent]
@@ -519,9 +529,9 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
 
     if (newlyTriggeredAlert) {
       onLogEvent(
-        `[row_end_detection] TURN ALERT ${newlyTriggeredAlert.id}: Row ${newlyTriggeredAlert.row} end detected (${Math.round(
-          newlyTriggeredAlert.confidence * 100
-        )}% conf, Far-ROI ${newlyTriggeredAlert.farGreenPct.toFixed(1)}% green) → ${formatTurnLabel(
+        `[row_end_detection] TURN ALERT ${newlyTriggeredAlert.id} (FOLLOW_CROP_ROW → ROW_END_STOP): Furrow end at ${newlyTriggeredAlert.distanceToFurrowEndM.toFixed(
+          2
+        )} m (${Math.round(newlyTriggeredAlert.confidence * 100)}% conf) → ${formatTurnLabel(
           newlyTriggeredAlert.recommendedTurn
         )}.`
       );
@@ -607,7 +617,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       s.rowProgress = [0, 0, 0, 0];
     }
     const targetY = rowCenterY(s.rowIdx, rw);
-    s.x = s.dir > 0 ? ROW_END_X - 0.88 : ROW_START_X + 0.88;
+    s.x = s.dir > 0 ? ROW_END_X - 1.15 : ROW_START_X + 1.15;
     s.y = targetY;
     s.yaw = s.dir > 0 ? 0 : Math.PI;
     s.rawX = s.x;
@@ -615,11 +625,12 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     s.rawYaw = s.yaw;
     s.phase = 'FOLLOW_CROP_ROW';
     s.turnWaypoints = [];
-    s.rowEndConf = 0.12;
+    s.rowEndConf = 0.08;
+    s.distToFurrowEndM = 1.15;
     setRowEndSnapshot(rowEndServiceRef.current.reset());
     setRunning(true);
     onLogEvent(
-      `[row_end_detection] Positioned rover 0.88 m from Row ${s.rowIdx + 1} headland to test live vision row-end detection & turn alert.`
+      `[row_end_detection] Positioned rover 1.15 m from Row ${s.rowIdx + 1} furrow end to test real-time distance projection & turn state transition.`
     );
   }, [estopActive, faultReason, sensorFaultInjected, rowWidthCm, onLogEvent]);
 
@@ -654,6 +665,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       latErrM: 0.05,
       headErrRad: 0.06,
       rowEndConf: 0,
+      distToFurrowEndM: FIELD_LEN_M - 0.25,
       slipResidualCm: 0.6,
       collisionState: 'CLEAR',
       cmdVx: speedLimit,
@@ -888,6 +900,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         s.headErrRad = headErr;
 
         const distToEnd = s.dir > 0 ? ROW_END_X - s.x : s.x - ROW_START_X;
+        s.distToFurrowEndM = Math.max(0.15, distToEnd);
         s.rowEndConf = Math.max(0, Math.min(1, 1 - (distToEnd - 0.15) / 0.85));
 
         let vx = 0;
@@ -956,7 +969,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             if (s.phaseTimer <= 0) {
               if (s.rowIdx >= NUM_ROWS - 1) {
                 s.phase = 'MISSION_COMPLETE';
-                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete(true));
               } else {
                 const nextRowIdx = s.rowIdx + 1;
                 const yFrom = rowCenterY(s.rowIdx, rw);
@@ -971,7 +984,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                 ];
                 s.turnWpIdx = 0;
                 s.phase = 'NAV2_HEADLAND_TURN';
-                setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart());
+                setRowEndSnapshot(rowEndServiceRef.current.acknowledgeTurnStart('auto'));
               }
             }
           }
@@ -981,7 +994,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             s.rowIdx += 1;
             s.dir *= -1;
             s.phase = 'FOLLOW_CROP_ROW';
-            setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+            setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete(false));
           } else {
             const dx = wp.x - s.x;
             const dy = wp.y - s.y;
@@ -992,7 +1005,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                 s.rowIdx += 1;
                 s.dir *= -1;
                 s.phase = 'FOLLOW_CROP_ROW';
-                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete());
+                setRowEndSnapshot(rowEndServiceRef.current.notifyTurnComplete(false));
               }
             } else {
               const desiredYaw = Math.atan2(dy, dx);
@@ -1365,6 +1378,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
           <RowEndDetectionPanel
             snapshot={rowEndSnapshot}
             config={rowEndConfig}
+            currentMissionPhase={telemetry.phase}
             estopActive={estopActive}
             isFaulted={isFaulted}
             onUpdateConfig={handleUpdateRowEndConfig}
@@ -1906,6 +1920,24 @@ function drawForwardCamCanvas(
     ctx.moveTo(W / 2, H - 22);
     ctx.lineTo(botCenterX, H - 22);
     ctx.stroke();
+
+    // Furrow-end distance horizon line & ground-projected distance label
+    if (typeof s.distToFurrowEndM === 'number' && s.distToFurrowEndM < 2.2) {
+      ctx.strokeStyle = s.distToFurrowEndM <= 0.6 ? '#F59E0B' : '#34D399';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, farCutoffY);
+      ctx.lineTo(W, farCutoffY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = s.distToFurrowEndM <= 0.6 ? 'rgba(217, 119, 6, 0.9)' : 'rgba(5, 150, 105, 0.85)';
+      ctx.fillRect(W - 122, farCutoffY - 14, 116, 13);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '600 9px "IBM Plex Mono", monospace';
+      ctx.fillText(`FURROW END ${s.distToFurrowEndM.toFixed(2)}m`, W - 118, farCutoffY - 5);
+    }
   } else {
     ctx.fillStyle = '#E2E8F0';
     ctx.font = '11px "IBM Plex Mono", monospace';

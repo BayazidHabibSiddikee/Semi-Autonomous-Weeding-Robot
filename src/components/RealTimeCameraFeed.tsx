@@ -57,6 +57,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     lateralOffsetM: 0,
     headingErrorRad: 0,
     rowEndConfidence: 0,
+    distanceToFurrowEndM: 2.0,
     greenRatioNear: 0,
     greenRatioFar: 0,
     trackingLocked: false,
@@ -145,6 +146,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
         lateralOffsetM: 0,
         headingErrorRad: 0,
         rowEndConfidence: 0,
+        distanceToFurrowEndM: 2.0,
         greenRatioNear: 0,
         greenRatioFar: 0,
         trackingLocked: false,
@@ -160,6 +162,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
           rawHeadingErrorRad: 0,
           rowWidthM: paramsRef.current.rowWidthM,
           rowEndConfidence: 0,
+          distanceToFurrowEndM: 2.0,
           greenRatioFar: 0,
           greenRatioNear: 0,
           missedFrames: 0,
@@ -377,16 +380,33 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
                 hCtx.stroke();
                 hCtx.setLineDash([]);
 
-                if (observation.rowEndConfidence >= 0.78) {
+                if (observation.rowEndConfidence >= 0.78 || observation.distanceToFurrowEndM <= 0.6) {
                   hCtx.fillStyle = 'rgba(217, 119, 6, 0.9)';
-                  hCtx.fillRect(6, observation.roiTopPx + 4, 152, 16);
+                  hCtx.fillRect(6, observation.roiTopPx + 4, 178, 16);
                   hCtx.fillStyle = '#FFFFFF';
                   hCtx.font = '600 9px "IBM Plex Mono", monospace';
                   hCtx.fillText(
-                    `ROW-END ${Math.round(observation.rowEndConfidence * 100)}% · TURN ALERT`,
+                    `FURROW END ${observation.distanceToFurrowEndM.toFixed(2)}m · TURN ALERT`,
                     10,
                     observation.roiTopPx + 15
                   );
+                }
+
+                // Furrow-end ground-projected horizon line
+                if (observation.distanceToFurrowEndM < 1.55) {
+                  const hy = Math.max(
+                    observation.roiTopPx + 2,
+                    Math.min(observation.roiBottomPx - 4, observation.furrowEndYPx)
+                  );
+                  hCtx.strokeStyle =
+                    observation.distanceToFurrowEndM <= 0.6 ? '#F59E0B' : '#34D399';
+                  hCtx.lineWidth = 1.6;
+                  hCtx.setLineDash([5, 3]);
+                  hCtx.beginPath();
+                  hCtx.moveTo(0, hy);
+                  hCtx.lineTo(PROC_W, hy);
+                  hCtx.stroke();
+                  hCtx.setLineDash([]);
                 }
 
                 // Optical center axis
@@ -456,6 +476,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
               lateralOffsetM: tr.latM,
               headingErrorRad: tr.yawRad,
               rowEndConfidence: observation.rowEndConfidence,
+              distanceToFurrowEndM: observation.distanceToFurrowEndM,
               greenRatioNear: observation.greenRatioNear,
               greenRatioFar: observation.greenRatioFar,
               trackingLocked: locked,
@@ -471,6 +492,8 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
                 rawHeadingErrorRad: observation.valid ? observation.headingErrorRad : tr.yawRad,
                 rowWidthM: p.rowWidthM,
                 rowEndConfidence: observation.rowEndConfidence,
+                distanceToFurrowEndM: observation.distanceToFurrowEndM,
+                furrowEndYPx: observation.furrowEndYPx,
                 greenRatioFar: observation.greenRatioFar,
                 greenRatioNear: observation.greenRatioNear,
                 missedFrames: tr.missedFrames,
@@ -767,6 +790,20 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
                 {status === 'active'
                   ? `${telemetry.headingErrorRad >= 0 ? '+' : ''}${telemetry.headingErrorRad.toFixed(3)} rad`
                   : '—'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-600">Distance to Furrow End</span>
+              <span
+                className={
+                  status !== 'active'
+                    ? 'text-slate-400'
+                    : telemetry.distanceToFurrowEndM <= 0.6
+                    ? 'text-amber-700 font-semibold'
+                    : 'text-emerald-700 font-semibold'
+                }
+              >
+                {status === 'active' ? `${telemetry.distanceToFurrowEndM.toFixed(2)} m` : '—'}
               </span>
             </div>
             <div className="flex justify-between">

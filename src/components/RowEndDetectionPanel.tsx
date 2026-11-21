@@ -11,8 +11,11 @@ import {
   FastForward,
   Power,
   Activity,
+  ArrowRight,
+  Ruler,
 } from 'lucide-react';
 import {
+  NavTurnState,
   RowEndDetectionConfig,
   RowEndDetectionSnapshot,
   formatTurnLabel,
@@ -21,6 +24,7 @@ import {
 interface Props {
   snapshot: RowEndDetectionSnapshot;
   config: RowEndDetectionConfig;
+  currentMissionPhase: string;
   estopActive: boolean;
   isFaulted: boolean;
   onUpdateConfig: (patch: Partial<RowEndDetectionConfig>) => void;
@@ -30,9 +34,18 @@ interface Props {
   onJumpToRowEndTest: () => void;
 }
 
+const MAX_DISPLAY_DIST_M = 2.4;
+
+const STATE_PIPELINE: Array<{ id: NavTurnState; label: string }> = [
+  { id: 'FOLLOW_CROP_ROW', label: 'FOLLOW_CROP_ROW' },
+  { id: 'ROW_END_STOP', label: 'ROW_END_STOP' },
+  { id: 'NAV2_HEADLAND_TURN', label: 'NAV2_HEADLAND_TURN' },
+];
+
 export const RowEndDetectionPanel: React.FC<Props> = ({
   snapshot,
   config,
+  currentMissionPhase,
   estopActive,
   isFaulted,
   onUpdateConfig,
@@ -43,6 +56,9 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
 }) => {
   const {
     state,
+    distanceToFurrowEndM,
+    rawDistanceToFurrowEndM,
+    etaSeconds,
     confidence,
     farGreenPct,
     nearGreenPct,
@@ -54,12 +70,22 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
     sourceLabel,
     cooldownRemainingMs,
     activeAlert,
-    alertHistory,
+    stateTransitions,
     lastServiceResponse,
   } = snapshot;
 
   const confPct = Math.round(confidence * 100);
   const threshPct = Math.round(config.confidenceThreshold * 100);
+
+  // Calibrated proximity bar: 0% = far (>2.4 m), 100% = at furrow end (0.0 m)
+  const clampedDistM = Math.max(0, Math.min(MAX_DISPLAY_DIST_M, distanceToFurrowEndM));
+  const proximityFillPct = Math.round(((MAX_DISPLAY_DIST_M - clampedDistM) / MAX_DISPLAY_DIST_M) * 100);
+  const triggerLinePct = Math.round(
+    ((MAX_DISPLAY_DIST_M - Math.min(MAX_DISPLAY_DIST_M, config.triggerDistanceM)) /
+      MAX_DISPLAY_DIST_M) *
+      100
+  );
+  const withinTriggerDist = distanceToFurrowEndM <= config.triggerDistanceM;
 
   const stateDisplay =
     state === 'ROW_END_DETECTED'
@@ -111,9 +137,9 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
                 <span className="text-xs font-mono font-bold tracking-wide uppercase">
                   {activeAlert.status === 'PENDING_TURN'
                     ? activeAlert.recommendedTurn === 'FINAL_ROW_STOP'
-                      ? 'ROW END DETECTED — FINAL ROW COMPLETE'
-                      : 'ROW END DETECTED — TURN EXECUTION ALERT'
-                    : 'HEADLAND U-TURN EXECUTING (NAV2)'}
+                      ? 'FURROW END REACHED — FINAL ROW COMPLETE'
+                      : 'FURROW END DETECTED — STATE TRANSITION TO TURN EXECUTION'
+                    : 'STATE TRANSITION ACTIVE — NAV2 HEADLAND TURN EXECUTING'}
                 </span>
                 <span className="text-[11px] font-mono opacity-80 tabular-nums">
                   {activeAlert.id} · {activeAlert.triggeredAt}
@@ -127,9 +153,9 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
                   : `Row ${activeAlert.row} finished · Safe headland stop ready`}
               </div>
               <div className="text-[11px] font-mono opacity-80 tabular-nums">
-                Vision Conf: {Math.round(activeAlert.confidence * 100)}% · Far-ROI Green:{' '}
-                {activeAlert.farGreenPct.toFixed(1)}% · Near-ROI: {activeAlert.nearGreenPct.toFixed(1)}% ·{' '}
-                {activeAlert.sourceLabel}
+                Furrow End Dist: {activeAlert.distanceToFurrowEndM.toFixed(2)} m · Vision Conf:{' '}
+                {Math.round(activeAlert.confidence * 100)}% · Far-ROI Green:{' '}
+                {activeAlert.farGreenPct.toFixed(1)}% · {activeAlert.sourceLabel}
               </div>
             </div>
           </div>
@@ -177,7 +203,7 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
             </h3>
           </div>
           <span className="text-xs font-mono text-slate-500">
-            /navigation/row_end_detection · Far-ROI ExG Depletion + Debounce
+            /navigation/row_end_detection · Real-Time Video Furrow-End Distance &amp; Turn Transition
           </span>
         </div>
 
@@ -219,126 +245,163 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
 
       {/* Main 12-Column Diagnostics & Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-        {/* Left: Live Vision Row-End Metrics */}
+        {/* Left: Real-Time Distance to Furrow End + State Machine Pipeline */}
         <div className="lg:col-span-7 space-y-3.5">
-          {/* Confidence Bar with Threshold Marker */}
-          <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3 space-y-2">
-            <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-              <span className="text-slate-700 font-medium">
-                Row-End Confidence (Trigger ≥ {threshPct}%)
-              </span>
-              <span
-                className={`font-semibold ${
-                  confPct >= threshPct
-                    ? 'text-amber-700'
-                    : confPct >= threshPct - 20
-                    ? 'text-amber-600'
-                    : 'text-emerald-700'
-                }`}
-              >
-                {confPct}% · Confirm {confirmCount}/{confirmRequired} frames
-              </span>
+          {/* Primary Vision-Calculated Furrow-End Distance Card */}
+          <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3.5 space-y-2.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Ruler className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="text-xs font-semibold text-slate-800">
+                  Distance to Furrow End (Video Ground-Plane Projection)
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2 font-mono tabular-nums">
+                <span
+                  className={`text-xl font-bold ${
+                    withinTriggerDist
+                      ? 'text-amber-700'
+                      : distanceToFurrowEndM <= config.triggerDistanceM * 2
+                      ? 'text-amber-600'
+                      : 'text-emerald-700'
+                  }`}
+                >
+                  {distanceToFurrowEndM >= 4.0 ? '>4.00' : distanceToFurrowEndM.toFixed(2)} m
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {etaSeconds !== null ? `ETA ${etaSeconds.toFixed(1)}s` : 'STOPPED'} · Raw{' '}
+                  {rawDistanceToFurrowEndM >= 4.0 ? '>4.0' : rawDistanceToFurrowEndM.toFixed(2)}m
+                </span>
+              </div>
             </div>
 
-            <div className="relative h-4 rounded bg-[#EDF5F0] border border-emerald-900/15 overflow-hidden">
-              <div
-                className={`h-full transition-all duration-100 ${
-                  confPct >= threshPct
-                    ? 'bg-amber-500'
-                    : confPct >= threshPct - 20
-                    ? 'bg-amber-400/80'
-                    : 'bg-emerald-600'
-                }`}
-                style={{ width: `${Math.max(2, confPct)}%` }}
-              />
-              {/* Threshold tick line */}
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-slate-900"
-                style={{ left: `${threshPct}%` }}
-                title={`Trigger threshold: ${threshPct}%`}
-              />
+            {/* Calibrated Furrow-End Approach Gauge (2.4m -> 0.0m) */}
+            <div className="space-y-1">
+              <div className="relative h-4 rounded bg-[#EDF5F0] border border-emerald-900/15 overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-100 ${
+                    withinTriggerDist
+                      ? 'bg-amber-500'
+                      : distanceToFurrowEndM <= config.triggerDistanceM * 2
+                      ? 'bg-amber-400/80'
+                      : 'bg-emerald-600'
+                  }`}
+                  style={{ width: `${Math.max(3, proximityFillPct)}%` }}
+                />
+                {/* Trigger Distance Marker */}
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-slate-900"
+                  style={{ left: `${triggerLinePct}%` }}
+                  title={`Turn transition trigger: ≤ ${config.triggerDistanceM.toFixed(2)} m`}
+                />
+              </div>
+              <div className="flex justify-between text-[10px] font-mono text-slate-500 tabular-nums">
+                <span>2.40 m (In Row)</span>
+                <span className="text-slate-700 font-semibold">
+                  Trigger ≤ {config.triggerDistanceM.toFixed(2)} m · Debounce {confirmCount}/
+                  {confirmRequired} fr
+                </span>
+                <span>0.00 m (Headland)</span>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-500 tabular-nums">
-              <span>Source: {sourceLabel}</span>
-              <span>
-                Queued Maneuver:{' '}
-                <strong className="text-slate-800">
-                  {nextRow !== null ? `Row ${currentRow}→${nextRow} (${recommendedTurn})` : 'FINAL_ROW_STOP'}
-                </strong>
-              </span>
+            {/* Secondary Confidence + Far/Near Foliage Inline Telemetry */}
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-emerald-900/10 text-[11px] font-mono tabular-nums">
+              <div>
+                <div className="text-slate-500">Row-End Conf</div>
+                <div
+                  className={`font-semibold ${
+                    confPct >= threshPct ? 'text-amber-700' : 'text-emerald-700'
+                  }`}
+                >
+                  {confPct}% (≥{threshPct}%)
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Far-ROI Foliage</div>
+                <div
+                  className={`font-semibold ${
+                    farGreenPct <= config.farGreenCutoff * 100
+                      ? 'text-amber-700'
+                      : 'text-emerald-700'
+                  }`}
+                >
+                  {farGreenPct.toFixed(1)}% green
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Near-ROI Foliage</div>
+                <div className="font-semibold text-emerald-700">{nearGreenPct.toFixed(1)}% green</div>
+              </div>
             </div>
           </div>
 
-          {/* Far-ROI vs Near-ROI Foliage Density Breakdown */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3 space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-                <span className="text-slate-600">Far-ROI Foliage (Top 1/3)</span>
-                <span
-                  className={
-                    farGreenPct <= config.farGreenCutoff * 100
-                      ? 'text-amber-700 font-semibold'
-                      : 'text-emerald-700 font-semibold'
-                  }
-                >
-                  {farGreenPct.toFixed(1)}%
-                </span>
-              </div>
-              <div className="h-2.5 rounded bg-[#EDF5F0] overflow-hidden">
-                <div
-                  className={`h-full transition-all duration-100 ${
-                    farGreenPct <= config.farGreenCutoff * 100 ? 'bg-amber-500' : 'bg-emerald-600'
-                  }`}
-                  style={{ width: `${Math.min(100, farGreenPct * 3)}%` }}
-                />
-              </div>
-              <div className="text-[10px] font-mono text-slate-500">
-                Headland cutoff ≤ {(config.farGreenCutoff * 100).toFixed(1)}% ExG green
-              </div>
+          {/* State Transition Pipeline */}
+          <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+              <span className="text-slate-700 font-semibold">
+                Turn Execution State Transition Pipeline
+              </span>
+              <span className="text-slate-500 tabular-nums">
+                Queued:{' '}
+                <strong className="text-slate-800">
+                  {nextRow !== null
+                    ? `Row ${currentRow}→${nextRow} (${recommendedTurn})`
+                    : 'FINAL_ROW_STOP'}
+                </strong>
+              </span>
             </div>
-
-            <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3 space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-                <span className="text-slate-600">Near-ROI Foliage (Bottom 1/2)</span>
-                <span className="text-emerald-700 font-semibold">{nearGreenPct.toFixed(1)}%</span>
-              </div>
-              <div className="h-2.5 rounded bg-[#EDF5F0] overflow-hidden">
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-100"
-                  style={{ width: `${Math.min(100, nearGreenPct * 3)}%` }}
-                />
-              </div>
-              <div className="text-[10px] font-mono text-slate-500">
-                Baseline canopy reference for far-drop ratio
-              </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {STATE_PIPELINE.map((step, idx) => {
+                const isCurrent = currentMissionPhase === step.id;
+                return (
+                  <React.Fragment key={step.id}>
+                    <div
+                      className={`px-2.5 py-1 rounded border text-[11px] font-mono transition-colors ${
+                        isCurrent
+                          ? step.id === 'ROW_END_STOP'
+                            ? 'bg-amber-50 border-amber-400 text-amber-900 font-semibold'
+                            : 'bg-emerald-50 border-emerald-500 text-emerald-900 font-semibold'
+                          : 'bg-white border-emerald-900/10 text-slate-500'
+                      }`}
+                    >
+                      {step.label}
+                    </div>
+                    {idx < STATE_PIPELINE.length - 1 && (
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 truncate">
+              Vision Source: {sourceLabel}
             </div>
           </div>
 
           {/* Last Manual Service Call Response */}
           {lastServiceResponse && (
-            <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md px-3 py-2 text-[11px] font-mono text-slate-600 flex flex-wrap items-center justify-between gap-2 tabular-nums">
-              <span>
-                Last RPC ({lastServiceResponse.timestamp}):{' '}
-                <strong
-                  className={
-                    lastServiceResponse.rowEndDetected ? 'text-amber-700' : 'text-emerald-700'
-                  }
-                >
-                  row_end_detected={String(lastServiceResponse.rowEndDetected)}
-                </strong>{' '}
-                · {lastServiceResponse.reason}
-              </span>
+            <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md px-3 py-2 text-[11px] font-mono text-slate-600 tabular-nums">
+              Last RPC ({lastServiceResponse.timestamp}):{' '}
+              <strong
+                className={
+                  lastServiceResponse.rowEndDetected ? 'text-amber-700' : 'text-emerald-700'
+                }
+              >
+                row_end_detected={String(lastServiceResponse.rowEndDetected)}
+              </strong>{' '}
+              · dist={lastServiceResponse.distanceToFurrowEndM.toFixed(2)}m ·{' '}
+              {lastServiceResponse.reason}
             </div>
           )}
         </div>
 
-        {/* Right: Service Configuration & Actions */}
+        {/* Right: Service Configuration, Actions & State Transition Log */}
         <div className="lg:col-span-5 bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-3.5 flex flex-col justify-between gap-3.5">
           <div className="space-y-3">
             {/* Turn Dispatch Mode */}
             <div className="space-y-1.5">
-              <div className="text-xs font-medium text-slate-700">Turn Dispatch Policy</div>
+              <div className="text-xs font-medium text-slate-700">Turn Transition Policy</div>
               <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-[#EDF5F0] border border-emerald-900/10 rounded-md">
                 <button
                   onClick={() => onUpdateConfig({ turnDispatchMode: 'alert_and_confirm' })}
@@ -363,42 +426,64 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* Trigger Threshold & Debounce Sliders */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* Trigger Distance, Confidence & Debounce Sliders */}
+            <div className="space-y-2">
               <div className="space-y-1">
                 <div className="flex justify-between text-[11px] font-mono text-slate-600 tabular-nums">
-                  <span>Conf Thresh</span>
-                  <span className="text-emerald-700 font-semibold">{threshPct}%</span>
+                  <span>Trigger Distance to Furrow End</span>
+                  <span className="text-emerald-700 font-semibold">
+                    ≤ {config.triggerDistanceM.toFixed(2)} m
+                  </span>
                 </div>
                 <input
                   type="range"
-                  min={0.55}
-                  max={0.95}
-                  step={0.01}
-                  value={config.confidenceThreshold}
+                  min={0.25}
+                  max={1.3}
+                  step={0.05}
+                  value={config.triggerDistanceM}
                   onChange={(e) =>
-                    onUpdateConfig({ confidenceThreshold: parseFloat(e.target.value) })
+                    onUpdateConfig({ triggerDistanceM: parseFloat(e.target.value) })
                   }
                   className="w-full accent-emerald-600 cursor-pointer"
                 />
               </div>
 
-              <div className="space-y-1">
-                <div className="flex justify-between text-[11px] font-mono text-slate-600 tabular-nums">
-                  <span>Debounce</span>
-                  <span className="text-emerald-700 font-semibold">{config.confirmFrames} fr</span>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] font-mono text-slate-600 tabular-nums">
+                    <span>Conf Thresh</span>
+                    <span className="text-emerald-700 font-semibold">{threshPct}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.55}
+                    max={0.95}
+                    step={0.01}
+                    value={config.confidenceThreshold}
+                    onChange={(e) =>
+                      onUpdateConfig({ confidenceThreshold: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
                 </div>
-                <input
-                  type="range"
-                  min={2}
-                  max={10}
-                  step={1}
-                  value={config.confirmFrames}
-                  onChange={(e) =>
-                    onUpdateConfig({ confirmFrames: parseInt(e.target.value, 10) })
-                  }
-                  className="w-full accent-emerald-600 cursor-pointer"
-                />
+
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] font-mono text-slate-600 tabular-nums">
+                    <span>Debounce</span>
+                    <span className="text-emerald-700 font-semibold">{config.confirmFrames} fr</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={2}
+                    max={10}
+                    step={1}
+                    value={config.confirmFrames}
+                    onChange={(e) =>
+                      onUpdateConfig({ confirmFrames: parseInt(e.target.value, 10) })
+                    }
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
+                </div>
               </div>
             </div>
 
@@ -417,43 +502,43 @@ export const RowEndDetectionPanel: React.FC<Props> = ({
                 className="px-2.5 py-1.5 text-xs font-medium rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-45 text-emerald-900 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
                 <FastForward className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                <span>Test Row-End</span>
+                <span>Test Furrow-End</span>
               </button>
             </div>
           </div>
 
-          {/* Recent Turn Alert Audit Strip */}
+          {/* Recent State Transitions Log */}
           <div className="pt-2.5 border-t border-emerald-900/10 space-y-1.5">
             <div className="flex items-center justify-between text-[11px] font-mono text-slate-500">
-              <span>Recent Turn Alerts</span>
-              <span className="tabular-nums">{alertHistory.length} logged</span>
+              <span>State Transitions (Turn Execution)</span>
+              <span className="tabular-nums">{stateTransitions.length} logged</span>
             </div>
-            {alertHistory.length === 0 ? (
+            {stateTransitions.length === 0 ? (
               <div className="text-[11px] font-mono text-slate-400">
-                No row-end alerts triggered yet. Drive to headland or click Test Row-End.
+                Awaiting furrow-end approach (≤ {config.triggerDistanceM.toFixed(2)} m) or click
+                Test Furrow-End.
               </div>
             ) : (
-              <div className="space-y-1 max-h-20 overflow-y-auto">
-                {alertHistory.slice(0, 3).map((item) => (
+              <div className="space-y-1 max-h-24 overflow-y-auto">
+                {stateTransitions.slice(0, 4).map((tr) => (
                   <div
-                    key={item.id}
+                    key={tr.id}
                     className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums text-slate-600 bg-white border border-emerald-900/10 rounded px-2 py-1"
                   >
                     <span className="truncate">
-                      {item.triggeredAt} · R{item.row}
-                      {item.nextRow ? `→R${item.nextRow}` : ' END'} ·{' '}
-                      {Math.round(item.confidence * 100)}%
+                      {tr.timestamp} · {tr.fromState.replace('FOLLOW_CROP_ROW', 'FOLLOW')}→
+                      <strong
+                        className={
+                          tr.toState === 'ROW_END_STOP'
+                            ? 'text-amber-700'
+                            : 'text-emerald-700'
+                        }
+                      >
+                        {tr.toState}
+                      </strong>
                     </span>
-                    <span
-                      className={`font-semibold shrink-0 ${
-                        item.status === 'PENDING_TURN'
-                          ? 'text-amber-700'
-                          : item.status === 'EXECUTING' || item.status === 'COMPLETED'
-                          ? 'text-emerald-700'
-                          : 'text-slate-500'
-                      }`}
-                    >
-                      {item.status}
+                    <span className="text-slate-500 shrink-0">
+                      {tr.distanceToFurrowEndM.toFixed(2)}m
                     </span>
                   </div>
                 ))}

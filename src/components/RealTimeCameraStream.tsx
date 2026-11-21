@@ -690,6 +690,8 @@ export const RealTimeCameraStream: React.FC<Props> = ({
             rawHeadingErrorRad: observation.valid ? observation.headingErrorRad : tr.yawRad,
             rowWidthM: p.rowWidthM,
             rowEndConfidence: observation.rowEndConfidence,
+            distanceToFurrowEndM: observation.distanceToFurrowEndM,
+            furrowEndYPx: observation.furrowEndYPx,
             greenRatioFar: observation.greenRatioFar,
             greenRatioNear: observation.greenRatioNear,
             missedFrames: tr.missedFrames,

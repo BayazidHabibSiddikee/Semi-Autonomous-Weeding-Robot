@@ -20,6 +20,8 @@ export interface RealRowObservation {
   lateralErrorM: number; // +ve = rover shifted right of centerline
   headingErrorRad: number; // +ve = rover pointed right of row tangent
   rowEndConfidence: number; // 0..1
+  furrowEndYPx: number; // Image Y coordinate of topmost sustained crop foliage (px)
+  distanceToFurrowEndM: number; // Pinhole ground-plane projected distance to furrow end (m)
   leftRowXPx: number;
   rightRowXPx: number;
   centerBottomPx: number;
@@ -31,6 +33,29 @@ export interface RealRowObservation {
   roiTopPx: number;
   roiBottomPx: number;
   processingMs: number;
+}
+
+/**
+ * Monocular pinhole ground-plane projection: converts an image row coordinate yPx
+ * from a forward-pitched rover camera into forward distance along the furrow (meters).
+ * Default intrinsics match the rover's 25-degree pitched forward nav camera (H = 0.42 m, vFOV = 54 deg).
+ */
+export function projectImageRowToGroundDistanceM(
+  yPx: number,
+  imageHeight: number,
+  cameraHeightM = 0.42,
+  pitchRad = (25 * Math.PI) / 180,
+  vFovRad = (54 * Math.PI) / 180
+): number {
+  const cy = imageHeight * 0.5;
+  const fy = cy / Math.tan(vFovRad * 0.5);
+  const alpha = Math.atan2(yPx - cy, fy);
+  const depressionRad = pitchRad + alpha;
+  if (depressionRad <= 0.06) {
+    return 4.5;
+  }
+  const zM = cameraHeightM / Math.tan(depressionRad);
+  return Math.max(0.2, Math.min(4.5, zM));
 }
 
 export interface RealVisionTrackerState {
@@ -300,6 +325,42 @@ export function detectCropRowFromFrame(
   const greenFar = farGreen / Math.max(1, farEndRow * roiW);
   const greenNear = nearGreen / Math.max(1, (roiH - nearStartRow) * roiW);
 
+  // Locate topmost sustained foliage band inside ROI to project physical distance to furrow end
+  const scanBands = 12;
+  const scanBandH = Math.max(1, Math.floor(roiH / scanBands));
+  let furrowEndRoiY = roiH;
+  let consecutiveGreenBands = 0;
+  for (let b = 0; b < scanBands; b++) {
+    const by0 = b * scanBandH;
+    const by1 = Math.min(roiH, (b + 1) * scanBandH);
+    let bandGreen = 0;
+    const bandTotal = Math.max(1, (by1 - by0) * roiW);
+    for (let y = by0; y < by1; y++) {
+      const rowOff = y * roiW;
+      for (let x = 0; x < roiW; x++) {
+        if (mask[rowOff + x]) bandGreen++;
+      }
+    }
+    if (bandGreen / bandTotal >= Math.max(minGreenRatio * 0.9, 0.018)) {
+      consecutiveGreenBands += 1;
+      if (consecutiveGreenBands === 1) {
+        furrowEndRoiY = by0;
+      }
+      if (consecutiveGreenBands >= 2) {
+        break;
+      }
+    } else {
+      consecutiveGreenBands = 0;
+      furrowEndRoiY = roiH;
+    }
+  }
+
+  const furrowEndYPx = Math.min(roiBottomPx, roiTopPx + furrowEndRoiY);
+  const distanceToFurrowEndM =
+    furrowEndRoiY >= roiH
+      ? 0.22
+      : projectImageRowToGroundDistanceM(furrowEndYPx, height);
+
   if (greenNear < minGreenRatio && greenFar < minGreenRatio) {
     return {
       observation: {
@@ -308,6 +369,8 @@ export function detectCropRowFromFrame(
         lateralErrorM: 0,
         headingErrorRad: 0,
         rowEndConfidence: 1.0,
+        furrowEndYPx: roiBottomPx,
+        distanceToFurrowEndM: 0.22,
         leftRowXPx: width * 0.25,
         rightRowXPx: width * 0.75,
         centerBottomPx: midX,
@@ -426,6 +489,8 @@ export function detectCropRowFromFrame(
         lateralErrorM: 0,
         headingErrorRad: 0,
         rowEndConfidence: rowEndConf,
+        furrowEndYPx,
+        distanceToFurrowEndM,
         leftRowXPx: width * 0.25,
         rightRowXPx: width * 0.75,
         centerBottomPx: midX,
@@ -465,9 +530,11 @@ export function detectCropRowFromFrame(
   );
 
   const farDrop = 1.0 - Math.min(1.0, greenFar / Math.max(greenNear, minGreenRatio));
+  const distCue =
+    distanceToFurrowEndM < 1.15 ? Math.max(0, Math.min(1, (1.15 - distanceToFurrowEndM) / 0.85)) : 0;
   const rowEndConf = Math.max(
     0,
-    Math.min(1, greenFar < minGreenRatio * 1.4 ? farDrop : 0)
+    Math.min(1, Math.max(greenFar < minGreenRatio * 1.4 ? farDrop : 0, distCue))
   );
 
   return {
@@ -477,6 +544,8 @@ export function detectCropRowFromFrame(
       lateralErrorM,
       headingErrorRad,
       rowEndConfidence: rowEndConf,
+      furrowEndYPx,
+      distanceToFurrowEndM,
       leftRowXPx: meanLeftX,
       rightRowXPx: meanRightX,
       centerBottomPx: centerBotPx,
@@ -625,6 +694,25 @@ export function renderVisionOverlay(
     ctx.moveTo(W / 2, obs.roiBottomPx - 12);
     ctx.lineTo(obs.centerBottomPx, obs.roiBottomPx - 12);
     ctx.stroke();
+
+    // Furrow-end horizon line & projected ground distance stamp
+    if (obs.distanceToFurrowEndM < 1.45) {
+      const hy = Math.max(obs.roiTopPx + 2, Math.min(obs.roiBottomPx - 4, obs.furrowEndYPx));
+      ctx.strokeStyle = obs.distanceToFurrowEndM <= 0.6 ? '#F59E0B' : '#34D399';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, hy);
+      ctx.lineTo(W, hy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = obs.distanceToFurrowEndM <= 0.6 ? 'rgba(217, 119, 6, 0.9)' : 'rgba(5, 150, 105, 0.85)';
+      ctx.fillRect(W - 118, hy - 14, 112, 13);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '600 9px "IBM Plex Mono", monospace';
+      ctx.fillText(`FURROW END ${obs.distanceToFurrowEndM.toFixed(2)}m`, W - 114, hy - 5);
+    }
   } else {
     ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
     ctx.fillRect(W / 2 - 118, H * 0.56 - 14, 236, 26);
