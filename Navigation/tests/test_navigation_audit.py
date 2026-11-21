@@ -804,14 +804,393 @@ class NavigationAuditTestSuite(unittest.TestCase):
         )
         self.assertTrue(os.path.isfile(action_def), "FollowCropRow.action interface missing")
         self.assertTrue(os.path.isfile(node_src), "row_follow_action.py missing")
+        with open(action_def, "r", encoding="utf-8") as fh:
+            action_text = fh.read()
+        self.assertIn("nearest_weed_distance_from_base_m", action_text)
+        self.assertIn("weeds_measured_count", action_text)
         with open(node_src, "r", encoding="utf-8") as fh:
             src = fh.read()
         self.assertIn("ActionServer(", src)
         self.assertIn("/follow_crop_row", src)
         self.assertIn("_goal_callback", src)
+        self.assertIn("_handle_accepted_callback", src)
         self.assertIn("_cancel_callback", src)
         self.assertIn("_execute_goal_callback", src)
+        self.assertIn("WeedBaseDistanceEstimator", src)
+        self.assertIn("base_link", src)
         self.assertIn("MultiThreadedExecutor", src)
+
+    def _load_row_follow_module(self):
+        import importlib.util
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        node_src = os.path.join(
+            repo_root, "ros2_ws", "src", "crop_row_navigation", "row_follow_action.py"
+        )
+        spec = importlib.util.spec_from_file_location("row_follow_action_mod", node_src)
+        self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_ros2_weed_base_distance_measurement_modes(self):
+        import math
+
+        mod = self._load_row_follow_module()
+        est = mod.WeedBaseDistanceEstimator(
+            camera_offset_x_m=0.22,
+            camera_offset_y_m=0.0,
+            camera_height_m=0.42,
+            camera_pitch_deg=35.0,
+            fov_h_deg=68.0,
+            fov_v_deg=52.0,
+            image_width_px=640,
+            image_height_px=480,
+        )
+
+        # 1. Flat-ground pinhole projection at image center (320, 240)
+        m_center = est.measure_weed(u_px=320, v_px=240, class_name="weed_dandelion", confidence=0.92)
+        self.assertIsNotNone(m_center)
+        expected_x = 0.22 + 0.42 / math.tan(math.radians(35.0))
+        self.assertEqual(m_center.method, "pinhole_ground")
+        self.assertAlmostEqual(m_center.x_base_m, expected_x, places=3)
+        self.assertAlmostEqual(m_center.y_base_m, 0.0, places=3)
+        self.assertAlmostEqual(
+            m_center.distance_from_base_m,
+            math.hypot(m_center.x_base_m, m_center.y_base_m),
+            places=3,
+        )
+        self.assertTrue(m_center.in_treatment_reach)
+
+        # Lower pixel (closer to rover) must yield shorter distance from base_link
+        m_near = est.measure_weed(u_px=320, v_px=390, class_name="weed_grass")
+        self.assertIsNotNone(m_near)
+        self.assertLess(m_near.distance_from_base_m, m_center.distance_from_base_m)
+
+        # Left pixel -> +Y in ROS REP-103 base_link; right pixel -> -Y
+        m_left = est.measure_weed(u_px=180, v_px=320, class_name="weed_left")
+        m_right = est.measure_weed(u_px=460, v_px=320, class_name="weed_right")
+        self.assertIsNotNone(m_left)
+        self.assertIsNotNone(m_right)
+        self.assertGreater(m_left.y_base_m, 0.0)
+        self.assertLess(m_right.y_base_m, 0.0)
+        self.assertAlmostEqual(m_left.y_base_m, -m_right.y_base_m, places=3)
+
+        # Above-horizon ray must be rejected cleanly
+        est_shallow = mod.WeedBaseDistanceEstimator(camera_pitch_deg=10.0, fov_v_deg=60.0)
+        self.assertIsNone(est_shallow.measure_weed(u_px=320, v_px=0, class_name="weed_sky"))
+
+        # 2. RGB-D ToF depth projection
+        m_depth = est.measure_weed(u_px=320, v_px=240, depth_m=0.80, class_name="weed_depth")
+        self.assertIsNotNone(m_depth)
+        self.assertEqual(m_depth.method, "rgbd_depth")
+        self.assertAlmostEqual(m_depth.x_base_m, 0.22 + 0.80 * math.cos(math.radians(35.0)), places=3)
+        self.assertAlmostEqual(m_depth.y_base_m, 0.0, places=3)
+
+        # 3. Calibrated homography (mm) + camera-to-base offset
+        est_h = mod.WeedBaseDistanceEstimator(
+            camera_offset_x_m=0.22,
+            homography_matrix=[
+                [1.0, 0.0, -320.0],   # lateral mm (right +)
+                [0.0, 1.0, 100.0],    # forward mm ahead of camera
+                [0.0, 0.0, 1.0],
+            ],
+            homography_units="mm",
+        )
+        m_hom = est_h.measure_weed(u_px=420, v_px=200, class_name="weed_homography")
+        self.assertIsNotNone(m_hom)
+        self.assertEqual(m_hom.method, "homography")
+        self.assertAlmostEqual(m_hom.x_base_m, 0.22 + 0.30, places=3)  # 0.52 m forward
+        self.assertAlmostEqual(m_hom.y_base_m, -0.10, places=3)        # 0.10 m right -> -0.10 Y
+        self.assertAlmostEqual(m_hom.distance_from_base_m, math.hypot(0.52, -0.10), places=3)
+
+        # 4. Batch measurement excludes protected crops and sorts nearest-first from base_link
+        batch = est.measure_batch([
+            {"class_name": "crop_tomato", "confidence": 0.99, "u_px": 320, "v_px": 410},
+            {"class_name": "weed_far", "confidence": 0.88, "u_px": 320, "v_px": 240},
+            {"class_name": "weed_near", "confidence": 0.93, "u_px": 320, "v_px": 390},
+        ])
+        self.assertEqual(len(batch), 2)
+        self.assertEqual(batch[0].class_name, "weed_near")
+        self.assertEqual(batch[1].class_name, "weed_far")
+        self.assertLess(batch[0].distance_from_base_m, batch[1].distance_from_base_m)
+
+    def test_ros2_row_follow_goal_completion_cancellation_and_estop_cycles(self):
+        import time
+        import types
+
+        mod = self._load_row_follow_module()
+        est = mod.WeedBaseDistanceEstimator()
+
+        class FakeGoalHandle:
+            def __init__(self, cancel_on_check: int | None = None):
+                self._cancel_on_check = cancel_on_check
+                self._checks = 0
+                self.terminal_state: str | None = None
+
+            @property
+            def is_cancel_requested(self) -> bool:
+                self._checks += 1
+                return self._cancel_on_check is not None and self._checks >= self._cancel_on_check
+
+            def succeed(self):
+                self.terminal_state = "SUCCEEDED"
+
+            def canceled(self):
+                self.terminal_state = "CANCELED"
+
+            def abort(self):
+                self.terminal_state = "ABORTED"
+
+        # Cycle 1: Normal completion on row end with live weed base_link distance feedback
+        gh_ok = FakeGoalHandle()
+        tick_counter = {"n": 0}
+        cmds: list[tuple[float, float]] = []
+        zeros = {"count": 0}
+        feedbacks: list[dict] = []
+        statuses: list[str] = []
+
+        def fake_track_update(_obs):
+            tick_counter["n"] += 1
+            return types.SimpleNamespace(
+                lateral_error_m=0.02,
+                heading_error_rad=0.01,
+                row_end_confidence=0.95 if tick_counter["n"] >= 3 else 0.1,
+                row_end_reached=tick_counter["n"] >= 3,
+            )
+
+        outcome_ok = mod.run_row_follow_cycle(
+            row_id=2,
+            speed_limit_mps=0.18,
+            max_duration_s=5.0,
+            goal_handle=gh_ok,
+            get_estop_fn=lambda: False,
+            get_frame_fn=lambda: ("frame", time.monotonic()),
+            detect_fn=lambda f: f,
+            track_update_fn=fake_track_update,
+            track_reset_fn=lambda: None,
+            compute_cmd_fn=lambda _st, vcap: types.SimpleNamespace(linear_x_mps=vcap, angular_z_rad_s=-0.05),
+            publish_cmd_fn=lambda vx, wz: cmds.append((vx, wz)),
+            publish_zero_fn=lambda: zeros.__setitem__("count", zeros["count"] + 1),
+            publish_status_fn=statuses.append,
+            measure_weeds_fn=lambda: est.measure_batch([
+                {"class_name": "weed_dandelion", "confidence": 0.91, "u_px": 320, "v_px": 370}
+            ]),
+            publish_feedback_fn=lambda _gh, fb: feedbacks.append(fb),
+            get_odom_distance_fn=lambda: 1.5 * tick_counter["n"],
+            tick_sleep_s=0.0,
+        )
+        state_ok = mod.finalize_goal_handle(gh_ok, outcome_ok)
+        self.assertEqual(state_ok, "SUCCEEDED")
+        self.assertEqual(gh_ok.terminal_state, "SUCCEEDED")
+        self.assertTrue(outcome_ok["success"])
+        self.assertEqual(outcome_ok["reason"], "ROW_END_REACHED")
+        self.assertGreater(outcome_ok["nearest_weed_distance_from_base_m"], 0.2)
+        self.assertEqual(outcome_ok["weeds_measured_count"], 1)
+        self.assertGreaterEqual(zeros["count"], 1)
+        self.assertEqual(len(feedbacks), 3)
+        self.assertGreater(feedbacks[0]["nearest_weed_distance_from_base_m"], 0.2)
+
+        # Cycle 2: Action cancellation stops motors and marks goal CANCELED
+        gh_cancel = FakeGoalHandle(cancel_on_check=2)
+        cancel_zeros = {"count": 0}
+        outcome_cancel = mod.run_row_follow_cycle(
+            row_id=3,
+            speed_limit_mps=0.18,
+            max_duration_s=5.0,
+            goal_handle=gh_cancel,
+            get_estop_fn=lambda: False,
+            get_frame_fn=lambda: ("frame", time.monotonic()),
+            detect_fn=lambda f: f,
+            track_update_fn=lambda _obs: types.SimpleNamespace(
+                lateral_error_m=0.0, heading_error_rad=0.0, row_end_confidence=0.0, row_end_reached=False
+            ),
+            track_reset_fn=lambda: None,
+            compute_cmd_fn=lambda _st, vcap: types.SimpleNamespace(linear_x_mps=vcap, angular_z_rad_s=0.0),
+            publish_cmd_fn=lambda _vx, _wz: None,
+            publish_zero_fn=lambda: cancel_zeros.__setitem__("count", cancel_zeros["count"] + 1),
+            publish_status_fn=lambda _s: None,
+            tick_sleep_s=0.0,
+        )
+        state_cancel = mod.finalize_goal_handle(gh_cancel, outcome_cancel)
+        self.assertEqual(state_cancel, "CANCELED")
+        self.assertEqual(gh_cancel.terminal_state, "CANCELED")
+        self.assertFalse(outcome_cancel["success"])
+        self.assertEqual(outcome_cancel["reason"], "CANCELED")
+        self.assertGreaterEqual(cancel_zeros["count"], 1)
+
+        # Cycle 3: Hardware E-stop immediately aborts goal and zeroes velocity
+        gh_estop = FakeGoalHandle()
+        estop_zeros = {"count": 0}
+        outcome_estop = mod.run_row_follow_cycle(
+            row_id=4,
+            speed_limit_mps=0.18,
+            max_duration_s=5.0,
+            goal_handle=gh_estop,
+            get_estop_fn=lambda: True,
+            get_frame_fn=lambda: ("frame", time.monotonic()),
+            detect_fn=lambda f: f,
+            track_update_fn=lambda _obs: types.SimpleNamespace(row_end_reached=False),
+            track_reset_fn=lambda: None,
+            compute_cmd_fn=lambda _st, vcap: types.SimpleNamespace(linear_x_mps=vcap, angular_z_rad_s=0.0),
+            publish_cmd_fn=lambda _vx, _wz: None,
+            publish_zero_fn=lambda: estop_zeros.__setitem__("count", estop_zeros["count"] + 1),
+            publish_status_fn=lambda _s: None,
+            tick_sleep_s=0.0,
+        )
+        state_estop = mod.finalize_goal_handle(gh_estop, outcome_estop)
+        self.assertEqual(state_estop, "ABORTED")
+        self.assertEqual(gh_estop.terminal_state, "ABORTED")
+        self.assertFalse(outcome_estop["success"])
+        self.assertEqual(outcome_estop["reason"], "HARDWARE_ESTOP_ACTIVE")
+        self.assertGreaterEqual(estop_zeros["count"], 1)
+
+    def test_ros2_realtime_motion_compensation_and_treatment_positioning(self):
+        import time
+        import types
+
+        mod = self._load_row_follow_module()
+        est = mod.WeedBaseDistanceEstimator(
+            camera_offset_x_m=0.22,
+            camera_offset_y_m=0.0,
+            camera_height_m=0.42,
+            camera_pitch_deg=35.0,
+            actuator_offset_x_m=0.25,
+            actuator_offset_y_m=0.0,
+            treatment_stop_tolerance_m=0.04,
+            treatment_lateral_tolerance_m=0.14,
+        )
+
+        # 1. Motion compensation must shift weed closer to base_link by vx * dt
+        static_m = est.measure_weed(u_px=320, v_px=240, depth_m=0.80, class_name="weed_a")
+        moving_m = est.measure_weed(
+            u_px=320,
+            v_px=240,
+            depth_m=0.80,
+            class_name="weed_a",
+            detection_age_s=0.10,
+            linear_vx_mps=0.20,
+            angular_wz_rad_s=0.0,
+        )
+        self.assertIsNotNone(static_m)
+        self.assertIsNotNone(moving_m)
+        self.assertAlmostEqual(static_m.x_base_m - moving_m.x_base_m, 0.02, places=3)
+        self.assertAlmostEqual(moving_m.latency_compensated_s, 0.10, places=3)
+        self.assertAlmostEqual(moving_m.dx_to_actuator_m, moving_m.x_base_m - 0.25, places=3)
+
+        # 2. TreatmentPositioningController transitions: CRUISE -> APPROACH_SLOWDOWN -> TREATMENT_ALIGNED_HOLD -> PASSED
+        pos_ctrl = mod.TreatmentPositioningController(
+            approach_slowdown_distance_m=0.45,
+            approach_min_speed_mps=0.04,
+            stop_tolerance_m=0.04,
+            lateral_corridor_m=0.14,
+            enabled=True,
+        )
+
+        def _make_weed(x_base: float, y_base: float = 0.0):
+            dx = x_base - 0.25
+            dy = y_base
+            return mod.WeedBaseMeasurement(
+                class_name="weed_dandelion",
+                confidence=0.95,
+                u_px=320.0,
+                v_px=360.0,
+                x_base_m=x_base,
+                y_base_m=y_base,
+                distance_from_base_m=round((x_base**2 + y_base**2) ** 0.5, 4),
+                bearing_rad=0.0,
+                dx_to_actuator_m=round(dx, 4),
+                dy_to_actuator_m=round(dy, 4),
+                distance_to_actuator_m=round((dx**2 + dy**2) ** 0.5, 4),
+                latency_compensated_s=0.0,
+                method="rgbd_depth",
+                in_treatment_reach=True,
+                ready_for_treatment=abs(dx) <= 0.04 and abs(dy) <= 0.14,
+            )
+
+        dec_far = pos_ctrl.modulate_command(0.18, 0.02, [_make_weed(0.95)])
+        self.assertEqual(dec_far.mode, "CRUISE")
+        self.assertAlmostEqual(dec_far.linear_x_mps, 0.18, places=4)
+        self.assertFalse(dec_far.aligned_for_treatment)
+
+        dec_approach = pos_ctrl.modulate_command(0.18, 0.02, [_make_weed(0.45)])
+        self.assertEqual(dec_approach.mode, "APPROACH_SLOWDOWN")
+        self.assertGreater(dec_approach.linear_x_mps, 0.04)
+        self.assertLess(dec_approach.linear_x_mps, 0.18)
+        self.assertFalse(dec_approach.aligned_for_treatment)
+
+        dec_align = pos_ctrl.modulate_command(0.18, 0.05, [_make_weed(0.26, 0.01)])
+        self.assertEqual(dec_align.mode, "TREATMENT_ALIGNED_HOLD")
+        self.assertEqual(dec_align.linear_x_mps, 0.0)
+        self.assertEqual(dec_align.angular_z_rad_s, 0.0)
+        self.assertTrue(dec_align.aligned_for_treatment)
+
+        # Already passed behind the actuator -> resume CRUISE
+        dec_passed = pos_ctrl.modulate_command(0.18, 0.0, [_make_weed(0.10)])
+        self.assertEqual(dec_passed.mode, "CRUISE")
+        self.assertAlmostEqual(dec_passed.linear_x_mps, 0.18, places=4)
+
+        # 3. End-to-end cycle with approaching weed -> stationary treatment alignment -> row end
+        sequence = [_make_weed(0.90), _make_weed(0.45), _make_weed(0.25), _make_weed(0.05)]
+        step = {"i": 0}
+        aligned_targets: list = []
+        feedbacks: list[dict] = []
+        cmds: list[tuple[float, float]] = []
+
+        class _GH:
+            is_cancel_requested = False
+
+            def succeed(self):
+                pass
+
+            def canceled(self):
+                pass
+
+            def abort(self):
+                pass
+
+        def _track(_obs):
+            idx = step["i"]
+            step["i"] += 1
+            return types.SimpleNamespace(
+                lateral_error_m=0.01,
+                heading_error_rad=0.0,
+                row_end_confidence=1.0 if idx >= 3 else 0.0,
+                row_end_reached=idx >= 3,
+            )
+
+        outcome = mod.run_row_follow_cycle(
+            row_id=5,
+            speed_limit_mps=0.18,
+            max_duration_s=5.0,
+            goal_handle=_GH(),
+            get_estop_fn=lambda: False,
+            get_frame_fn=lambda: ("frame", time.monotonic()),
+            detect_fn=lambda f: f,
+            track_update_fn=_track,
+            track_reset_fn=lambda: None,
+            compute_cmd_fn=lambda _st, vcap: types.SimpleNamespace(linear_x_mps=vcap, angular_z_rad_s=0.0),
+            publish_cmd_fn=lambda vx, wz: cmds.append((vx, wz)),
+            publish_zero_fn=lambda: None,
+            publish_status_fn=lambda _s: None,
+            measure_weeds_fn=lambda: [sequence[min(step["i"] - 1, len(sequence) - 1)]],
+            publish_treatment_target_fn=aligned_targets.append,
+            positioning_controller=pos_ctrl,
+            publish_feedback_fn=lambda _gh, fb: feedbacks.append(fb),
+            tick_sleep_s=0.0,
+        )
+        self.assertTrue(outcome["success"])
+        self.assertEqual(outcome["treatment_alignments_count"], 1)
+        self.assertEqual(len(aligned_targets), 1)
+        self.assertAlmostEqual(aligned_targets[0].x_base_m, 0.25, places=3)
+        self.assertEqual(
+            [fb["positioning_mode"] for fb in feedbacks],
+            ["CRUISE", "APPROACH_SLOWDOWN", "TREATMENT_ALIGNED_HOLD", "CRUISE"],
+        )
+        # Approach velocity was strictly lower than cruise velocity
+        self.assertLess(cmds[1][0], cmds[0][0])
 
 
 if __name__ == "__main__":
