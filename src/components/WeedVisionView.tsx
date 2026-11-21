@@ -7,6 +7,9 @@ import {
   Activity,
   Crosshair,
   SlidersHorizontal,
+  CornerDownRight,
+  CornerDownLeft,
+  Route,
 } from 'lucide-react';
 import {
   LineChart,
@@ -20,8 +23,13 @@ import {
 import {
   CameraOverlayMode,
   FoliageBlob,
+  detectCropRowFromFrame,
   detectFoliageBlobsFromFrame,
 } from '../vision/cropRowVision';
+import {
+  ProjectedTurnDirection,
+  drawTurnTrajectoryOverlay,
+} from '../vision/turnTrajectoryOverlay';
 
 interface Props {
   mode: 'vision' | 'calibration';
@@ -41,12 +49,23 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
   const [minBlobArea, setMinBlobArea] = useState<number>(50);
   const [sourceName, setSourceName] = useState<string>('No camera active');
 
+  // Row-end turn trajectory overlay controls
+  const [showTurnOverlay, setShowTurnOverlay] = useState<boolean>(true);
+  const [turnDirection, setTurnDirection] = useState<ProjectedTurnDirection>('right');
+  const [turnRadiusM, setTurnRadiusM] = useState<number>(0.55);
+  const [rowSpacingM, setRowSpacingM] = useState<number>(0.6);
+  const [forceTurnPreview, setForceTurnPreview] = useState<boolean>(false);
+
   const [blobs, setBlobs] = useState<FoliageBlob[]>([]);
   const [metrics, setMetrics] = useState({
     fps: 0,
     processingMs: 0,
     otsuThreshold: 24,
     greenCoveragePct: 0,
+    distanceToFurrowEndM: 1.6,
+    rowEndConfidence: 0,
+    arcLengthM: 2.48,
+    turnImminent: false,
   });
 
   const [latencyHistory, setLatencyHistory] = useState<
@@ -70,10 +89,37 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
   const objectUrlRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const paramsRef = useRef({ overlayMode, minExgFloor, minBlobArea });
+  const paramsRef = useRef({
+    overlayMode,
+    minExgFloor,
+    minBlobArea,
+    showTurnOverlay,
+    turnDirection,
+    turnRadiusM,
+    rowSpacingM,
+    forceTurnPreview,
+  });
   useEffect(() => {
-    paramsRef.current = { overlayMode, minExgFloor, minBlobArea };
-  }, [overlayMode, minExgFloor, minBlobArea]);
+    paramsRef.current = {
+      overlayMode,
+      minExgFloor,
+      minBlobArea,
+      showTurnOverlay,
+      turnDirection,
+      turnRadiusM,
+      rowSpacingM,
+      forceTurnPreview,
+    };
+  }, [
+    overlayMode,
+    minExgFloor,
+    minBlobArea,
+    showTurnOverlay,
+    turnDirection,
+    turnRadiusM,
+    rowSpacingM,
+    forceTurnPreview,
+  ]);
 
   const stopStream = useCallback(() => {
     if (streamRef.current) {
@@ -106,14 +152,24 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
 
       const targetFacing = nextFacing ?? facingMode;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: targetFacing },
-            width: { ideal: 640 },
-            height: { ideal: 360 },
-          },
-          audio: false,
-        });
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: targetFacing },
+              width: { ideal: 640 },
+              height: { ideal: 360 },
+            },
+            audio: false,
+          });
+        } catch (constraintErr: unknown) {
+          const errName = (constraintErr as { name?: string })?.name;
+          if (errName === 'OverconstrainedError' || errName === 'ConstraintNotSatisfiedError') {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          } else {
+            throw constraintErr;
+          }
+        }
         streamRef.current = stream;
 
         if (!videoRef.current) {
@@ -130,7 +186,9 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
         const label = stream.getVideoTracks()[0]?.label || 'Live Webcam';
         setSourceName(label);
         setSourceState('webcam');
-        onLogEvent(`[Weed Vision] Live webcam started (${label}) — real-time ExG + Otsu blob segmentation active.`);
+        onLogEvent(
+          `[Weed Vision] Live webcam started (${label}) — ExG+Otsu CV & animated row-end turn trajectory overlay active.`
+        );
       } catch (err: any) {
         const msg =
           err?.name === 'NotAllowedError'
@@ -151,7 +209,16 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
     setSourceState('idle');
     setSourceName('No camera active');
     setBlobs([]);
-    setMetrics({ fps: 0, processingMs: 0, otsuThreshold: minExgFloor, greenCoveragePct: 0 });
+    setMetrics({
+      fps: 0,
+      processingMs: 0,
+      otsuThreshold: minExgFloor,
+      greenCoveragePct: 0,
+      distanceToFurrowEndM: 1.6,
+      rowEndConfidence: 0,
+      arcLengthM: 2.48,
+      turnImminent: false,
+    });
     onLogEvent('[Weed Vision] Stopped live camera feed.');
   }, [stopStream, minExgFloor, onLogEvent]);
 
@@ -230,6 +297,16 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
     let lastUiSync = 0;
     let lastChartSync = 0;
 
+    // Smooth EMA tracker for row centerline & furrow-end horizon to keep path projection fluid
+    const smoothGeo = {
+      initialized: false,
+      centerBottomPx: PROC_W * 0.5,
+      centerTopPx: PROC_W * 0.5,
+      furrowEndYPx: PROC_H * 0.46,
+      distanceToFurrowEndM: 1.4,
+      rowEndConfidence: 0,
+    };
+
     const tick = (now: number) => {
       const displayCanvas = canvasRef.current;
       const workCanvas = workCanvasRef.current;
@@ -261,6 +338,33 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
         const p = paramsRef.current;
         const frame = workCtx.getImageData(0, 0, PROC_W, PROC_H);
         const res = detectFoliageBlobsFromFrame(frame, p.minExgFloor, p.minBlobArea);
+        const { observation: rowObs } = detectCropRowFromFrame(frame, {
+          rowWidthM: p.rowSpacingM,
+          minExgFloor: p.minExgFloor,
+        });
+
+        const alpha = 0.25;
+        if (!smoothGeo.initialized) {
+          smoothGeo.centerBottomPx = rowObs.valid ? rowObs.centerBottomPx : PROC_W * 0.5;
+          smoothGeo.centerTopPx = rowObs.valid ? rowObs.centerTopPx : PROC_W * 0.5;
+          smoothGeo.furrowEndYPx = rowObs.furrowEndYPx;
+          smoothGeo.distanceToFurrowEndM = rowObs.distanceToFurrowEndM;
+          smoothGeo.rowEndConfidence = rowObs.rowEndConfidence;
+          smoothGeo.initialized = true;
+        } else {
+          if (rowObs.valid) {
+            smoothGeo.centerBottomPx =
+              (1 - alpha) * smoothGeo.centerBottomPx + alpha * rowObs.centerBottomPx;
+            smoothGeo.centerTopPx =
+              (1 - alpha) * smoothGeo.centerTopPx + alpha * rowObs.centerTopPx;
+          }
+          smoothGeo.furrowEndYPx =
+            (1 - alpha) * smoothGeo.furrowEndYPx + alpha * rowObs.furrowEndYPx;
+          smoothGeo.distanceToFurrowEndM =
+            (1 - alpha) * smoothGeo.distanceToFurrowEndM + alpha * rowObs.distanceToFurrowEndM;
+          smoothGeo.rowEndConfidence =
+            (1 - alpha) * smoothGeo.rowEndConfidence + alpha * rowObs.rowEndConfidence;
+        }
 
         frameCount++;
         const dtFps = now - fpsStart;
@@ -311,6 +415,30 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
           dispCtx.putImageData(frame, 0, 0);
         }
 
+        let arcLengthM = Number((Math.PI * p.turnRadiusM + 0.75).toFixed(2));
+        let turnImminent = p.forceTurnPreview;
+
+        // Draw animated predicted row-end turn trajectory path projection over real-time camera feed
+        if (p.showTurnOverlay && p.overlayMode !== 'raw') {
+          const proj = drawTurnTrajectoryOverlay(dispCtx, {
+            width: PROC_W,
+            height: PROC_H,
+            nowMs: now,
+            turnDirection: p.turnDirection,
+            turnRadiusM: p.turnRadiusM,
+            rowSpacingM: p.rowSpacingM,
+            centerBottomPx: smoothGeo.centerBottomPx,
+            centerTopPx: smoothGeo.centerTopPx,
+            furrowEndYPx: smoothGeo.furrowEndYPx,
+            distanceToFurrowEndM: smoothGeo.distanceToFurrowEndM,
+            rowEndConfidence: smoothGeo.rowEndConfidence,
+            hasVisionLock: rowObs.valid,
+            forceTurnAlertStyle: p.forceTurnPreview,
+          });
+          arcLengthM = proj.arcLengthM;
+          turnImminent = proj.turnImminent;
+        }
+
         // Draw real detected connected-component bounding boxes & ground projections
         if (p.overlayMode !== 'raw') {
           for (const b of res.blobs) {
@@ -351,7 +479,9 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
           dispCtx.fillStyle = '#A7F3D0';
           dispCtx.font = '600 10px "IBM Plex Mono", monospace';
           dispCtx.fillText(
-            `REAL-TIME ExG+OTSU BLOB CV · ${currentFps.toFixed(0)} FPS · ${res.processingMs.toFixed(1)} ms · ${res.blobs.length} BLOBS`,
+            `LIVE ExG CV + TURN PATH AR · ${currentFps.toFixed(0)} FPS · ${(
+              res.processingMs + rowObs.processingMs
+            ).toFixed(1)} ms · ${res.blobs.length} BLOBS`,
             14,
             21
           );
@@ -362,9 +492,13 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
           setBlobs(res.blobs);
           setMetrics({
             fps: currentFps,
-            processingMs: res.processingMs,
+            processingMs: res.processingMs + rowObs.processingMs,
             otsuThreshold: res.otsuThreshold,
             greenCoveragePct: res.greenCoveragePct,
+            distanceToFurrowEndM: smoothGeo.distanceToFurrowEndM,
+            rowEndConfidence: smoothGeo.rowEndConfidence,
+            arcLengthM,
+            turnImminent,
           });
         }
 
@@ -375,7 +509,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
               ...prev.slice(1),
               {
                 time: 'Now',
-                cvMs: Number(res.processingMs.toFixed(1)),
+                cvMs: Number((res.processingMs + rowObs.processingMs).toFixed(1)),
                 blobs: res.blobs.length,
               },
             ];
@@ -550,7 +684,18 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
                 Live Camera Pixel Pipeline ({sourceName})
               </h3>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={() => setShowTurnOverlay((v) => !v)}
+                className={`px-2 py-1 text-[11px] font-mono rounded border transition-colors flex items-center gap-1 cursor-pointer ${
+                  showTurnOverlay
+                    ? 'bg-emerald-50 border-emerald-400 text-emerald-800 font-semibold'
+                    : 'bg-[#F8FBF9] border-slate-200 text-slate-500 hover:border-emerald-300'
+                }`}
+              >
+                <Route className="w-3 h-3 text-emerald-600" />
+                <span>Turn Path AR</span>
+              </button>
               {(['overlay', 'mask', 'raw'] as const).map((m) => (
                 <button
                   key={m}
@@ -580,22 +725,24 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
             </div>
           </div>
 
-          <div className="relative aspect-video bg-[#141A17] border border-emerald-900/15 rounded overflow-hidden flex items-center justify-center">
+          <div className="relative aspect-video bg-[#F4F8F5] border border-emerald-900/15 rounded overflow-hidden flex items-center justify-center">
             <canvas
               ref={canvasRef}
               width={PROC_W}
               height={PROC_H}
-              className={`w-full h-full object-contain ${isLive ? 'block' : 'hidden'}`}
+              className={`w-full h-full object-contain bg-[#141A17] ${isLive ? 'block' : 'hidden'}`}
             />
 
             {sourceState === 'idle' && (
-              <div className="p-6 text-center space-y-3 max-w-md">
-                <Camera className="w-8 h-8 text-emerald-400 mx-auto" />
-                <div className="text-sm font-semibold text-white">
-                  Real-Time Browser Computer Vision Ready
+              <div className="p-6 text-center space-y-3 max-w-md bg-[#F8FBF9]">
+                <div className="w-11 h-11 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center mx-auto">
+                  <Camera className="w-5 h-5 text-emerald-700" />
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Open your laptop or phone camera (or upload a real crop-field video/photo) to run live Excess Green + Otsu segmentation, connected-component foliage detection, and homography ground localization directly on real pixels.
+                <div className="text-sm font-semibold text-slate-900">
+                  Real-Time Vision &amp; Animated Row-End Turn Projection Ready
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Open your device camera or upload a crop-field video/photo to run live Excess Green + Otsu segmentation alongside the animated row-end turn trajectory path overlay.
                 </p>
                 <div className="flex items-center justify-center gap-2 pt-1">
                   <button
@@ -606,7 +753,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
                   </button>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="px-4 py-2 text-xs font-semibold rounded-md bg-white text-slate-900 hover:bg-emerald-50 cursor-pointer"
+                    className="px-4 py-2 text-xs font-medium rounded-md bg-white border border-emerald-900/15 text-slate-800 hover:bg-emerald-50 cursor-pointer"
                   >
                     Upload Video / Photo
                   </button>
@@ -615,15 +762,15 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
             )}
 
             {sourceState === 'requesting' && (
-              <div className="text-xs font-mono text-emerald-200">
+              <div className="text-xs font-mono text-emerald-800">
                 Initializing camera stream...
               </div>
             )}
 
             {sourceState === 'error' && (
               <div className="p-6 text-center space-y-3 max-w-md">
-                <CameraOff className="w-7 h-7 text-rose-400 mx-auto" />
-                <p className="text-xs font-mono text-rose-200">{cameraError}</p>
+                <CameraOff className="w-7 h-7 text-rose-600 mx-auto" />
+                <p className="text-xs font-mono text-rose-800">{cameraError}</p>
                 <div className="flex items-center justify-center gap-2">
                   <button
                     onClick={() => void startWebcam()}
@@ -633,7 +780,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
                   </button>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="px-3 py-1.5 text-xs font-semibold rounded bg-white text-slate-900 cursor-pointer"
+                    className="px-3 py-1.5 text-xs font-medium rounded bg-white border border-emerald-900/15 text-slate-800 cursor-pointer"
                   >
                     Upload Video / Photo
                   </button>
@@ -649,13 +796,125 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
               {metrics.otsuThreshold}
             </span>
             <span>
-              Green Canopy Coverage: <strong className="text-emerald-700">{metrics.greenCoveragePct.toFixed(1)}%</strong>
+              Furrow End:{' '}
+              <strong className={metrics.turnImminent ? 'text-amber-700' : 'text-emerald-700'}>
+                {isLive ? `${metrics.distanceToFurrowEndM.toFixed(2)} m` : '—'}
+              </strong>{' '}
+              · Canopy: <strong className="text-emerald-700">{metrics.greenCoveragePct.toFixed(1)}%</strong>
             </span>
           </div>
         </div>
 
-        {/* Live CV Threshold Controls & Real Detected Foliage Blobs */}
+        {/* Live CV Threshold Controls, Row-End Turn Trajectory Controls & Detected Blobs */}
         <div className="lg:col-span-5 bg-white border border-emerald-900/10 rounded-lg p-4 flex flex-col gap-4">
+          {/* Predicted Turn Trajectory Overlay Controls */}
+          <div className="space-y-2.5 pb-3 border-b border-emerald-900/10">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Route className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Row-End Turn Path Projection
+                </h3>
+              </div>
+              <span
+                className={`text-[11px] font-mono font-semibold ${
+                  !showTurnOverlay
+                    ? 'text-slate-400'
+                    : metrics.turnImminent
+                    ? 'text-amber-700'
+                    : 'text-emerald-700'
+                }`}
+              >
+                {!showTurnOverlay
+                  ? '○ OFF'
+                  : metrics.turnImminent
+                  ? '▲ TURN IMMINENT'
+                  : '● AR ACTIVE'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                onClick={() => setTurnDirection('right')}
+                className={`py-1.5 px-2 text-xs font-medium rounded border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                  turnDirection === 'right'
+                    ? 'bg-emerald-50 border-emerald-400 text-emerald-900 font-semibold'
+                    : 'bg-[#F8FBF9] border-slate-200 text-slate-600 hover:border-emerald-300'
+                }`}
+              >
+                <CornerDownRight className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Right U-Turn</span>
+              </button>
+              <button
+                onClick={() => setTurnDirection('left')}
+                className={`py-1.5 px-2 text-xs font-medium rounded border flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                  turnDirection === 'left'
+                    ? 'bg-emerald-50 border-emerald-400 text-emerald-900 font-semibold'
+                    : 'bg-[#F8FBF9] border-slate-200 text-slate-600 hover:border-emerald-300'
+                }`}
+              >
+                <CornerDownLeft className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Left U-Turn</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>Turn Radius</span>
+                  <span className="text-emerald-700 font-semibold">{turnRadiusM.toFixed(2)} m</span>
+                </div>
+                <input
+                  type="range"
+                  min={0.35}
+                  max={0.9}
+                  step={0.05}
+                  value={turnRadiusM}
+                  onChange={(e) => setTurnRadiusM(Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>Row Spacing</span>
+                  <span className="text-emerald-700 font-semibold">
+                    {Math.round(rowSpacingM * 100)} cm
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={0.8}
+                  step={0.05}
+                  value={rowSpacingM}
+                  onChange={(e) => setRowSpacingM(Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 bg-[#F8FBF9] border border-emerald-900/10 rounded px-2.5 py-1.5 text-[11px] font-mono tabular-nums">
+              <span className="text-slate-600">
+                Arc: <strong className="text-slate-900">{metrics.arcLengthM.toFixed(2)} m</strong> ·
+                End Conf:{' '}
+                <strong className="text-emerald-700">
+                  {Math.round(metrics.rowEndConfidence * 100)}%
+                </strong>
+              </span>
+              <button
+                onClick={() => setForceTurnPreview((v) => !v)}
+                className={`px-2 py-0.5 rounded border text-[10px] font-semibold cursor-pointer transition-colors ${
+                  forceTurnPreview
+                    ? 'bg-amber-50 border-amber-300 text-amber-800'
+                    : 'bg-white border-emerald-900/15 text-slate-600 hover:text-emerald-800'
+                }`}
+              >
+                {forceTurnPreview ? 'Alert Style: ON' : 'Preview Turn Alert'}
+              </button>
+            </div>
+          </div>
+
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
