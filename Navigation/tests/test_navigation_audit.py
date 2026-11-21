@@ -477,7 +477,7 @@ class NavigationAuditTestSuite(unittest.TestCase):
         self.assertEqual(weed_code, 200)
         self.assertTrue(weed_body["accepted"])
 
-    def test_startup_handshake_clears_latch_and_validates_ready_state(self):
+    def test_startup_handshake_read_only_never_clears_latch_automatically(self):
         from pi_server import HardenedNavigationController
 
         ctrl = HardenedNavigationController(self.config, simulate=True)
@@ -485,16 +485,46 @@ class NavigationAuditTestSuite(unittest.TestCase):
         ctrl.esp32.watchdog_ok = False
         ctrl.sm.state = RoverState.FAULT
 
-        # Without camera frames, ESP32 CLEAR_LATCH succeeds & initializes watchdog,
-        # while navigation_dispatch_unlocked stays False until camera is healthy.
-        code, body = ctrl.handle_startup_handshake(operator_confirmed=True)
+        # Default read-only inspection (allow_clear_latch=False) MUST NOT send CLEAR_LATCH
+        ro_code, ro_body = ctrl.handle_startup_handshake()
+        self.assertEqual(ro_code, 200, ro_body)
+        self.assertTrue(ro_body["inspection_only"])
+        self.assertFalse(ro_body["clear_latch_attempted"])
+        self.assertTrue(ro_body["latch_locked"])
+        self.assertFalse(ro_body["esp32_ready"])
+        self.assertFalse(ro_body["watchdog_initialized"])
+        self.assertFalse(ro_body["navigation_dispatch_unlocked"])
+        self.assertEqual(ctrl.sm.state, RoverState.FAULT)
+        self.assertFalse(ctrl.esp32.watchdog_ok)
+        ro_commands = [s["command"] for s in ro_body["steps"]]
+        self.assertIn("PING", ro_commands)
+        self.assertNotIn("CLEAR_LATCH", ro_commands)
+
+        # Explicit allow_clear_latch=True WITHOUT operator_confirmed MUST fail (HTTP 400)
+        deny_code, deny_body = ctrl.handle_startup_handshake(
+            allow_clear_latch=True, operator_confirmed=False
+        )
+        self.assertEqual(deny_code, 400)
+        self.assertTrue(deny_body["latch_locked"])
+        self.assertFalse(deny_body["clear_latch_attempted"])
+        self.assertEqual(ctrl.sm.state, RoverState.FAULT)
+
+        # Explicit allow_clear_latch=True WITH operator_confirmed=True clears latch
+        # and leaves state machine strictly PAUSED (mission_active=False)
+        code, body = ctrl.handle_startup_handshake(
+            allow_clear_latch=True, operator_confirmed=True
+        )
         self.assertEqual(code, 200, body)
+        self.assertFalse(body["inspection_only"])
+        self.assertTrue(body["clear_latch_attempted"])
+        self.assertFalse(body["latch_locked"])
         self.assertTrue(body["esp32_ready"])
         self.assertTrue(body["watchdog_initialized"])
         self.assertTrue(body["estop_ok"])
         self.assertFalse(body["camera_healthy"])
         self.assertFalse(body["navigation_dispatch_unlocked"])
         self.assertEqual(ctrl.sm.state, RoverState.PAUSED)
+        self.assertFalse(ctrl.mission_active)
         commands = [s["command"] for s in body["steps"]]
         self.assertIn("PING", commands)
         self.assertIn("CLEAR_LATCH", commands)
@@ -506,18 +536,23 @@ class NavigationAuditTestSuite(unittest.TestCase):
         ctrl = HardenedNavigationController(self.config, simulate=True)
         ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9")
 
-        # Refuses CLEAR_LATCH when operator_confirmed=False
-        deny_code, deny_body = ctrl.handle_startup_handshake(operator_confirmed=False)
+        # Refuses CLEAR_LATCH when allow_clear_latch=True & operator_confirmed=False
+        deny_code, deny_body = ctrl.handle_startup_handshake(
+            allow_clear_latch=True, operator_confirmed=False
+        )
         self.assertEqual(deny_code, 400)
         self.assertFalse(deny_body["watchdog_initialized"])
         self.assertFalse(deny_body["navigation_dispatch_unlocked"])
 
-        # Unlocks dispatch once CLEAR_LATCH + TELEM? ready-state AND camera are healthy
-        ok_code, ok_body = ctrl.handle_startup_handshake(operator_confirmed=True)
+        # Unlocks dispatch once operator-authorized CLEAR_LATCH + TELEM? AND camera are healthy
+        ok_code, ok_body = ctrl.handle_startup_handshake(
+            allow_clear_latch=True, operator_confirmed=True
+        )
         self.assertEqual(ok_code, 200, ok_body)
         self.assertTrue(ok_body["watchdog_initialized"])
         self.assertTrue(ok_body["camera_healthy"])
         self.assertTrue(ok_body["navigation_dispatch_unlocked"])
+        self.assertFalse(ctrl.mission_active)
 
     def test_async_control_loop_worker_drives_mission_continuously(self):
         import asyncio
@@ -559,6 +594,224 @@ class NavigationAuditTestSuite(unittest.TestCase):
         code, body = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True)
         self.assertEqual(code, 412)
         self.assertIn("ESP32_NOT_CONNECTED", body["blockers"])
+
+    @staticmethod
+    def _make_synthetic_png(width: int, height: int, pixel_fn) -> bytes:
+        import struct
+        import zlib
+
+        def _chunk(ctype: bytes, data: bytes) -> bytes:
+            crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+        raw_rows = bytearray()
+        for y in range(height):
+            raw_rows.append(0)  # filter type 0
+            for x in range(width):
+                r, g, b = pixel_fn(x, y)
+                raw_rows.extend((r, g, b))
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + _chunk(b"IHDR", ihdr)
+            + _chunk(b"IDAT", zlib.compress(bytes(raw_rows)))
+            + _chunk(b"IEND", b"")
+        )
+
+    def test_crop_row_vision_computes_row_end_and_lateral_error(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+
+        # Frame 1: Continuous green crop ridges on left & right, bare brown furrow in center
+        def continuous_row_px(x: int, y: int):
+            if 10 <= x <= 24 or 56 <= x <= 70:
+                return (30, 175, 40)  # crop green
+            return (110, 82, 58)  # brown soil
+
+        row_png = self._make_synthetic_png(80, 60, continuous_row_px)
+        code1, body1 = ctrl.ingest_camera_frame(row_png, mime_type="image/png")
+        self.assertEqual(code1, 200)
+        self.assertTrue(body1["bev_ready"])
+        self.assertEqual(body1["bev_url"], "/bev_image")
+
+        if body1["vision_decoded"]:
+            # Continuous green in both near & far bands -> low row-end confidence
+            self.assertLess(body1["visual_row_end_conf"], 0.45)
+            self.assertFalse(body1["row_end_detected"])
+            self.assertGreater(body1["green_ratio_far"], 0.15)
+            self.assertGreaterEqual(len(body1["furrows"]), 1)
+
+            # Frame 2: Row end approaching — green only in near band (bottom), bare soil in far band (top)
+            def row_end_px(x: int, y: int):
+                if y >= 32 and (10 <= x <= 24 or 56 <= x <= 70):
+                    return (30, 175, 40)
+                return (110, 82, 58)
+
+            end_png = self._make_synthetic_png(80, 60, row_end_px)
+            code2, body2 = ctrl.ingest_camera_frame(end_png, mime_type="image/png")
+            self.assertEqual(code2, 200)
+            self.assertTrue(body2["vision_decoded"])
+            self.assertGreater(body2["visual_row_end_conf"], body1["visual_row_end_conf"])
+            self.assertGreaterEqual(body2["visual_row_end_conf"], 0.70)
+            # Confirm RoverStateMachine visual_row_end_fn sees the computed value
+            self.assertAlmostEqual(
+                ctrl._get_visual_row_end_conf(), body2["visual_row_end_conf"], places=2
+            )
+
+    def test_multipart_image_upload_extraction_for_android_client(self):
+        from pi_server import HardenedNavigationController, extract_multipart_image
+
+        boundary = "----AndroidPiLiveClientBoundary"
+        sample_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="frame.jpg"\r\n'
+            f"Content-Type: image/jpeg\r\n\r\n"
+        ).encode("utf-8") + sample_jpeg + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        content_type = f"multipart/form-data; boundary={boundary}"
+
+        extracted, mime = extract_multipart_image(body, content_type)
+        self.assertEqual(extracted, sample_jpeg)
+        self.assertEqual(mime, "image/jpeg")
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        code, resp = ctrl.ingest_camera_frame(extracted, mime_type=mime)
+        self.assertEqual(code, 200)
+        self.assertTrue(resp["ok"])
+        self.assertTrue(resp["bev_ready"])
+        self.assertEqual(resp["bev_url"], "/bev_image")
+        self.assertIn("furrows", resp)
+        self.assertIn("row_end_detected", resp)
+        self.assertIn("confidence", resp)
+
+    def test_load_weed_model_path_confinement_and_verification(self):
+        import tempfile
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+
+        # Reject empty path
+        c0, b0 = ctrl.load_weed_model("")
+        self.assertEqual(c0, 400)
+        self.assertFalse(ctrl.model_loaded)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prev_env = os.environ.get("WEED_MODEL_DIR")
+            os.environ["WEED_MODEL_DIR"] = tmpdir
+            try:
+                # Reject path traversal outside WEED_MODEL_DIR
+                c1, b1 = ctrl.load_weed_model("../../etc/passwd")
+                self.assertEqual(c1, 403)
+                self.assertEqual(b1["error"], "MODEL_PATH_OUTSIDE_ALLOWED_DIR")
+                self.assertFalse(ctrl.model_loaded)
+
+                # Reject unsupported extension
+                txt_path = os.path.join(tmpdir, "notes.txt")
+                with open(txt_path, "wb") as fh:
+                    fh.write(b"not a model")
+                c2, b2 = ctrl.load_weed_model("notes.txt")
+                self.assertEqual(c2, 400)
+                self.assertFalse(ctrl.model_loaded)
+
+                # Reject missing .pt file
+                c3, b3 = ctrl.load_weed_model("missing_weights.pt")
+                self.assertEqual(c3, 404)
+                self.assertFalse(ctrl.model_loaded)
+
+                # Accept verified real .pt file inside WEED_MODEL_DIR
+                pt_path = os.path.join(tmpdir, "weed_detector_v1.pt")
+                with open(pt_path, "wb") as fh:
+                    fh.write(b"WEIGHTS_PAYLOAD_BYTES")
+                c4, b4 = ctrl.load_weed_model("weed_detector_v1.pt")
+                self.assertEqual(c4, 200, b4)
+                self.assertTrue(b4["model_loaded"])
+                self.assertTrue(ctrl.model_loaded)
+                self.assertEqual(b4["model_file"], "weed_detector_v1.pt")
+                self.assertGreater(b4["size_bytes"], 0)
+            finally:
+                if prev_env is None:
+                    os.environ.pop("WEED_MODEL_DIR", None)
+                else:
+                    os.environ["WEED_MODEL_DIR"] = prev_env
+
+    def test_execute_next_treatment_target_enforces_interlocks_and_stationary_stop(self):
+        from pi_server import HardenedNavigationController
+
+        ctrl = HardenedNavigationController(self.config, simulate=True)
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9")
+
+        # Strictly blocked by default (nav_only_mode=True, model_loaded=False, uncalibrated, no actuator)
+        c1, b1 = ctrl.execute_next_treatment_target()
+        self.assertEqual(c1, 412)
+        self.assertIn("NAV_ONLY_MODE_ACTIVE", b1["blockers"])
+        self.assertIn("WEED_MODEL_NOT_LOADED", b1["blockers"])
+        self.assertIn("HOMOGRAPHY_NOT_CALIBRATED", b1["blockers"])
+        self.assertIn("TREATMENT_ACTUATOR_NOT_ATTACHED", b1["blockers"])
+
+        # Enable all interlocks explicitly
+        ctrl.nav_only_mode = False
+        ctrl.model_loaded = True
+        ctrl.set_homography_matrix([
+            [0.421, -0.012, -260.0],
+            [0.015, 0.418, 10.0],
+            [0.0, 0.0, 1.0],
+        ])
+        d_code, d_body = ctrl.handle_detection(
+            class_name="weed_dandelion", confidence=0.94, u_px=640, v_px=360
+        )
+        self.assertEqual(d_code, 200)
+        self.assertTrue(d_body["accepted"])
+
+        actuated: list[tuple[int, int]] = []
+
+        def mock_actuator(target, dwell_ms: int) -> bool:
+            actuated.append((target.target_id, dwell_ms))
+            return True
+
+        c2, b2 = ctrl.execute_next_treatment_target(actuator_fn=mock_actuator)
+        self.assertEqual(c2, 200, b2)
+        self.assertTrue(b2["executed"])
+        self.assertEqual(b2["weeds_eliminated"], 1)
+        self.assertEqual(len(actuated), 1)
+        # Rover velocity must be zeroed prior to stationary treatment actuation
+        self.assertEqual(ctrl.esp32.left_rad_s, 0.0)
+        self.assertEqual(ctrl.esp32.right_rad_s, 0.0)
+
+    def test_bearer_token_authentication_verification(self):
+        from pi_server import verify_bearer_token
+
+        # Open when no token configured (local bench default)
+        self.assertTrue(verify_bearer_token(None, None))
+        self.assertTrue(verify_bearer_token(None, ""))
+
+        # Enforced when PI_API_TOKEN is configured
+        secret = "field-rover-secret-token-99"
+        self.assertFalse(verify_bearer_token(None, secret))
+        self.assertFalse(verify_bearer_token("", secret))
+        self.assertFalse(verify_bearer_token("Basic abc123", secret))
+        self.assertFalse(verify_bearer_token("Bearer wrong-token", secret))
+        self.assertTrue(verify_bearer_token(f"Bearer {secret}", secret))
+        self.assertTrue(verify_bearer_token(f"bearer {secret}", secret))
+
+    def test_ros2_row_follow_action_server_structure(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        action_def = os.path.join(
+            repo_root, "ros2_ws", "src", "crop_row_navigation", "action", "FollowCropRow.action"
+        )
+        node_src = os.path.join(
+            repo_root, "ros2_ws", "src", "crop_row_navigation", "row_follow_action.py"
+        )
+        self.assertTrue(os.path.isfile(action_def), "FollowCropRow.action interface missing")
+        self.assertTrue(os.path.isfile(node_src), "row_follow_action.py missing")
+        with open(node_src, "r", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("ActionServer(", src)
+        self.assertIn("/follow_crop_row", src)
+        self.assertIn("_goal_callback", src)
+        self.assertIn("_cancel_callback", src)
+        self.assertIn("_execute_goal_callback", src)
+        self.assertIn("MultiThreadedExecutor", src)
 
 
 if __name__ == "__main__":

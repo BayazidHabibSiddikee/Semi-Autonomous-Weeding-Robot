@@ -28,6 +28,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
+import hmac
 import math
 import os
 import sys
@@ -38,6 +41,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config_loader import load_yaml_config
+from crop_row_vision import analyze_crop_row_frame
 from esp32_bridge import ESP32Bridge, ESP32Simulator, StopAckResult
 from rover_main import build_navigation_stack
 from state_machine import RoverState
@@ -53,6 +57,48 @@ SAMPLE_IMAGE_MARKERS = (
 )
 
 MAX_INGEST_FRAME_BYTES = 5 * 1024 * 1024  # 5 MB upper bound on uploaded JPEG/PNG frames
+ALLOWED_MODEL_EXTENSIONS = (".pt", ".onnx", ".engine", ".tflite")
+
+
+def extract_multipart_image(raw_body: bytes, content_type: str) -> tuple[bytes | None, str]:
+    """
+    Extract uploaded image bytes and MIME type from a multipart/form-data request
+    using Python stdlib email.parser (no external python-multipart dependency required).
+    """
+    if not raw_body or "multipart/form-data" not in content_type.lower():
+        return None, "image/jpeg"
+    header_block = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    try:
+        msg = BytesParser(policy=email_default_policy).parsebytes(header_block + raw_body)
+    except Exception:
+        return None, "image/jpeg"
+    if not msg.is_multipart():
+        return None, "image/jpeg"
+    for part in msg.iter_parts():
+        part_ct = (part.get_content_type() or "").lower()
+        part_name = (part.get_param("name", header="content-disposition") or "").lower()
+        filename = part.get_filename()
+        if part_ct.startswith("image/") or filename or part_name in ("file", "image", "frame"):
+            payload = part.get_payload(decode=True)
+            if payload:
+                mime = "image/png" if "png" in part_ct or (filename or "").lower().endswith(".png") else "image/jpeg"
+                return payload, mime
+    return None, "image/jpeg"
+
+
+def verify_bearer_token(auth_header: str | None, expected_token: str | None) -> bool:
+    """Constant-time verification of `Authorization: Bearer <token>` when PI_API_TOKEN is configured."""
+    if not expected_token:
+        return True
+    if not auth_header:
+        return False
+    parts = auth_header.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    supplied = parts[1].strip()
+    if not supplied:
+        return False
+    return hmac.compare_digest(supplied, expected_token)
 
 
 @dataclass
@@ -140,13 +186,19 @@ class HardenedNavigationController:
         self.config = config
         self.simulate = simulate
         self.model_loaded = model_loaded
+        self.model_path: str | None = None
         self._lock = threading.RLock()
 
         self._latest_visual_row_end_conf: float = 0.0
         self._latest_visual_lateral_error_m: float = 0.0
+        self._latest_visual_heading_error_rad: float = 0.0
+        self._latest_vision_analysis: dict[str, Any] | None = None
         self._latest_frame_bytes: bytes | None = None
         self._latest_frame_mime: str = "image/jpeg"
         self._frames_ingested: int = 0
+        self._row_width_m: float = float(
+            config.get("rover", {}).get("navigation", {}).get("row_width_cm", 60.0)
+        ) / 100.0
 
         self.esp32, self.sm = build_navigation_stack(
             config,
@@ -186,9 +238,11 @@ class HardenedNavigationController:
     ) -> tuple[int, dict[str, Any]]:
         """
         Ingest a live camera frame (from MaixSense bridge, USB cam, or Android POST /image),
-        refreshing CameraHealthMonitor and optional visual row-end confidence.
+        run live Excess-Green crop-row analysis when decodable image bytes are provided,
+        and refresh CameraHealthMonitor + visual row-end confidence for RoverStateMachine.
         """
         with self._lock:
+            vision_dict: dict[str, Any] | None = None
             if frame_bytes is not None:
                 if len(frame_bytes) == 0:
                     self.camera_monitor.record_read_failure()
@@ -198,6 +252,16 @@ class HardenedNavigationController:
                 self._latest_frame_bytes = frame_bytes
                 self._latest_frame_mime = mime_type if mime_type in ("image/jpeg", "image/png") else "image/jpeg"
 
+                vision_res = analyze_crop_row_frame(frame_bytes, row_width_m=self._row_width_m)
+                vision_dict = vision_res.to_dict()
+                self._latest_vision_analysis = vision_dict
+                if vision_res.decoded:
+                    if visual_row_end_conf is None:
+                        self._latest_visual_row_end_conf = vision_res.visual_row_end_conf
+                    if lateral_error_m is None:
+                        self._latest_visual_lateral_error_m = vision_res.lateral_error_m
+                    self._latest_visual_heading_error_rad = vision_res.heading_error_rad
+
             if visual_row_end_conf is not None and math.isfinite(visual_row_end_conf):
                 self._latest_visual_row_end_conf = max(0.0, min(1.0, float(visual_row_end_conf)))
             if lateral_error_m is not None and math.isfinite(lateral_error_m):
@@ -206,12 +270,118 @@ class HardenedNavigationController:
             self._frames_ingested += 1
             self.camera_monitor.record_frame_ok(now=now)
             cam = self.camera_monitor.evaluate(now=now)
+            decoded = bool(vision_dict and vision_dict.get("decoded"))
             return 200, {
                 "ok": True,
                 "frames_ingested": self._frames_ingested,
                 "camera_healthy": cam.healthy,
                 "visual_row_end_conf": round(self._latest_visual_row_end_conf, 3),
                 "lateral_error_m": round(self._latest_visual_lateral_error_m, 4),
+                "heading_error_rad": round(self._latest_visual_heading_error_rad, 4),
+                # Android PiLiveClient BEV compatibility fields
+                "bev_ready": self._latest_frame_bytes is not None,
+                "bev_url": "/bev_image",
+                "vision_decoded": decoded,
+                "analysis_source": vision_dict.get("analysis_source") if vision_dict else "metadata_only",
+                "confidence": vision_dict.get("confidence", 0.0) if decoded and vision_dict else round(self._latest_visual_row_end_conf, 3),
+                "row_end_detected": self._latest_visual_row_end_conf >= 0.75,
+                "green_ratio_near": vision_dict.get("green_ratio_near", 0.0) if vision_dict else 0.0,
+                "green_ratio_far": vision_dict.get("green_ratio_far", 0.0) if vision_dict else 0.0,
+                "image_width": vision_dict.get("image_width", 0) if vision_dict else 0,
+                "image_height": vision_dict.get("image_height", 0) if vision_dict else 0,
+                "furrows": vision_dict.get("furrows", []) if decoded and vision_dict else [],
+            }
+
+    def load_weed_model(self, model_path: Any) -> tuple[int, dict[str, Any]]:
+        """
+        Verify and register a real trained weed-vs-crop detector weights file on disk.
+        Strictly path-confined inside WEED_MODEL_DIR (or repo root) and never fakes model_loaded=True.
+        """
+        if not isinstance(model_path, str) or not model_path.strip():
+            return 400, {"ok": False, "model_loaded": False, "error": "MODEL_PATH_REQUIRED"}
+
+        repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        allowed_base = os.path.realpath(os.environ.get("WEED_MODEL_DIR", repo_root))
+        raw_path = model_path.strip()
+        candidate = raw_path if os.path.isabs(raw_path) else os.path.join(allowed_base, raw_path)
+        resolved = os.path.realpath(candidate)
+
+        if not (resolved == allowed_base or resolved.startswith(allowed_base + os.sep)):
+            return 403, {"ok": False, "model_loaded": False, "error": "MODEL_PATH_OUTSIDE_ALLOWED_DIR"}
+
+        if not resolved.lower().endswith(ALLOWED_MODEL_EXTENSIONS):
+            return 400, {
+                "ok": False,
+                "model_loaded": False,
+                "error": f"UNSUPPORTED_MODEL_EXTENSION (allowed: {', '.join(ALLOWED_MODEL_EXTENSIONS)})",
+            }
+
+        if not os.path.isfile(resolved):
+            return 404, {"ok": False, "model_loaded": False, "error": "MODEL_FILE_NOT_FOUND"}
+
+        with self._lock:
+            self.model_loaded = True
+            self.model_path = resolved
+            return 200, {
+                "ok": True,
+                "model_loaded": True,
+                "model_file": os.path.basename(resolved),
+                "size_bytes": os.path.getsize(resolved),
+            }
+
+    def execute_next_treatment_target(
+        self,
+        actuator_fn=None,
+        verify_fn=None,
+        now: float | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Stationary, interlock-gated execution of the next queued weed target via TargetExecutionManager.
+        Strictly blocked (HTTP 412) in nav_only_mode or whenever model/homography/camera/ESP32/actuator
+        interlocks fail. Never fakes treatment actuation when no actuator hook is attached.
+        """
+        with self._lock:
+            blockers: list[str] = []
+            if self.nav_only_mode:
+                blockers.append("NAV_ONLY_MODE_ACTIVE")
+            if not self.model_loaded:
+                blockers.append("WEED_MODEL_NOT_LOADED")
+            if not self.target_mgr.is_calibrated:
+                blockers.append("HOMOGRAPHY_NOT_CALIBRATED")
+            if not self.esp32.connected:
+                blockers.append("ESP32_NOT_CONNECTED")
+            else:
+                telem = self.esp32.read_telemetry()
+                if not (telem and telem.valid and telem.estop_ok and telem.watchdog_ok):
+                    blockers.append("ESTOP_OR_WATCHDOG_NOT_READY")
+            cam = self.camera_monitor.evaluate(now=now)
+            if not cam.healthy:
+                blockers.append(f"CAMERA_UNHEALTHY:{cam.reason}")
+            if actuator_fn is None:
+                blockers.append("TREATMENT_ACTUATOR_NOT_ATTACHED")
+
+            if blockers:
+                return 412, {
+                    "executed": False,
+                    "reason": "TREATMENT_INTERLOCK_BLOCKED",
+                    "blockers": blockers,
+                }
+
+            # Enforce stationary rover stop before actuating any modular treatment attachment
+            self.esp32.send_stop()
+            verifier = verify_fn if verify_fn is not None else (lambda _target: True)
+            executed, reason = self.target_mgr.execute_next_target(
+                rover_speed_cms=0.0,
+                estop_ok=True,
+                interlock_ok=True,
+                actuate_fn=actuator_fn,
+                verify_fn=verifier,
+                now=now,
+            )
+            return 200, {
+                "executed": executed,
+                "reason": reason,
+                "weeds_eliminated": self.target_mgr.weeds_eliminated,
             }
 
     def set_homography_matrix(self, matrix: Any) -> tuple[int, dict[str, Any]]:
@@ -478,17 +648,22 @@ class HardenedNavigationController:
     def handle_startup_handshake(
         self,
         *,
-        operator_confirmed: bool = True,
+        allow_clear_latch: bool = False,
+        operator_confirmed: bool = False,
         now: float | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """
-        Zero-config USB ESP32 startup handshake & watchdog initialization sequence:
-          1. Verify/open USB serial link to ESP32.
-          2. Send PING to verify responsiveness and inspect initial latch state.
-          3. Send CLEAR_LATCH (requires operator_confirmed=True and physical GPIO 13 closed)
-             to ensure any boot/idle watchdog latch is explicitly initialized.
-          4. Re-query TELEM? to validate estop_ok=True and watchdog_ok=True.
-          5. Evaluate live camera readiness (CameraHealthMonitor) before unlocking dispatch.
+        Safe USB ESP32 startup inspection & explicit operator-authorized latch clear:
+          - Read-only mode (allow_clear_latch=False, DEFAULT):
+              1. Verify/open USB serial link to ESP32.
+              2. Send PING to verify responsiveness.
+              3. Read TELEM? ONLY — NEVER sends CLEAR_LATCH automatically!
+                 If watchdog or E-stop is latched, remains strictly LOCKED.
+              4. Evaluate live camera readiness.
+          - Explicit latch-clear mode (allow_clear_latch=True):
+              Requires operator_confirmed=True (returns HTTP 400 otherwise).
+              Dispatches CLEAR_LATCH, validates post-clear TELEM?, and leaves
+              RoverStateMachine in PAUSED (never auto-resumes or auto-starts).
         """
         with self._lock:
             steps: list[dict[str, Any]] = []
@@ -512,6 +687,8 @@ class HardenedNavigationController:
                         "esp32_ready": False,
                         "watchdog_initialized": False,
                         "estop_ok": False,
+                        "latch_locked": True,
+                        "clear_latch_attempted": False,
                         "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
                         "navigation_dispatch_unlocked": False,
                         "steps": steps,
@@ -532,6 +709,8 @@ class HardenedNavigationController:
                     "esp32_ready": False,
                     "watchdog_initialized": False,
                     "estop_ok": False,
+                    "latch_locked": True,
+                    "clear_latch_attempted": False,
                     "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
                     "navigation_dispatch_unlocked": False,
                     "steps": steps,
@@ -546,7 +725,7 @@ class HardenedNavigationController:
                 "detail": f"ESP32 USB link active on {usb_port} (auto-configured 115200 baud).",
             })
 
-            # Step 2: PING handshake
+            # Step 2: PING handshake (read-only liveness check — does NOT clear a latched fault)
             try:
                 ping_resp = self.esp32.send("PING")
             except Exception as exc:
@@ -557,7 +736,7 @@ class HardenedNavigationController:
                 "command": "PING",
                 "status": "pass" if ping_ok else "fail",
                 "response": ping_resp,
-                "detail": "ESP32 responded to initial PING." if ping_ok else "ESP32 did not acknowledge PING.",
+                "detail": "ESP32 responded to read-only PING." if ping_ok else "ESP32 did not acknowledge PING.",
             })
             if not ping_ok:
                 return 503, {
@@ -566,70 +745,108 @@ class HardenedNavigationController:
                     "esp32_ready": False,
                     "watchdog_initialized": False,
                     "estop_ok": False,
+                    "latch_locked": True,
+                    "clear_latch_attempted": False,
                     "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
                     "navigation_dispatch_unlocked": False,
                     "steps": steps,
                     "status": self.get_status(now=now),
                 }
 
-            # Step 3: CLEAR_LATCH command sequence to initialize watchdog safely
-            if not operator_confirmed:
+            # Step 3: Read current telemetry BEFORE deciding whether any latch is tripped
+            pre_telem = self.esp32.read_telemetry()
+            pre_estop_ok = bool(pre_telem.valid and pre_telem.estop_ok)
+            pre_wd_ok = bool(pre_telem.valid and pre_telem.watchdog_ok)
+            is_latched = (not pre_estop_ok) or (not pre_wd_ok) or (self.sm.state in (RoverState.FAULT, RoverState.ESTOP))
+
+            clear_latch_attempted = False
+            latch_ok = not is_latched
+
+            if not allow_clear_latch:
+                # Strict Read-Only Inspection: NEVER dispatch CLEAR_LATCH automatically!
+                steps.append({
+                    "id": "clear_latch_gate",
+                    "command": "TELEM? (READ-ONLY)",
+                    "status": "pass" if not is_latched else "warn",
+                    "response": (
+                        f"estop_ok={int(pre_estop_ok)} watchdog_ok={int(pre_wd_ok)} latch_locked={int(is_latched)}"
+                        if pre_telem.valid
+                        else "ERR:TELEM_INVALID"
+                    ),
+                    "detail": (
+                        "Read-only startup inspection complete — no latch active (CLEAR_LATCH not required)."
+                        if not is_latched
+                        else "Safety latch is LOCKED. Automatic startup will NOT clear E-stop or watchdog latches — explicit operator authorization is required."
+                    ),
+                })
+                telem = pre_telem
+            else:
+                # Explicit operator latch-clear path
+                if not operator_confirmed:
+                    steps.append({
+                        "id": "clear_latch",
+                        "command": "CLEAR_LATCH",
+                        "status": "fail",
+                        "response": "ERR:OPERATOR_CONFIRMATION_REQUIRED",
+                        "detail": "Explicit operator confirmation is required before dispatching CLEAR_LATCH.",
+                    })
+                    return 400, {
+                        "ok": False,
+                        "usb_port": usb_port,
+                        "esp32_ready": False,
+                        "watchdog_initialized": False,
+                        "estop_ok": pre_estop_ok,
+                        "latch_locked": True,
+                        "clear_latch_attempted": False,
+                        "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
+                        "navigation_dispatch_unlocked": False,
+                        "steps": steps,
+                        "status": self.get_status(now=now),
+                    }
+
+                clear_latch_attempted = True
+                latch_ok, latch_resp = self.esp32.recover_watchdog_latch(operator_confirmed=True)
                 steps.append({
                     "id": "clear_latch",
                     "command": "CLEAR_LATCH",
-                    "status": "fail",
-                    "response": "ERR:OPERATOR_CONFIRMATION_REQUIRED",
-                    "detail": "Operator confirmation is required before dispatching CLEAR_LATCH.",
+                    "status": "pass" if latch_ok else "fail",
+                    "response": latch_resp,
+                    "detail": (
+                        "Operator-authorized CLEAR_LATCH verified; physical GPIO 13 safety loop is closed."
+                        if latch_ok
+                        else f"CLEAR_LATCH rejected ({latch_resp}). Verify physical GPIO 13 E-stop switch is closed."
+                    ),
                 })
-                return 400, {
-                    "ok": False,
-                    "usb_port": usb_port,
-                    "esp32_ready": False,
-                    "watchdog_initialized": False,
-                    "estop_ok": False,
-                    "camera_healthy": self.camera_monitor.evaluate(now=now).healthy,
-                    "navigation_dispatch_unlocked": False,
-                    "steps": steps,
-                    "status": self.get_status(now=now),
-                }
+                telem = self.esp32.read_telemetry()
 
-            latch_ok, latch_resp = self.esp32.recover_watchdog_latch(operator_confirmed=True)
-            steps.append({
-                "id": "clear_latch",
-                "command": "CLEAR_LATCH",
-                "status": "pass" if latch_ok else "fail",
-                "response": latch_resp,
-                "detail": (
-                    "Watchdog/E-stop latch cleared and physical GPIO 13 safety loop verified closed."
-                    if latch_ok
-                    else f"CLEAR_LATCH rejected ({latch_resp}). Verify physical GPIO 13 E-stop switch is closed."
-                ),
-            })
-
-            # Step 4: Validate post-clear ready-state via TELEM?
-            telem = self.esp32.read_telemetry()
+            # Step 4: Validate resulting ready-state via TELEM?
             estop_ok = bool(telem.valid and telem.estop_ok)
             watchdog_ok = bool(telem.valid and telem.watchdog_ok)
-            esp32_ready = bool(latch_ok and estop_ok and watchdog_ok)
+            sm_latched = self.sm.state in (RoverState.FAULT, RoverState.ESTOP)
+
+            # Recover state machine strictly to PAUSED ONLY on explicit operator-authorized clear_latch
+            if allow_clear_latch and operator_confirmed and latch_ok and estop_ok and watchdog_ok and sm_latched:
+                self.sm.recover()
+                self.mission_active = False
+                sm_latched = self.sm.state in (RoverState.FAULT, RoverState.ESTOP)
+
+            latch_locked = (not estop_ok) or (not watchdog_ok) or sm_latched
+            esp32_ready = bool(latch_ok and estop_ok and watchdog_ok and not sm_latched)
             steps.append({
                 "id": "ready_validate",
                 "command": "TELEM?",
-                "status": "pass" if esp32_ready else "fail",
+                "status": "pass" if esp32_ready else "warn" if not allow_clear_latch else "fail",
                 "response": (
-                    f"estop_ok={int(estop_ok)} watchdog_ok={int(watchdog_ok)} dist_mm={telem.distance_mm}"
+                    f"estop_ok={int(estop_ok)} watchdog_ok={int(watchdog_ok)} dist_mm={telem.distance_mm} state={self.sm.state}"
                     if telem.valid
                     else "ERR:TELEM_INVALID"
                 ),
                 "detail": (
-                    "ESP32 watchdog initialized and ready-state validated for navigation commands."
+                    "ESP32 watchdog initialized and ready-state validated (rover remains PAUSED/IDLE until explicit mission start)."
                     if esp32_ready
-                    else "ESP32 ready-state check failed; navigation dispatch remains locked."
+                    else "ESP32 latch remains locked; navigation dispatch is blocked until explicit operator recovery."
                 ),
             })
-
-            # If state machine was previously latched in FAULT/ESTOP and ESP32 is now healthy, recover to PAUSED
-            if esp32_ready and self.sm.state in (RoverState.FAULT, RoverState.ESTOP):
-                self.sm.recover()
 
             # Step 5: Camera health readiness check
             cam = self.camera_monitor.evaluate(now=now)
@@ -646,14 +863,17 @@ class HardenedNavigationController:
             })
 
             nav_unlocked = bool(esp32_ready and cam.healthy)
-            http_code = 200 if esp32_ready else 412
+            http_code = 200 if (esp32_ready or not allow_clear_latch) else 412
             return http_code, {
                 "ok": esp32_ready,
                 "usb_port": usb_port,
                 "simulated": self.simulate,
                 "esp32_ready": esp32_ready,
-                "watchdog_initialized": watchdog_ok and latch_ok,
+                "watchdog_initialized": watchdog_ok and not latch_locked,
                 "estop_ok": estop_ok,
+                "latch_locked": latch_locked,
+                "clear_latch_attempted": clear_latch_attempted,
+                "inspection_only": not allow_clear_latch,
                 "camera_healthy": cam.healthy,
                 "camera_reason": cam.reason,
                 "frames_ingested": self._frames_ingested,
@@ -764,6 +984,9 @@ class HardenedNavigationController:
             pose = self.sm.rover.localizer.get_pose()
             cam = self.camera_monitor.evaluate(now=now)
             telem = self.esp32.read_telemetry() if self.esp32.connected else None
+            estop_ok = bool(telem and telem.valid and telem.estop_ok)
+            watchdog_ok = bool(telem and telem.valid and telem.watchdog_ok)
+            latch_locked = (not estop_ok) or (not watchdog_ok) or (self.sm.state in (RoverState.FAULT, RoverState.ESTOP))
             return {
                 "state": self.sm.state,
                 "fault_reason": self.sm.fault_reason,
@@ -783,16 +1006,23 @@ class HardenedNavigationController:
                 "coverage": self.sm.tracker.summary(),
                 "hardware": {
                     "esp32_connected": self.esp32.connected,
-                    "estop_ok": bool(telem and telem.valid and telem.estop_ok),
-                    "watchdog_ok": bool(telem and telem.valid and telem.watchdog_ok),
+                    "estop_ok": estop_ok,
+                    "watchdog_ok": watchdog_ok,
+                    "latch_locked": latch_locked,
+                    "left_ticks": telem.left_ticks if (telem and telem.valid) else 0,
+                    "right_ticks": telem.right_ticks if (telem and telem.valid) else 0,
                     "distance_mm": telem.distance_mm if (telem and telem.valid) else -1,
                     "imu_connected": bool(getattr(self.sm.rover, "imu_heading_fn", None) is not None),
                     "camera_healthy": cam.healthy,
                     "camera_reason": cam.reason,
                     "visual_row_end_conf": round(self._latest_visual_row_end_conf, 3),
+                    "visual_lateral_error_m": round(self._latest_visual_lateral_error_m, 4),
+                    "visual_heading_error_rad": round(self._latest_visual_heading_error_rad, 4),
                     "model_loaded": self.model_loaded,
+                    "model_file": os.path.basename(self.model_path) if self.model_path else None,
                     "homography_calibrated": self.target_mgr.is_calibrated,
                 },
+                "vision_analysis": self._latest_vision_analysis,
                 "weeds_eliminated": self.target_mgr.weeds_eliminated,
                 "rejected_crops": self.target_mgr.rejected_crops,
             }
@@ -935,11 +1165,31 @@ def create_fastapi_app(
     simulate: bool = False,
     start_worker: bool = True,
     worker_hz: float = 10.0,
+    api_token: str | None = None,
 ):
-    """FastAPI app factory for Raspberry Pi 5 runtime on port 8000 with asyncio background control loop."""
-    from fastapi import FastAPI, Request
+    """
+    FastAPI app factory for Raspberry Pi 5 runtime on port 8000 with:
+      - asyncio background control loop worker
+      - server-side Bearer token authentication when PI_API_TOKEN (or api_token) is set
+      - read-only default startup handshake (never auto-clears E-stop/watchdog latches)
+      - real ExG crop-row vision analysis on /camera/frame and multipart Android /image
+    """
+    from fastapi import Depends, FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, Response
+
+    expected_token = (
+        api_token.strip()
+        if isinstance(api_token, str) and api_token.strip()
+        else (os.environ.get("PI_API_TOKEN", "").strip() or None)
+    )
+
+    def require_bearer_auth(request: Request) -> None:
+        if not verify_bearer_token(request.headers.get("authorization"), expected_token):
+            raise HTTPException(
+                status_code=401,
+                detail="UNAUTHORIZED: Valid Authorization: Bearer <PI_API_TOKEN> header required.",
+            )
 
     controller = HardenedNavigationController(config=config, simulate=simulate)
     worker = AsyncControlLoopWorker(controller, hz=worker_hz)
@@ -964,6 +1214,7 @@ def create_fastapi_app(
     app.state.controller = controller
     app.state.worker = worker
     app.state.control_loop_task = None
+    app.state.auth_enabled = bool(expected_token)
 
     app.add_middleware(
         CORSMiddleware,
@@ -978,6 +1229,7 @@ def create_fastapi_app(
         status = controller.get_status()
         return {
             "ok": True,
+            "auth_enabled": bool(expected_token),
             "worker_running": worker.is_running,
             "worker_hz": worker.hz,
             "worker_ticks": controller.worker_ticks,
@@ -989,7 +1241,7 @@ def create_fastapi_app(
     def get_cut_plan():
         return controller.get_status()
 
-    @app.post("/start_mission")
+    @app.post("/start_mission", dependencies=[Depends(require_bearer_auth)])
     def post_start_mission(payload: dict[str, Any] | None = None):
         body = payload or {}
         # Support both canonical payload and Android PiLiveClient payload (start/end/relay_mode)
@@ -1009,19 +1261,24 @@ def create_fastapi_app(
                 k: body[k] for k in ("start", "end", "relay_mode", "start_row", "end_row") if k in body
             },
         )
+        if code == 412 and isinstance(data, dict):
+            data["contract_hint"] = (
+                "Send operator_confirmed=true and nav_only=true (or relay_mode='nav_only') for navigation-only runs; "
+                "treatment modes require loaded detector weights (/model/load) and 3x3 homography (/calibration/homography)."
+            )
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/pause")
+    @app.post("/pause", dependencies=[Depends(require_bearer_auth)])
     def post_pause():
         code, data = controller.handle_pause()
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/resume")
+    @app.post("/resume", dependencies=[Depends(require_bearer_auth)])
     def post_resume():
         code, data = controller.handle_resume()
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/recover")
+    @app.post("/recover", dependencies=[Depends(require_bearer_auth)])
     def post_recover(payload: dict[str, Any] | None = None):
         body = payload or {}
         pose_raw = body.get("relocalize_pose")
@@ -1040,15 +1297,17 @@ def create_fastapi_app(
         )
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/handshake")
+    @app.post("/handshake", dependencies=[Depends(require_bearer_auth)])
     def post_handshake(payload: dict[str, Any] | None = None):
         body = payload or {}
+        # Read-only by default: CLEAR_LATCH runs ONLY when BOTH allow_clear_latch=True and operator_confirmed=True!
         code, data = controller.handle_startup_handshake(
-            operator_confirmed=bool(body.get("operator_confirmed", True)),
+            allow_clear_latch=bool(body.get("allow_clear_latch", False)),
+            operator_confirmed=bool(body.get("operator_confirmed", False)),
         )
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/stop")
+    @app.post("/stop", dependencies=[Depends(require_bearer_auth)])
     def post_stop():
         code, data = controller.handle_stop()
         return JSONResponse(status_code=code, content=data)
@@ -1057,16 +1316,22 @@ def create_fastapi_app(
     @app.post("/heartbeat")
     def handle_heartbeat():
         controller.send_keepalive()
-        return {"ok": True, "worker_running": worker.is_running, "status": controller.get_status()}
+        return {
+            "ok": True,
+            "auth_enabled": bool(expected_token),
+            "worker_running": worker.is_running,
+            "status": controller.get_status(),
+        }
 
     async def _ingest_frame_request(request: Request):
-        ctype = (request.headers.get("content-type") or "").lower()
+        ctype = request.headers.get("content-type") or ""
+        ctype_low = ctype.lower()
         vis_conf_hdr = request.headers.get("x-visual-row-end-conf")
         lat_err_hdr = request.headers.get("x-lateral-error-m")
         vis_conf = float(vis_conf_hdr) if vis_conf_hdr is not None else None
         lat_err = float(lat_err_hdr) if lat_err_hdr is not None else None
 
-        if "application/json" in ctype:
+        if "application/json" in ctype_low:
             body = await request.json()
             if isinstance(body, dict):
                 if "visual_row_end_conf" in body:
@@ -1081,7 +1346,22 @@ def create_fastapi_app(
             return JSONResponse(status_code=code, content=data)
 
         raw = await request.body()
-        mime = "image/png" if "png" in ctype else "image/jpeg"
+        if "multipart/form-data" in ctype_low:
+            img_bytes, mime = extract_multipart_image(raw, ctype)
+            if img_bytes is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "MULTIPART_IMAGE_PART_NOT_FOUND"},
+                )
+            code, data = controller.ingest_camera_frame(
+                img_bytes,
+                mime_type=mime,
+                visual_row_end_conf=vis_conf,
+                lateral_error_m=lat_err,
+            )
+            return JSONResponse(status_code=code, content=data)
+
+        mime = "image/png" if "png" in ctype_low else "image/jpeg"
         code, data = controller.ingest_camera_frame(
             raw,
             mime_type=mime,
@@ -1090,11 +1370,11 @@ def create_fastapi_app(
         )
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/camera/frame")
+    @app.post("/camera/frame", dependencies=[Depends(require_bearer_auth)])
     async def post_camera_frame(request: Request):
         return await _ingest_frame_request(request)
 
-    @app.post("/image")
+    @app.post("/image", dependencies=[Depends(require_bearer_auth)])
     async def post_image(request: Request):
         return await _ingest_frame_request(request)
 
@@ -1120,13 +1400,19 @@ def create_fastapi_app(
     def get_map_feed():
         return Response(content=controller.render_map_svg(), media_type="image/svg+xml")
 
-    @app.post("/calibration/homography")
+    @app.post("/calibration/homography", dependencies=[Depends(require_bearer_auth)])
     def post_homography(payload: dict[str, Any] | None = None):
         body = payload or {}
         code, data = controller.set_homography_matrix(body.get("matrix"))
         return JSONResponse(status_code=code, content=data)
 
-    @app.post("/detections")
+    @app.post("/model/load", dependencies=[Depends(require_bearer_auth)])
+    def post_load_model(payload: dict[str, Any] | None = None):
+        body = payload or {}
+        code, data = controller.load_weed_model(body.get("model_path"))
+        return JSONResponse(status_code=code, content=data)
+
+    @app.post("/detections", dependencies=[Depends(require_bearer_auth)])
     def post_detections(payload: dict[str, Any] | None = None):
         body = payload or {}
         code, data = controller.handle_detection(
@@ -1137,13 +1423,18 @@ def create_fastapi_app(
         )
         return JSONResponse(status_code=code, content=data)
 
+    @app.post("/treatment/execute_next", dependencies=[Depends(require_bearer_auth)])
+    def post_treatment_execute_next():
+        code, data = controller.execute_next_treatment_target()
+        return JSONResponse(status_code=code, content=data)
+
     return app
 
 
 def create_default_app(simulate: bool | None = None, worker_hz: float | None = None):
     """
     Build the ready-to-run global FastAPI ASGI app for Raspberry Pi 5:
-      uvicorn Navigation.src.pi_server:app --host 0.0.0.0 --port 8000
+      PI_API_TOKEN=your-secret uvicorn Navigation.src.pi_server:app --host 0.0.0.0 --port 8000
     """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     cfg_rel = os.environ.get("WEED_ROVER_CONFIG", "Navigation/rover_config.yaml")

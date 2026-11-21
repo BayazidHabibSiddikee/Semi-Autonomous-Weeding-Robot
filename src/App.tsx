@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { OctagonAlert, RotateCcw, Terminal } from 'lucide-react';
 import { NavigationWorkbench } from './components/NavigationWorkbench';
 import { HardwareAuditView } from './components/HardwareAuditView';
@@ -33,10 +33,10 @@ export default function App() {
     '[Decoupled] Navigation-only mode active by default (treatment actuators detached until real YOLO weights and homography calibration are loaded).',
   ]);
 
-  const appendLog = (msg: string) => {
+  const appendLog = useCallback((msg: string) => {
     const ts = new Date().toLocaleTimeString();
     setEventLog((prev) => [`[${ts}] ${msg}`, ...prev.slice(0, 19)]);
-  };
+  }, []);
 
   useEffect(() => {
     let active = true;

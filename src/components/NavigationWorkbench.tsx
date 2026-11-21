@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -52,6 +52,8 @@ import {
   MISSION_CONTROL_ENDPOINTS,
   MissionCommandResult,
   MissionControlStatus,
+  MissionLifecycleState,
+  deriveMissionLifecycleState,
   missionControlService,
 } from '../services/MissionControlService';
 
@@ -108,6 +110,16 @@ const FIELD_LEN_M = 8.0;
 const ROW_START_X = 1.2;
 const ROW_END_X = ROW_START_X + FIELD_LEN_M;
 const NUM_ROWS = 4;
+
+const DRIFT_CHART_MARGIN = { top: 4, right: 12, left: -16, bottom: 0 };
+const DRIFT_CHART_TOOLTIP_STYLE = {
+  backgroundColor: '#FFFFFF',
+  borderColor: '#CBD5E1',
+  borderRadius: '6px',
+  fontSize: '12px',
+  fontFamily: 'IBM Plex Mono, monospace',
+  color: '#0F172A',
+};
 
 function rowCenterY(rowIdx: number, rowWidthM: number) {
   return 0.9 + rowIdx * rowWidthM;
@@ -447,10 +459,13 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     setStreamAction((prev) => ({ type, seq: (prev?.seq ?? 0) + 1 }));
   };
 
-  const simAlignmentWithLabel: VisionAlignmentData = {
-    ...simVisionAlignment,
-    sourceLabel: `FIELD SIM · Row ${simVisionAlignment.currentRow} · /crop_row/alignment`,
-  };
+  const simAlignmentWithLabel: VisionAlignmentData = useMemo(
+    () => ({
+      ...simVisionAlignment,
+      sourceLabel: `FIELD SIM · Row ${simVisionAlignment.currentRow} · /crop_row/alignment`,
+    }),
+    [simVisionAlignment]
+  );
 
   const [cameraFeedState, setCameraFeedState] = useState<{
     active: boolean;
@@ -469,12 +484,21 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     []
   );
 
-  const visionAlignment: VisionAlignmentData =
-    cameraFeedState.active && cameraFeedState.alignment
-      ? cameraFeedState.alignment
-      : liveVisionState.active && liveVisionState.alignment
-      ? liveVisionState.alignment
-      : simAlignmentWithLabel;
+  const visionAlignment: VisionAlignmentData = useMemo(
+    () =>
+      cameraFeedState.active && cameraFeedState.alignment
+        ? cameraFeedState.alignment
+        : liveVisionState.active && liveVisionState.alignment
+        ? liveVisionState.alignment
+        : simAlignmentWithLabel,
+    [
+      cameraFeedState.active,
+      cameraFeedState.alignment,
+      liveVisionState.active,
+      liveVisionState.alignment,
+      simAlignmentWithLabel,
+    ]
+  );
 
   // Dedicated row_end_detection vision service instance
   const rowEndServiceRef = useRef<RowEndDetectionService>(
@@ -485,8 +509,11 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     rowEndServiceRef.current.getSnapshot()
   );
 
+  const isPiLive = piStatus?.mode === 'pi_live';
+
   const paramsRef = useRef({
     running,
+    isPiLive,
     speedLimit,
     stanleyGain,
     rowWidthM: rowWidthCm / 100,
@@ -502,6 +529,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
   useEffect(() => {
     paramsRef.current = {
       running,
+      isPiLive,
       speedLimit,
       stanleyGain,
       rowWidthM: rowWidthCm / 100,
@@ -515,6 +543,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     };
   }, [
     running,
+    isPiLive,
     speedLimit,
     stanleyGain,
     rowWidthCm,
@@ -684,7 +713,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     setRowEndSnapshot(snapshot);
 
     if (newlyTriggeredAlert) {
-      onLogEvent(
+      onLogEventRef.current(
         `[row_end_detection] TURN ALERT ${newlyTriggeredAlert.id} (FOLLOW_CROP_ROW → ROW_END_STOP): Furrow end at ${newlyTriggeredAlert.distanceToFurrowEndM.toFixed(
           2
         )} m (${Math.round(newlyTriggeredAlert.confidence * 100)}% conf) → ${formatTurnLabel(
@@ -705,7 +734,6 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     cameraFeedState.active,
     liveVisionState.active,
     buildRowEndVisionInput,
-    onLogEvent,
   ]);
 
   const handleUpdateRowEndConfig = useCallback(
@@ -893,17 +921,129 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     }
   };
 
+  const hydrateFromPiStatus = useCallback((status: MissionControlStatus) => {
+    if (status.mode !== 'pi_live' || !status.raw) return;
+    const piBody = status.raw.status as Record<string, any> | undefined;
+    if (!piBody || typeof piBody !== 'object') return;
+
+    const pose = piBody.pose_measured as Record<string, any> | undefined;
+    const hw = piBody.hardware as Record<string, any> | undefined;
+    const rowProg = piBody.row_progress as Record<string, any> | undefined;
+    const cov = piBody.coverage as Record<string, any> | undefined;
+    const s = simRef.current;
+
+    if (pose && typeof pose.x_cm === 'number' && typeof pose.y_cm === 'number') {
+      const nextX = pose.x_cm / 100;
+      const nextY = pose.y_cm / 100;
+      const nextYaw = ((typeof pose.heading_deg === 'number' ? pose.heading_deg : 0) * Math.PI) / 180;
+      const moved = Math.hypot(nextX - s.x, nextY - s.y);
+      s.x = nextX;
+      s.y = nextY;
+      s.yaw = nextYaw;
+      s.rawX = nextX;
+      s.rawY = nextY;
+      s.rawYaw = nextYaw;
+      if (moved > 0.005 || s.ekfPath.length === 0) {
+        s.ekfPath = [...s.ekfPath.slice(-300), { x: nextX, y: nextY }];
+      }
+      if (typeof pose.slip_residual_cm === 'number') {
+        s.slipResidualCm = pose.slip_residual_cm;
+      }
+    }
+
+    const piStateStr = String(piBody.state || 'IDLE').toUpperCase();
+    const mappedPhase: MissionPhase =
+      piStateStr === 'ESTOP' || piStateStr === 'ESTOP_HALTED'
+        ? 'ESTOP_HALTED'
+        : piStateStr === 'FAULT'
+        ? 'FAULT'
+        : piStateStr === 'OBSTACLE_HOLD'
+        ? 'OBSTACLE_HOLD'
+        : piStateStr === 'HEADLAND_TURN'
+        ? 'NAV2_HEADLAND_TURN'
+        : piStateStr === 'DONE'
+        ? 'MISSION_COMPLETE'
+        : piStateStr === 'PAUSED' || piStateStr === 'IDLE'
+        ? 'PAUSED'
+        : 'FOLLOW_CROP_ROW';
+    s.phase = mappedPhase;
+
+    const distMm = typeof hw?.distance_mm === 'number' ? hw.distance_mm : -1;
+    s.collisionState =
+      distMm < 0 ? 'SENSOR_FAULT' : distMm <= 350 ? 'STOP' : distMm <= 700 ? 'SLOWDOWN' : 'CLEAR';
+    if (typeof hw?.visual_row_end_conf === 'number') {
+      s.rowEndConf = hw.visual_row_end_conf;
+    }
+    if (typeof hw?.visual_lateral_error_m === 'number') {
+      s.latErrM = hw.visual_lateral_error_m;
+    }
+    if (typeof hw?.visual_heading_error_rad === 'number') {
+      s.headErrRad = hw.visual_heading_error_rad;
+    }
+
+    const currentRowIdx =
+      typeof rowProg?.current_row === 'number'
+        ? Math.max(0, Math.min(NUM_ROWS - 1, rowProg.current_row))
+        : s.rowIdx;
+    s.rowIdx = currentRowIdx;
+
+    const covPct = typeof cov?.coverage_pct === 'number' ? cov.coverage_pct : 0;
+    const completedRows = typeof cov?.completed_rows === 'number' ? cov.completed_rows : 0;
+    const activeMission = Boolean(piBody.mission_active);
+    setMissionStarted(activeMission || piStateStr === 'PAUSED');
+    setRunning(activeMission);
+    if (typeof piBody.fault_reason === 'string' && piBody.fault_reason) {
+      setFaultReason(piBody.fault_reason);
+    } else if (piStateStr !== 'FAULT' && piStateStr !== 'ESTOP') {
+      setFaultReason(null);
+    }
+
+    setTelemetry((prev) => ({
+      ...prev,
+      phase: mappedPhase,
+      currentRow: currentRowIdx + 1,
+      x: s.x,
+      y: s.y,
+      yawDeg: (s.yaw * 180) / Math.PI,
+      rowEndConf: s.rowEndConf,
+      slipResidualCm: s.slipResidualCm,
+      collisionState: s.collisionState,
+      coveragePct: covPct,
+      completedRows,
+      cmdVx: activeMission ? speedLimit : 0,
+      cmdWz: 0,
+      boundaryOk: s.boundaryOk,
+    }));
+  }, [speedLimit]);
+
   const refreshPiStatus = useCallback(async () => {
     setPiStatusLoading(true);
     const status = await missionControlService.getStatus();
     setPiStatus(status);
+    hydrateFromPiStatus(status);
     setPiStatusLoading(false);
     return status;
-  }, []);
+  }, [hydrateFromPiStatus]);
 
   useEffect(() => {
     void refreshPiStatus();
   }, [refreshPiStatus]);
+
+  // In Pi Live mode, poll real encoder/IMU pose & state from the Raspberry Pi at ~2.5 Hz (zero simulated motion!)
+  useEffect(() => {
+    if (!isPiLive) return;
+    let active = true;
+    const id = window.setInterval(async () => {
+      const status = await missionControlService.getStatus();
+      if (!active) return;
+      setPiStatus(status);
+      hydrateFromPiStatus(status);
+    }, 400);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [isPiLive, hydrateFromPiStatus]);
 
   const handleMissionStart = useCallback(async () => {
     if (estopActive || faultReason !== null || sensorFaultInjected || missionCmdBusy) return;
@@ -930,25 +1070,27 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
       return;
     }
 
-    if (simRef.current.phase === 'MISSION_COMPLETE') {
-      simRef.current.rowIdx = 0;
-      simRef.current.dir = 1;
-      simRef.current.rowProgress = [0, 0, 0, 0];
-      simRef.current.phase = 'FOLLOW_CROP_ROW';
-    }
-    setMissionStarted(true);
-    setRunning(true);
-
     if (result.piExecuted && result.ok) {
+      // Pi Live Mode: DO NOT start local physics simulation — let live Pi encoder/IMU telemetry drive the map!
+      setMissionStarted(true);
+      setRunning(true);
       onLogEvent(
         `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.start} accepted (HTTP ${result.httpStatus}, nav_only=${
           missionMode === 'nav_only'
-        }, state=${result.state ?? 'FOLLOW_ROW'}).`
+        }, state=${result.state ?? 'NAVIGATING_ROW'}) — tracking measured Pi pose.`
       );
       void refreshPiStatus();
     } else {
+      if (simRef.current.phase === 'MISSION_COMPLETE') {
+        simRef.current.rowIdx = 0;
+        simRef.current.dir = 1;
+        simRef.current.rowProgress = [0, 0, 0, 0];
+        simRef.current.phase = 'FOLLOW_CROP_ROW';
+      }
+      setMissionStarted(true);
+      setRunning(true);
       onLogEvent(
-        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.start} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local workbench mission started.`
+        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.start} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local workbench simulation started.`
       );
     }
   }, [
@@ -1204,6 +1346,20 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
 
       const p = paramsRef.current;
       const s = simRef.current;
+
+      // Strict separation: In Pi Live mode, NEVER run local physics simulation!
+      // Render field canvas exclusively from measured Pi encoder/IMU telemetry.
+      if (p.isPiLive) {
+        drawFieldCanvas(fieldCanvasRef.current, s, {
+          rowWidthM: p.rowWidthM,
+          obstacles: p.obstacles,
+          missionMode: p.missionMode,
+        });
+        drawForwardCamCanvas(camCanvasRef.current, s, { rowWidthM: p.rowWidthM });
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
       const dt = dtReal * 2.4;
 
       if (p.sensorFaultInjected) {
@@ -1670,6 +1826,17 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
   }, []);
 
   const isFaulted = faultReason !== null || sensorFaultInjected;
+  const missionLifecycle = deriveMissionLifecycleState({
+    piStatus,
+    lastCommand: lastMissionCmd,
+    missionStarted,
+    running,
+    estopActive,
+    isFaulted,
+    faultReason,
+    telemetryPhase: telemetry.phase,
+  });
+  const LIFECYCLE_STATES: MissionLifecycleState[] = ['IDLE', 'ACTIVE', 'PAUSED', 'ERROR'];
 
   return (
     <div className="space-y-6">
@@ -1753,6 +1920,192 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         </div>
       </div>
 
+      {/* Visual Mission Status Row (IDLE | ACTIVE | PAUSED | ERROR) */}
+      <section
+        aria-label="Mission Status"
+        className={`rounded-lg border px-4 py-3 flex flex-wrap items-center justify-between gap-4 transition-colors ${
+          missionLifecycle.state === 'ACTIVE'
+            ? 'bg-white border-emerald-300/80'
+            : missionLifecycle.state === 'PAUSED'
+            ? 'bg-white border-amber-300/80'
+            : missionLifecycle.state === 'ERROR'
+            ? 'bg-rose-50/40 border-rose-300'
+            : 'bg-white border-emerald-900/10'
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="relative flex h-2.5 w-2.5">
+              {missionLifecycle.state === 'ACTIVE' && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              )}
+              <span
+                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                  missionLifecycle.state === 'ACTIVE'
+                    ? 'bg-emerald-500'
+                    : missionLifecycle.state === 'PAUSED'
+                    ? 'bg-amber-500'
+                    : missionLifecycle.state === 'ERROR'
+                    ? 'bg-rose-600'
+                    : 'bg-slate-400'
+                }`}
+              />
+            </span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Mission Status
+            </span>
+          </div>
+
+          {/* 4-State Lifecycle Indicator Strip */}
+          <div
+            className="inline-flex items-center p-0.5 rounded-md bg-[#F3F8F5] border border-emerald-900/10"
+            role="status"
+            aria-live="polite"
+          >
+            {LIFECYCLE_STATES.map((st) => {
+              const isCurrent = missionLifecycle.state === st;
+              const activeClass =
+                st === 'ACTIVE'
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                  : st === 'PAUSED'
+                  ? 'bg-amber-500 text-white border-amber-500 shadow-xs'
+                  : st === 'ERROR'
+                  ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
+                  : 'bg-slate-700 text-white border-slate-700 shadow-xs';
+              return (
+                <span
+                  key={st}
+                  className={`px-2.5 py-1 text-[11px] font-mono font-semibold rounded border transition-colors ${
+                    isCurrent
+                      ? activeClass
+                      : 'bg-transparent text-slate-400 border-transparent'
+                  }`}
+                >
+                  {st}
+                </span>
+              );
+            })}
+          </div>
+
+          {/* Endpoint + Contract Detail */}
+          <div className="flex flex-wrap items-center gap-2 text-xs min-w-0">
+            <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-[#F8FBF9] border border-slate-200 text-slate-700">
+              {missionLifecycle.sourceEndpoint}
+              {missionLifecycle.httpStatus !== null
+                ? ` · HTTP ${missionLifecycle.httpStatus || 'ERR'}`
+                : ''}
+            </span>
+            <span
+              className={`text-xs truncate max-w-md ${
+                missionLifecycle.state === 'ERROR'
+                  ? 'text-rose-700 font-medium'
+                  : 'text-slate-600'
+              }`}
+              title={missionLifecycle.reason}
+            >
+              {missionLifecycle.reason}
+            </span>
+          </div>
+        </div>
+
+        {/* Inline Lifecycle Quick Controls + Pi Link Status */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <span
+            className={`px-2 py-1 text-[11px] font-mono font-semibold rounded border ${
+              piStatus?.mode === 'pi_live'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : piStatus?.mode === 'pi_unreachable'
+                ? 'bg-rose-50 text-rose-700 border-rose-200'
+                : 'bg-amber-50 text-amber-800 border-amber-200'
+            }`}
+          >
+            {piStatus?.mode === 'pi_live'
+              ? 'PI LIVE'
+              : piStatus?.mode === 'pi_unreachable'
+              ? 'PI OFFLINE'
+              : 'SIM ONLY'}
+          </span>
+
+          {missionLifecycle.state === 'IDLE' ? (
+            <button
+              type="button"
+              onClick={() => void handleMissionStart()}
+              disabled={estopActive || isFaulted || missionCmdBusy}
+              title={`POST ${MISSION_CONTROL_ENDPOINTS.start}`}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{missionCmdBusy ? 'Starting…' : 'Start Mission'}</span>
+            </button>
+          ) : missionLifecycle.state === 'ACTIVE' ? (
+            <button
+              type="button"
+              onClick={() => void handleMissionPause()}
+              disabled={estopActive || isFaulted || missionCmdBusy}
+              title={`POST ${MISSION_CONTROL_ENDPOINTS.pause}`}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Pause className="w-3.5 h-3.5" />
+              <span>{missionCmdBusy ? 'Pausing…' : 'Pause'}</span>
+            </button>
+          ) : missionLifecycle.state === 'PAUSED' ? (
+            <button
+              type="button"
+              onClick={() => void handleMissionResume()}
+              disabled={estopActive || isFaulted || missionCmdBusy}
+              title={`POST ${MISSION_CONTROL_ENDPOINTS.resume}`}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{missionCmdBusy ? 'Resuming…' : 'Resume'}</span>
+            </button>
+          ) : isFaulted ? (
+            <button
+              type="button"
+              onClick={() => void recoverFromFault()}
+              disabled={missionCmdBusy}
+              title={`POST ${MISSION_CONTROL_ENDPOINTS.recover}`}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Recover</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleMissionStart()}
+              disabled={estopActive || missionCmdBusy}
+              title={`Retry POST ${MISSION_CONTROL_ENDPOINTS.start}`}
+              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>Retry Start</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => void handleMissionStop()}
+            disabled={missionCmdBusy || missionLifecycle.state === 'IDLE'}
+            title={`POST ${MISSION_CONTROL_ENDPOINTS.stop}`}
+            className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+          >
+            <Square className="w-3 h-3 fill-current" />
+            <span>Stop</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void refreshPiStatus()}
+            disabled={piStatusLoading}
+            title="Refresh Mission Status from /api/robot/status"
+            className="p-1.5 rounded-md border border-slate-200 bg-[#F8FBF9] hover:bg-emerald-50 text-slate-600 cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${piStatusLoading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      </section>
+
       {/* Asymmetric Split Console */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
         {/* Left Control, Fault-Injection & Checkpoint Column */}
@@ -1825,26 +2178,37 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
               </div>
             </div>
 
-            {/* Audit Fault-Injection Tests */}
+            {/* Audit Fault-Injection Tests (Simulation-Only — disabled in Pi Live Mode) */}
             <div className="pt-4 border-t border-emerald-900/10 space-y-2">
-              <div className="text-xs font-semibold text-slate-800">Audit Fault-Injection Tests</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-slate-800">Audit Fault-Injection Tests</div>
+                <span className="text-[10px] font-mono text-slate-500">
+                  {isPiLive ? 'Disabled (Pi Live)' : 'Sim Only'}
+                </span>
+              </div>
               <button
                 onClick={injectSensorMinusOneFault}
-                className="w-full px-3 py-2 text-xs font-medium bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-800 rounded-md flex items-center justify-between transition-colors cursor-pointer"
+                disabled={isPiLive}
+                title={isPiLive ? 'Simulation fault injection is disabled while controlling a live Raspberry Pi.' : undefined}
+                className="w-full px-3 py-2 text-xs font-medium bg-rose-50 hover:bg-rose-100 disabled:opacity-45 disabled:cursor-not-allowed border border-rose-200 text-rose-800 rounded-md flex items-center justify-between transition-colors cursor-pointer"
               >
                 <span>Inject Sensor -1 Fault (NAV-05)</span>
                 <ShieldAlert className="w-3.5 h-3.5 text-rose-600" />
               </button>
               <button
                 onClick={injectSoilSlip}
-                className="w-full px-3 py-2 text-xs font-medium bg-[#F8FBF9] hover:bg-emerald-50 border border-slate-200 text-slate-700 rounded-md flex items-center justify-between transition-colors cursor-pointer"
+                disabled={isPiLive}
+                title={isPiLive ? 'Simulation fault injection is disabled while controlling a live Raspberry Pi.' : undefined}
+                className="w-full px-3 py-2 text-xs font-medium bg-[#F8FBF9] hover:bg-emerald-50 disabled:opacity-45 disabled:cursor-not-allowed border border-slate-200 text-slate-700 rounded-md flex items-center justify-between transition-colors cursor-pointer"
               >
                 <span>Inject Wheel Slip (NAV-03/10)</span>
                 <Radio className="w-3.5 h-3.5 text-amber-600" />
               </button>
               <button
                 onClick={toggleSampleObstacle}
-                className="w-full px-3 py-2 text-xs font-medium bg-[#F8FBF9] hover:bg-emerald-50 border border-slate-200 text-slate-700 rounded-md flex items-center justify-between transition-colors cursor-pointer"
+                disabled={isPiLive}
+                title={isPiLive ? 'Simulation fault injection is disabled while controlling a live Raspberry Pi.' : undefined}
+                className="w-full px-3 py-2 text-xs font-medium bg-[#F8FBF9] hover:bg-emerald-50 disabled:opacity-45 disabled:cursor-not-allowed border border-slate-200 text-slate-700 rounded-md flex items-center justify-between transition-colors cursor-pointer"
               >
                 <span>
                   {obstacles.length > 0 ? 'Clear Unknown Obstacle' : 'Place Obstacle (NAV-09 Hold)'}
@@ -2066,11 +2430,22 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             {/* Top-Down Field + Boundary Polygon + EKF + LiDAR Map */}
             <div className="lg:col-span-8 bg-white border border-emerald-900/10 rounded-lg p-4 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Compass className="w-4 h-4 text-emerald-600" />
                   <h3 className="text-sm font-semibold text-slate-900">
                     Field Map, Boundary Guard (NAV-08) &amp; Fused Pose
                   </h3>
+                  <span
+                    className={`px-2 py-0.5 text-[10px] font-mono font-semibold rounded border ${
+                      isPiLive
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                        : 'bg-amber-50 text-amber-800 border-amber-300'
+                    }`}
+                  >
+                    {isPiLive
+                      ? 'PI LIVE POSE (MEASURED ENCODER + IMU)'
+                      : 'LOCAL SIMULATION ONLY (NO PHYSICAL MOTION)'}
+                  </span>
                 </div>
                 <div className="flex items-center gap-3 text-[11px] font-mono text-slate-500">
                   <span className="text-emerald-700 font-medium">— Fused Pose</span>
@@ -2241,20 +2616,11 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             </div>
             <div className="h-44 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={history} margin={{ top: 4, right: 12, left: -16, bottom: 0 }}>
+                <LineChart data={history} margin={DRIFT_CHART_MARGIN}>
                   <CartesianGrid stroke="#E2ECE6" strokeDasharray="3 3" />
                   <XAxis dataKey="t" stroke="#64748B" fontSize={11} tickLine={false} />
                   <YAxis stroke="#64748B" fontSize={11} tickLine={false} unit="cm" />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#CBD5E1',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                      fontFamily: 'IBM Plex Mono, monospace',
-                      color: '#0F172A',
-                    }}
-                  />
+                  <Tooltip contentStyle={DRIFT_CHART_TOOLTIP_STYLE} />
                   <Line type="monotone" dataKey="latErrorCm" name="Centerline |e_y|" stroke="#059669" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="ekfDriftCm" name="Fused Drift" stroke="#0D9488" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="rawOdomDriftCm" name="Raw Wheel Drift" stroke="#D97706" strokeWidth={1.75} strokeDasharray="4 4" dot={false} isAnimationActive={false} />

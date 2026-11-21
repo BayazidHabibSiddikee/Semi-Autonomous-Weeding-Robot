@@ -1,0 +1,17 @@
+# Custom ROS 2 Action Definition: FollowCropRow
+# Goal
+int32 row_id
+float32 speed_limit_mps
+float32 max_duration_s
+---
+# Result
+bool success
+string reason
+int32 row_id
+float32 distance_traveled_m
+---
+# Feedback
+float32 lateral_error_m
+float32 heading_error_rad
+float32 row_end_confidence
+float32 elapsed_s

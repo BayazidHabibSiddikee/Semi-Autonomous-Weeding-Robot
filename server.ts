@@ -1336,6 +1336,10 @@ async function startServer() {
       const headers: Record<string, string | number> = {
         'User-Agent': 'WeedingRover-ConsoleProxy/1.0',
       };
+      const piApiToken = (process.env.PI_API_TOKEN || '').trim();
+      if (piApiToken) {
+        headers['Authorization'] = `Bearer ${piApiToken}`;
+      }
       if (bodyBuf) {
         headers['Content-Type'] = contentType;
         headers['Content-Length'] = bodyBuf.byteLength;
@@ -1667,10 +1671,12 @@ async function startServer() {
     });
   });
 
-  // Zero-config USB ESP32 startup handshake (PING -> CLEAR_LATCH -> TELEM?) + camera readiness check
+  // Safe USB ESP32 startup inspection (PING + TELEM? read-only by default) & explicit operator-authorized CLEAR_LATCH
   app.post('/api/robot/handshake', async (req, res) => {
     const startedAt = Date.now();
-    const operatorConfirmed = req.body?.operator_confirmed !== false;
+    // Strictly opt-in: automatic startup MUST NEVER clear a latched E-stop or watchdog fault!
+    const allowClearLatch = req.body?.allow_clear_latch === true;
+    const operatorConfirmed = req.body?.operator_confirmed === true;
     const isCloudContainer = Boolean(process.env.K_SERVICE || process.env.CLOUD_RUN_JOB);
 
     // 1. Read-only scan of /dev for USB-connected ESP32 serial bridges (zero shell execution, zero manual config)
@@ -1730,6 +1736,9 @@ async function startServer() {
         esp32Ready: false,
         watchdogInitialized: false,
         estopOk: false,
+        latchLocked: true,
+        clearLatchAttempted: false,
+        inspectionOnly: !allowClearLatch,
         cameraHealthy: wsCameraPublishers > 0,
         cameraSummary: {
           wsPublishers: wsCameraPublishers,
@@ -1748,18 +1757,19 @@ async function startServer() {
             response: detectedUsbPorts.length > 0 ? detectedUsbPorts.join(', ') : 'NO_LOCAL_USB_PORT',
             detail:
               detectedUsbPorts.length > 0
-                ? `Detected USB serial device(s) on host: ${detectedUsbPorts.join(', ')}. Set PI_ROBOT_URL to run live Pi handshake.`
+                ? `Detected USB serial device(s) on host: ${detectedUsbPorts.join(', ')}. Set PI_ROBOT_URL to inspect live Pi telemetry.`
                 : isCloudContainer
-                ? 'ESP32 connects over USB to your Raspberry Pi. Set PI_ROBOT_URL on the server so CLEAR_LATCH dispatches to the rover.'
+                ? 'ESP32 connects over USB to your Raspberry Pi. Set PI_ROBOT_URL (and PI_API_TOKEN) on the server to link live telemetry.'
                 : 'No USB-serial ESP32 found on /dev/ttyUSB* or /dev/ttyACM*. Plug ESP32 into Raspberry Pi USB and set PI_ROBOT_URL.',
           },
           {
             id: 'clear_latch',
-            command: 'CLEAR_LATCH',
+            command: allowClearLatch ? 'CLEAR_LATCH' : 'TELEM? (READ-ONLY)',
             status: 'warn',
             response: 'PI_BRIDGE_UNCONFIGURED',
-            detail:
-              'CLEAR_LATCH was NOT verified on physical ESP32 because PI_ROBOT_URL is not configured. Watchdog gate remains locked.',
+            detail: allowClearLatch
+              ? 'CLEAR_LATCH was NOT dispatched because PI_ROBOT_URL is not configured. Watchdog gate remains locked.'
+              : 'Read-only inspection complete (PI_ROBOT_URL unset). Automatic startup never clears E-stop or watchdog latches.',
           },
           {
             id: 'camera_check',
@@ -1782,8 +1792,14 @@ async function startServer() {
       return;
     }
 
-    // 3. Proxy real CLEAR_LATCH startup handshake to Raspberry Pi navigation controller
-    const r = await proxyPiRequest('POST', '/handshake', { operator_confirmed: operatorConfirmed }, 'application/json', 3500);
+    // 3. Proxy read-only inspection (default) or explicit operator-authorized CLEAR_LATCH to Pi controller
+    const r = await proxyPiRequest(
+      'POST',
+      '/handshake',
+      { allow_clear_latch: allowClearLatch, operator_confirmed: operatorConfirmed },
+      'application/json',
+      3500
+    );
     if (!r.reachable) {
       res.status(503).json({
         ok: false,
@@ -1795,6 +1811,9 @@ async function startServer() {
         esp32Ready: false,
         watchdogInitialized: false,
         estopOk: false,
+        latchLocked: true,
+        clearLatchAttempted: false,
+        inspectionOnly: !allowClearLatch,
         cameraHealthy: wsCameraPublishers > 0,
         cameraSummary: {
           wsPublishers: wsCameraPublishers,
@@ -1811,7 +1830,7 @@ async function startServer() {
             command: 'POST /handshake',
             status: 'fail',
             response: 'PI_UNREACHABLE',
-            detail: `Could not reach Raspberry Pi controller (${r.error}). Watchdog initialization could not be verified.`,
+            detail: `Could not reach Raspberry Pi controller (${r.error}). Watchdog state could not be verified.`,
           },
         ],
         executedAt: new Date().toISOString(),
@@ -1823,6 +1842,8 @@ async function startServer() {
     const esp32Ready = Boolean(piData.esp32_ready);
     const watchdogInitialized = Boolean(piData.watchdog_initialized);
     const piCameraHealthy = Boolean(piData.camera_healthy);
+    const latchLocked =
+      typeof piData.latch_locked === 'boolean' ? piData.latch_locked : !esp32Ready;
 
     res.status(r.statusCode).json({
       ok: esp32Ready,
@@ -1834,6 +1855,9 @@ async function startServer() {
       esp32Ready,
       watchdogInitialized,
       estopOk: Boolean(piData.estop_ok),
+      latchLocked,
+      clearLatchAttempted: Boolean(piData.clear_latch_attempted),
+      inspectionOnly: piData.inspection_only !== false && !allowClearLatch,
       cameraHealthy: piCameraHealthy || wsCameraPublishers > 0,
       cameraSummary: {
         wsPublishers: wsCameraPublishers,
@@ -2111,7 +2135,7 @@ async function startServer() {
   } else {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
+    app.use((_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

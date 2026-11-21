@@ -19,6 +19,18 @@ import {
   ReferenceLine,
 } from 'recharts';
 
+const TURN_CHART_MARGIN = { top: 6, right: 14, left: -12, bottom: 0 };
+const TURN_Y_DOMAIN: [number, number] = [0, 200];
+const TURN_Y_TICKS = [0, 45, 90, 135, 180];
+const TURN_TOOLTIP_STYLE = {
+  backgroundColor: '#FFFFFF',
+  borderColor: '#CBD5E1',
+  borderRadius: '6px',
+  fontSize: '12px',
+  fontFamily: 'IBM Plex Mono, monospace',
+  color: '#0F172A',
+};
+
 export interface TurnTrajectorySample {
   progressPct: number;
   label: string;
@@ -310,7 +322,7 @@ export const TurnAccuracyDashboard: React.FC<TurnAccuracyDashboardProps> = ({
         {samples.length > 0 ? (
           <div className="h-48 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={samples} margin={{ top: 6, right: 14, left: -12, bottom: 0 }}>
+              <LineChart data={samples} margin={TURN_CHART_MARGIN}>
                 <CartesianGrid stroke="#E2ECE6" strokeDasharray="3 3" />
                 <XAxis
                   dataKey="label"
@@ -319,8 +331,8 @@ export const TurnAccuracyDashboard: React.FC<TurnAccuracyDashboardProps> = ({
                   tickLine={false}
                 />
                 <YAxis
-                  domain={[0, 200]}
-                  ticks={[0, 45, 90, 135, 180]}
+                  domain={TURN_Y_DOMAIN}
+                  ticks={TURN_Y_TICKS}
                   stroke="#64748B"
                   fontSize={11}
                   tickLine={false}
@@ -329,14 +341,7 @@ export const TurnAccuracyDashboard: React.FC<TurnAccuracyDashboardProps> = ({
                 <ReferenceLine y={90} stroke="#CBD5E1" strokeDasharray="2 2" />
                 <ReferenceLine y={180} stroke="#059669" strokeOpacity={0.35} strokeDasharray="4 4" />
                 <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#FFFFFF',
-                    borderColor: '#CBD5E1',
-                    borderRadius: '6px',
-                    fontSize: '12px',
-                    fontFamily: 'IBM Plex Mono, monospace',
-                    color: '#0F172A',
-                  }}
+                  contentStyle={TURN_TOOLTIP_STYLE}
                   formatter={(value: unknown, name: string) => {
                     const num = typeof value === 'number' ? value : Number(value);
                     return [`${Number.isFinite(num) ? num.toFixed(1) : value}°`, name];

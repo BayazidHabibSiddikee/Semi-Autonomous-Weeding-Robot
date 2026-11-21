@@ -95,8 +95,9 @@ export const HardwareAuditView: React.FC = () => {
   const pingInFlightRef = useRef<boolean>(false);
   const pingSeqRef = useRef<number>(0);
 
-  // StartupHandshakeService state (USB ESP32 CLEAR_LATCH + Camera Readiness Gate)
+  // StartupHandshakeService state (Read-Only Inspection on mount; Explicit Operator CLEAR_LATCH only)
   const [handshakeRunning, setHandshakeRunning] = useState<boolean>(false);
+  const [clearLatchConfirmed, setClearLatchConfirmed] = useState<boolean>(false);
   const [handshakeReport, setHandshakeReport] = useState<StartupHandshakeReport | null>(() =>
     startupHandshakeService.getLastReport()
   );
@@ -194,12 +195,12 @@ export const HardwareAuditView: React.FC = () => {
     void runLightweightLatencyPing(ipToReset);
   }, [diagTargetIp, scanResult?.resolvedIp, recordPingSample, runMaixSenseScan, runLightweightLatencyPing]);
 
-  const runStartupHandshake = useCallback(
-    async (trigger: 'auto_initial' | 'manual' = 'manual') => {
+  const runSafeBootScan = useCallback(
+    async (trigger: 'auto_boot_safe_scan' | 'manual_safe_scan' = 'manual_safe_scan') => {
       setHandshakeRunning(true);
       try {
-        const report = await startupHandshakeService.executeHandshake({
-          operatorConfirmed: true,
+        // Safe boot scan: PING + TELEM? + camera health ONLY. NEVER sends CLEAR_LATCH.
+        const report = await startupHandshakeService.performSafeScan({
           trigger,
           customOuiPrefixes: customPrefixes,
         });
@@ -214,6 +215,25 @@ export const HardwareAuditView: React.FC = () => {
     [customPrefixes, diagIpDirty]
   );
 
+  const handleConfirmHardwareRecovery = useCallback(async () => {
+    if (!clearLatchConfirmed) return;
+    setHandshakeRunning(true);
+    try {
+      const report = await startupHandshakeService.confirmHardwareRecovery({
+        operatorConfirmed: true,
+        customOuiPrefixes: customPrefixes,
+      });
+      setHandshakeReport(report);
+      // Reset operator verification checkbox after dispatch so every recovery requires fresh confirmation
+      setClearLatchConfirmed(false);
+      if (report.camera.resolvedIp && !diagIpDirty) {
+        setDiagTargetIp(report.camera.resolvedIp);
+      }
+    } finally {
+      setHandshakeRunning(false);
+    }
+  }, [clearLatchConfirmed, customPrefixes, diagIpDirty]);
+
   useEffect(() => {
     void runMaixSenseScan();
   }, [runMaixSenseScan]);
@@ -221,8 +241,9 @@ export const HardwareAuditView: React.FC = () => {
   useEffect(() => {
     if (initialHandshakeRanRef.current) return;
     initialHandshakeRanRef.current = true;
-    void runStartupHandshake('auto_initial');
-  }, [runStartupHandshake]);
+    // Safe read-only boot scan (PING + TELEM?) ONLY — never auto-clears E-stop or watchdog latches
+    void runSafeBootScan('auto_boot_safe_scan');
+  }, [runSafeBootScan]);
 
   useEffect(() => {
     void runLightweightLatencyPing();
@@ -343,7 +364,7 @@ export const HardwareAuditView: React.FC = () => {
             lastCheckedAt={latestPing.checkedAt}
           />
           <div className="text-xs font-mono tabular-nums text-emerald-700 font-semibold">
-            Verification: 22/22 unittest PASS · Honest Sim: 99.9% coverage · 0 faults
+            Verification: 28/28 unittest PASS · Honest Sim: 99.9% coverage · 0 faults
           </div>
         </div>
       </div>
@@ -360,7 +381,7 @@ export const HardwareAuditView: React.FC = () => {
         <div className="bg-white border border-emerald-900/10 rounded-lg p-4">
           <div className="text-xs text-slate-500">Automated Audit Tests</div>
           <div className="text-2xl font-mono font-semibold tabular-nums text-emerald-700 mt-1">
-            22 / 22 PASS
+            28 / 28 PASS
           </div>
           <div className="text-xs font-mono text-slate-500 mt-1">Navigation/tests/test_navigation_audit.py</div>
         </div>
@@ -380,14 +401,14 @@ export const HardwareAuditView: React.FC = () => {
         </div>
       </div>
 
-      {/* StartupHandshakeService: Zero-Config USB ESP32 CLEAR_LATCH + Camera Readiness Gate */}
+      {/* StartupHandshakeService: Safe Boot Scan (PING/TELEM?) + Manual Operator Hardware Recovery Gate */}
       <section className="bg-white border border-emerald-900/10 rounded-lg p-5 space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-emerald-900/10 pb-3.5">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <Usb className="w-4 h-4 text-emerald-600" />
               <h3 className="text-sm font-semibold text-slate-900">
-                StartupHandshakeService — USB ESP32 Watchdog Init &amp; Camera Readiness Gate
+                StartupHandshakeService — Safe Boot Scan &amp; Manual Hardware Recovery Gate
               </h3>
               <span
                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-semibold border ${
@@ -408,21 +429,79 @@ export const HardwareAuditView: React.FC = () => {
                   </>
                 )}
               </span>
+              {handshakeReport?.inspectionOnly && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium border bg-slate-50 border-slate-200 text-slate-600">
+                  SAFE SCAN (READ-ONLY)
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-600">
-              Auto-runs on initial connect: sends <span className="font-mono text-slate-800">PING → CLEAR_LATCH → TELEM?</span> over plug-and-play USB to initialize the ESP32 watchdog (zero manual port config) and verifies MaixSense / live camera readiness before navigation commands can dispatch.
+              On boot, <span className="font-mono text-slate-800">StartupHandshakeService</span> runs a strictly read-only <span className="font-mono text-slate-800">PING + TELEM?</span> scan and <strong className="text-slate-800">never</strong> automatically sends <span className="font-mono text-slate-800">CLEAR_LATCH</span>. Any latched E-stop or watchdog fault remains locked until the operator manually verifies safety conditions and clicks <strong className="text-slate-800">Confirm Hardware Recovery</strong>.
             </p>
           </div>
 
           <button
             type="button"
             disabled={handshakeRunning}
-            onClick={() => void runStartupHandshake('manual')}
-            className="px-3.5 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white flex items-center gap-1.5 cursor-pointer shrink-0"
+            onClick={() => void runSafeBootScan('manual_safe_scan')}
+            className="px-3.5 py-1.5 text-xs font-semibold rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 disabled:opacity-60 text-slate-800 flex items-center gap-1.5 cursor-pointer shrink-0"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${handshakeRunning ? 'animate-spin' : ''}`} />
-            <span>{handshakeRunning ? 'Running Handshake...' : 'Run Startup Handshake (CLEAR_LATCH)'}</span>
+            <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${handshakeRunning ? 'animate-spin' : ''}`} />
+            <span>{handshakeRunning ? 'Scanning...' : 'Safe Scan (PING + TELEM?)'}</span>
           </button>
+        </div>
+
+        {/* Mandatory Operator Hardware Recovery Gate (CLEAR_LATCH Safety Protocol) */}
+        <div
+          className={`rounded-md border px-4 py-3 space-y-2.5 ${
+            handshakeReport && !handshakeReport.requiresManualRecovery
+              ? 'bg-emerald-50/50 border-emerald-200'
+              : 'bg-amber-50/80 border-amber-300'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+              {handshakeReport && !handshakeReport.requiresManualRecovery ? (
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              )}
+              <span>
+                {handshakeReport && !handshakeReport.requiresManualRecovery
+                  ? 'Hardware Safety Latch Clear — Rover Verified Ready (Remains PAUSED Until Mission Start)'
+                  : 'Manual Operator Recovery Required to Clear Latched E-Stop / Watchdog Faults'}
+              </span>
+            </div>
+            <span className="text-[11px] font-mono text-slate-600">
+              {handshakeReport?.clearLatchAttempted
+                ? 'Last action: Operator CLEAR_LATCH dispatched'
+                : 'Boot action: PING + TELEM? only (no CLEAR_LATCH)'}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={clearLatchConfirmed}
+                onChange={(e) => setClearLatchConfirmed(e.target.checked)}
+                className="rounded border-amber-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+              />
+              <span>
+                Safety checklist confirmed: physical rover perimeter is clear, wheels/actuators are safe, and the GPIO 13 E-stop loop is closed.
+              </span>
+            </label>
+            <button
+              type="button"
+              data-testid="confirm-hardware-recovery-btn"
+              disabled={handshakeRunning || !clearLatchConfirmed}
+              onClick={() => void handleConfirmHardwareRecovery()}
+              className="px-4 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>{handshakeRunning ? 'Recovering...' : 'Confirm Hardware Recovery'}</span>
+            </button>
+          </div>
         </div>
 
         {/* 2-Column Split: Compact Zero-Config USB ESP32 Sequence (Left) + Prominent Camera Deep Check (Right) */}
@@ -442,13 +521,17 @@ export const HardwareAuditView: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-2 text-xs font-mono tabular-nums">
                 <div className="bg-white border border-emerald-900/10 rounded p-2">
-                  <div className="text-[10px] text-slate-500 uppercase">CLEAR_LATCH / WD</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Safety Latch</div>
                   <div
                     className={`font-semibold mt-0.5 ${
-                      handshakeReport?.watchdogInitialized ? 'text-emerald-700' : 'text-amber-700'
+                      handshakeReport?.watchdogInitialized && !handshakeReport?.latchLocked
+                        ? 'text-emerald-700'
+                        : 'text-amber-700'
                     }`}
                   >
-                    {handshakeReport?.watchdogInitialized ? 'INITIALIZED' : 'NOT VERIFIED'}
+                    {handshakeReport?.watchdogInitialized && !handshakeReport?.latchLocked
+                      ? 'CLEAR / READY'
+                      : 'LOCKED (AUTH REQ)'}
                   </div>
                 </div>
                 <div className="bg-white border border-emerald-900/10 rounded p-2">

@@ -1,14 +1,16 @@
 /**
  * StartupHandshakeService
  *
- * Orchestrates the initial connection handshake for a USB-connected ESP32 and
- * live MaixSense / navigation camera:
+ * Orchestrates the safe startup scan and explicit operator hardware recovery
+ * for a USB-connected ESP32 and live MaixSense / navigation camera:
  *   1. Zero-config USB ESP32 serial detection (no manual baud/pin setup required).
- *   2. Dispatches the `PING -> CLEAR_LATCH -> TELEM?` command sequence via
- *      `POST /api/robot/handshake` -> Raspberry Pi `POST /handshake`.
- *   3. Validates post-clear ready-state (`estop_ok === true && watchdog_ok === true`)
- *      so the 250 ms ESP32 watchdog is initialized before navigation commands can
- *      be dispatched.
+ *   2. Safe boot scan (`performSafeScan`): dispatches strictly read-only
+ *      `PING` + `TELEM?` via `POST /api/robot/handshake` (`allow_clear_latch: false`)
+ *      and NEVER automatically clears a latched E-stop or watchdog fault.
+ *   3. Manual hardware recovery (`confirmHardwareRecovery`): dispatches `CLEAR_LATCH`
+ *      ONLY after explicit operator confirmation in HardwareAuditView, validates
+ *      post-clear telemetry (`estop_ok === true && watchdog_ok === true`), and
+ *      leaves the rover strictly PAUSED until resumed.
  *   4. Performs a deep Camera Readiness audit (MaixSense USB drive / RNDIS IP,
  *      OUI LAN discovery, active `/ws/camera` stream frames, and Pi CameraHealthMonitor).
  */
@@ -53,18 +55,23 @@ export interface StartupHandshakeReport {
   esp32Ready: boolean;
   watchdogInitialized: boolean;
   estopOk: boolean;
+  latchLocked: boolean;
+  requiresManualRecovery: boolean;
+  clearLatchAttempted: boolean;
+  inspectionOnly: boolean;
   navigationDispatchUnlocked: boolean;
   camera: CameraReadinessDetails;
   steps: HandshakeStep[];
   durationMs: number;
   executedAt: string;
-  trigger: 'auto_initial' | 'manual';
+  trigger: 'auto_boot_safe_scan' | 'manual_safe_scan' | 'manual_hardware_recovery';
   blockers: string[];
 }
 
 export interface HandshakeOptions {
+  allowClearLatch?: boolean;
   operatorConfirmed?: boolean;
-  trigger?: 'auto_initial' | 'manual';
+  trigger?: 'auto_boot_safe_scan' | 'manual_safe_scan' | 'manual_hardware_recovery';
   customOuiPrefixes?: string[];
 }
 
@@ -77,17 +84,80 @@ export class StartupHandshakeService {
   }
 
   /**
-   * Returns true ONLY when the ESP32 CLEAR_LATCH + TELEM? ready-state has been
-   * validated (watchdog initialized & E-stop loop closed) AND the camera is ready.
+   * Returns true ONLY when the ESP32 telemetry ready-state has been validated
+   * (watchdog initialized & E-stop loop closed, no latch active) AND the camera is ready.
    */
   isNavigationDispatchAllowed(): boolean {
     return Boolean(this.lastReport?.navigationDispatchUnlocked);
   }
 
   /**
-   * Execute the full startup handshake sequence:
-   *   - USB ESP32 PING -> CLEAR_LATCH -> TELEM? ready-state validation
-   *   - MaixSense USB drive / RNDIS / LAN OUI / WebSocket / Pi camera deep check
+   * Safe Boot Scan (READ-ONLY — safe for automatic execution on boot/mount):
+   * Scans USB ports, runs PING + TELEM? read-only, and audits camera readiness.
+   * NEVER dispatches CLEAR_LATCH or clears a tripped E-stop/watchdog fault.
+   */
+  async performSafeScan(
+    options: {
+      trigger?: 'auto_boot_safe_scan' | 'manual_safe_scan';
+      customOuiPrefixes?: string[];
+    } = {}
+  ): Promise<StartupHandshakeReport> {
+    return this.executeHandshake({
+      allowClearLatch: false,
+      operatorConfirmed: false,
+      trigger: options.trigger ?? 'auto_boot_safe_scan',
+      customOuiPrefixes: options.customOuiPrefixes,
+    });
+  }
+
+  /**
+   * Backward-compatible alias for performSafeScan().
+   */
+  async inspectStartupStatus(
+    options: {
+      trigger?: 'auto_boot_safe_scan' | 'manual_safe_scan';
+      customOuiPrefixes?: string[];
+    } = {}
+  ): Promise<StartupHandshakeReport> {
+    return this.performSafeScan(options);
+  }
+
+  /**
+   * Explicit Operator Hardware Recovery (CLEAR_LATCH):
+   * Must ONLY be invoked when the operator manually clicks 'Confirm Hardware Recovery'
+   * in HardwareAuditView after verifying the physical E-stop loop and rover perimeter.
+   * Leaves the rover in PAUSED/IDLE until an explicit mission start/resume command.
+   */
+  async confirmHardwareRecovery(options: {
+    operatorConfirmed: boolean;
+    customOuiPrefixes?: string[];
+  }): Promise<StartupHandshakeReport> {
+    if (options.operatorConfirmed !== true) {
+      return this.performSafeScan({
+        trigger: 'manual_safe_scan',
+        customOuiPrefixes: options.customOuiPrefixes,
+      });
+    }
+    return this.executeHandshake({
+      allowClearLatch: true,
+      operatorConfirmed: true,
+      trigger: 'manual_hardware_recovery',
+      customOuiPrefixes: options.customOuiPrefixes,
+    });
+  }
+
+  /**
+   * Backward-compatible alias for confirmHardwareRecovery().
+   */
+  async authorizeClearLatch(options: {
+    operatorConfirmed: boolean;
+    customOuiPrefixes?: string[];
+  }): Promise<StartupHandshakeReport> {
+    return this.confirmHardwareRecovery(options);
+  }
+
+  /**
+   * Execute safe boot scan (default) or explicit operator-confirmed CLEAR_LATCH recovery.
    */
   async executeHandshake(options: HandshakeOptions = {}): Promise<StartupHandshakeReport> {
     if (this.inFlightPromise) {
@@ -103,12 +173,15 @@ export class StartupHandshakeService {
 
   private async _runInternal(options: HandshakeOptions): Promise<StartupHandshakeReport> {
     const startedAt = performance.now();
-    const operatorConfirmed = options.operatorConfirmed ?? true;
-    const trigger = options.trigger ?? 'manual';
+    // Strictly opt-in: NEVER clear a latch unless explicitly requested AND operator-confirmed
+    const allowClearLatch = options.allowClearLatch === true && options.operatorConfirmed === true;
+    const operatorConfirmed = allowClearLatch;
+    const trigger =
+      options.trigger ?? (allowClearLatch ? 'manual_hardware_recovery' : 'manual_safe_scan');
 
-    // Run ESP32 USB CLEAR_LATCH handshake AND deep camera discovery in parallel
+    // Run ESP32 USB safe scan (PING + TELEM?) or explicit CLEAR_LATCH AND deep camera discovery in parallel
     const [handshakeResp, discoverResp, roomsResp, netScan] = await Promise.all([
-      this.fetchEsp32Handshake(operatorConfirmed),
+      this.fetchEsp32Handshake(allowClearLatch, operatorConfirmed),
       this.fetchCameraDiscover(),
       this.fetchCameraRooms(),
       scanLocalNetworkForMaixSense({ customPrefixes: options.customOuiPrefixes ?? [] }).catch(
@@ -175,20 +248,28 @@ export class StartupHandshakeService {
     const esp32Ready = Boolean(handshakeResp?.esp32Ready);
     const watchdogInitialized = Boolean(handshakeResp?.watchdogInitialized);
     const estopOk = Boolean(handshakeResp?.estopOk);
+    const latchLocked =
+      typeof handshakeResp?.latchLocked === 'boolean' ? handshakeResp.latchLocked : !esp32Ready;
+    const requiresManualRecovery = Boolean(latchLocked || !esp32Ready || !watchdogInitialized);
+    const clearLatchAttempted = Boolean(handshakeResp?.clearLatchAttempted);
+    const inspectionOnly = handshakeResp?.inspectionOnly !== false && !allowClearLatch;
 
-    // Navigation dispatch unlocks ONLY when both ESP32 CLEAR_LATCH ready-state AND camera are verified
+    // Navigation dispatch unlocks ONLY when both ESP32 ready-state (no latch) AND camera are verified
     const navigationDispatchUnlocked = Boolean(
       esp32Ready &&
         watchdogInitialized &&
         estopOk &&
+        !latchLocked &&
         (handshakeResp?.configured ? piCameraHealthy : cameraReady)
     );
 
     const blockers: string[] = [];
     if (!handshakeResp?.configured) {
       blockers.push('Pi robot controller not linked (PI_ROBOT_URL unset)');
-    } else if (!esp32Ready || !watchdogInitialized) {
-      blockers.push('ESP32 USB watchdog CLEAR_LATCH ready-state not confirmed');
+    } else if (requiresManualRecovery) {
+      blockers.push(
+        'Latched E-stop or watchdog fault active — click "Confirm Hardware Recovery" after inspecting the physical rover'
+      );
     }
     if (!estopOk && handshakeResp?.configured) {
       blockers.push('Physical GPIO 13 E-stop loop is open');
@@ -236,6 +317,10 @@ export class StartupHandshakeService {
       esp32Ready,
       watchdogInitialized,
       estopOk,
+      latchLocked,
+      requiresManualRecovery,
+      clearLatchAttempted,
+      inspectionOnly,
       navigationDispatchUnlocked,
       camera,
       steps: baseSteps,
@@ -249,12 +334,19 @@ export class StartupHandshakeService {
     return report;
   }
 
-  private async fetchEsp32Handshake(operatorConfirmed: boolean): Promise<any> {
+  private async fetchEsp32Handshake(
+    allowClearLatch: boolean,
+    operatorConfirmed: boolean
+  ): Promise<any> {
     try {
       const res = await fetch('/api/robot/handshake', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator_confirmed: operatorConfirmed, auto_usb: true }),
+        body: JSON.stringify({
+          allow_clear_latch: allowClearLatch,
+          operator_confirmed: operatorConfirmed,
+          auto_usb: true,
+        }),
       });
       return await res.json().catch(() => null);
     } catch {
