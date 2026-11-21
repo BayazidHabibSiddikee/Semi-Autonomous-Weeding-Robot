@@ -1425,12 +1425,23 @@ async function startServer() {
     });
   });
 
-  app.post('/api/robot/stop', async (_req, res) => {
+  const ALLOWED_MISSION_SOURCE_TYPES = new Set([
+    'live_capture',
+    'live_stream',
+    'simulated',
+    'field_mission',
+  ]);
+
+  const handleMissionStop = async (req: express.Request, res: express.Response) => {
+    const endpoint = req.path;
     const base = getConfiguredPiBaseUrl();
     if (!base) {
       res.status(503).json({
         ok: false,
+        stopped: false,
         configured: false,
+        endpoint,
+        reason: 'PI_ROBOT_NOT_CONFIGURED',
         ackVerified: false,
         hardwareStopped: false,
         detail:
@@ -1443,7 +1454,10 @@ async function startServer() {
     if (!r.reachable) {
       res.status(503).json({
         ok: false,
+        stopped: false,
         configured: true,
+        endpoint,
+        reason: 'PI_UNREACHABLE',
         ackVerified: false,
         hardwareStopped: false,
         detail: `Failed to reach Raspberry Pi /stop (${r.error}). Engage physical GPIO 13 E-stop switch immediately!`,
@@ -1454,9 +1468,12 @@ async function startServer() {
     const ackVerified = r.statusCode === 200 && Boolean(r.body?.ack_verified);
     res.status(ackVerified ? 200 : 503).json({
       ok: ackVerified,
+      stopped: ackVerified,
       configured: true,
+      endpoint,
       ackVerified,
       hardwareStopped: ackVerified && !r.body?.simulated,
+      state: r.body?.state ?? (ackVerified ? 'STOPPED' : 'UNKNOWN'),
       esp32Response: r.body?.esp32_response ?? null,
       estopLatched: Boolean(r.body?.estop_latched),
       simulated: Boolean(r.body?.simulated),
@@ -1464,70 +1481,190 @@ async function startServer() {
         ? `ESP32 stop ACK verified (${r.body?.esp32_response}).`
         : r.body?.error || 'ESP32 stop ACK NOT verified — engage physical power cutoff immediately!',
     });
-  });
+  };
 
-  app.post('/api/robot/start_mission', async (req, res) => {
+  const handleMissionStart = async (req: express.Request, res: express.Response) => {
+    const endpoint = req.path;
     const base = getConfiguredPiBaseUrl();
     if (!base) {
       res.status(503).json({
         ok: false,
         started: false,
         configured: false,
+        endpoint,
         reason: 'PI_ROBOT_NOT_CONFIGURED',
         detail: 'PI_ROBOT_URL is not configured; cannot launch a physical rover mission.',
       });
       return;
     }
 
-    const payload = {
-      source_type: typeof req.body?.source_type === 'string' ? req.body.source_type : 'live_capture',
+    const rawSourceType = typeof req.body?.source_type === 'string' ? req.body.source_type.trim() : 'live_capture';
+    const source_type = ALLOWED_MISSION_SOURCE_TYPES.has(rawSourceType) ? rawSourceType : 'live_capture';
+
+    const payload: Record<string, unknown> = {
+      source_type,
       nav_only: req.body?.nav_only !== false,
-      operator_confirmed: Boolean(req.body?.operator_confirmed),
-      ...(typeof req.body?.start_row === 'number' ? { start_row: req.body.start_row } : {}),
-      ...(typeof req.body?.end_row === 'number' ? { end_row: req.body.end_row } : {}),
+      operator_confirmed: req.body?.operator_confirmed === true,
     };
+
+    if (typeof req.body?.start_row === 'number' && Number.isInteger(req.body.start_row)) {
+      const startRow = Math.max(1, Math.min(100, req.body.start_row));
+      payload.start_row = startRow;
+    }
+    if (typeof req.body?.end_row === 'number' && Number.isInteger(req.body.end_row)) {
+      const minEnd = typeof payload.start_row === 'number' ? (payload.start_row as number) : 1;
+      payload.end_row = Math.max(minEnd, Math.min(100, req.body.end_row));
+    }
+    if (typeof req.body?.speed_limit_mps === 'number' && Number.isFinite(req.body.speed_limit_mps)) {
+      payload.speed_limit_mps = Math.max(0.05, Math.min(1.5, Number(req.body.speed_limit_mps.toFixed(3))));
+    }
+
     const r = await proxyPiRequest('POST', '/start_mission', payload);
     if (!r.reachable) {
-      res.status(503).json({ ok: false, started: false, reason: 'PI_UNREACHABLE', detail: r.error });
+      res.status(503).json({
+        ok: false,
+        started: false,
+        configured: true,
+        endpoint,
+        reason: 'PI_UNREACHABLE',
+        detail: r.error || 'Raspberry Pi navigation controller unreachable.',
+      });
       return;
     }
-    res.status(r.statusCode).json({ ok: r.statusCode === 200, ...r.body });
-  });
 
-  app.post('/api/robot/pause', async (_req, res) => {
+    res.status(r.statusCode).json({
+      ok: r.statusCode === 200,
+      configured: true,
+      endpoint,
+      ...(typeof r.body === 'object' && r.body !== null ? r.body : { raw: r.body }),
+    });
+  };
+
+  const handleMissionPause = async (req: express.Request, res: express.Response) => {
+    const endpoint = req.path;
     const base = getConfiguredPiBaseUrl();
     if (!base) {
-      res.status(503).json({ ok: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+      res.status(503).json({
+        ok: false,
+        paused: false,
+        configured: false,
+        endpoint,
+        reason: 'PI_ROBOT_NOT_CONFIGURED',
+        detail: 'PI_ROBOT_URL is not configured; local simulation paused only.',
+      });
       return;
     }
+
     const r = await proxyPiRequest('POST', '/pause', {});
-    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
-  });
-
-  app.post('/api/robot/resume', async (_req, res) => {
-    const base = getConfiguredPiBaseUrl();
-    if (!base) {
-      res.status(503).json({ ok: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+    if (!r.reachable) {
+      res.status(503).json({
+        ok: false,
+        paused: false,
+        configured: true,
+        endpoint,
+        reason: 'PI_UNREACHABLE',
+        detail: r.error || 'Failed to reach Raspberry Pi /pause.',
+      });
       return;
     }
+
+    res.status(r.statusCode).json({
+      ok: r.statusCode === 200,
+      configured: true,
+      endpoint,
+      ...(typeof r.body === 'object' && r.body !== null ? r.body : { raw: r.body }),
+    });
+  };
+
+  const handleMissionResume = async (req: express.Request, res: express.Response) => {
+    const endpoint = req.path;
+    const base = getConfiguredPiBaseUrl();
+    if (!base) {
+      res.status(503).json({
+        ok: false,
+        resumed: false,
+        configured: false,
+        endpoint,
+        reason: 'PI_ROBOT_NOT_CONFIGURED',
+        detail: 'PI_ROBOT_URL is not configured; local simulation resumed only.',
+      });
+      return;
+    }
+
     const r = await proxyPiRequest('POST', '/resume', {});
-    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
-  });
+    if (!r.reachable) {
+      res.status(503).json({
+        ok: false,
+        resumed: false,
+        configured: true,
+        endpoint,
+        reason: 'PI_UNREACHABLE',
+        detail: r.error || 'Failed to reach Raspberry Pi /resume.',
+      });
+      return;
+    }
+
+    res.status(r.statusCode).json({
+      ok: r.statusCode === 200,
+      configured: true,
+      endpoint,
+      ...(typeof r.body === 'object' && r.body !== null ? r.body : { raw: r.body }),
+    });
+  };
+
+  // Canonical mission lifecycle endpoints (MissionControlService contract)
+  app.post('/api/robot/mission/start', handleMissionStart);
+  app.post('/api/robot/mission/stop', handleMissionStop);
+  app.post('/api/robot/mission/pause', handleMissionPause);
+  app.post('/api/robot/mission/resume', handleMissionResume);
+
+  // Legacy aliases retained for App.tsx E-Stop & Ros2ToolsView compatibility
+  app.post('/api/robot/start_mission', handleMissionStart);
+  app.post('/api/robot/stop', handleMissionStop);
+  app.post('/api/robot/pause', handleMissionPause);
+  app.post('/api/robot/resume', handleMissionResume);
 
   app.post('/api/robot/recover', async (req, res) => {
+    const endpoint = req.path;
     const base = getConfiguredPiBaseUrl();
     if (!base) {
-      res.status(503).json({ ok: false, recovered: false, reason: 'PI_ROBOT_NOT_CONFIGURED' });
+      res.status(503).json({
+        ok: false,
+        recovered: false,
+        configured: false,
+        endpoint,
+        reason: 'PI_ROBOT_NOT_CONFIGURED',
+        detail: 'PI_ROBOT_URL is not configured; local fault state cleared only.',
+      });
       return;
     }
     const payload: Record<string, unknown> = {
-      operator_confirmed: Boolean(req.body?.operator_confirmed),
+      operator_confirmed: req.body?.operator_confirmed === true,
     };
     if (Array.isArray(req.body?.relocalize_pose) && req.body.relocalize_pose.length === 3) {
-      payload.relocalize_pose = req.body.relocalize_pose.map(Number);
+      const nums = req.body.relocalize_pose.map(Number);
+      if (nums.every((n: number) => Number.isFinite(n))) {
+        payload.relocalize_pose = nums;
+      }
     }
     const r = await proxyPiRequest('POST', '/recover', payload);
-    res.status(r.reachable ? r.statusCode : 503).json(r.reachable ? r.body : { ok: false, error: r.error });
+    if (!r.reachable) {
+      res.status(503).json({
+        ok: false,
+        recovered: false,
+        configured: true,
+        endpoint,
+        reason: 'PI_UNREACHABLE',
+        detail: r.error || 'Failed to reach Raspberry Pi /recover.',
+      });
+      return;
+    }
+    res.status(r.statusCode).json({
+      ok: r.statusCode === 200,
+      configured: true,
+      endpoint,
+      ...(typeof r.body === 'object' && r.body !== null ? r.body : { raw: r.body }),
+    });
   });
 
   // Zero-config USB ESP32 startup handshake (PING -> CLEAR_LATCH -> TELEM?) + camera readiness check

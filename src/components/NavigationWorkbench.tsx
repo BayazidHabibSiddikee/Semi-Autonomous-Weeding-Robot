@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Play,
   Pause,
+  Square,
   RotateCcw,
   AlertOctagon,
   Compass,
@@ -16,6 +17,8 @@ import {
   Camera,
   CameraOff,
   Wifi,
+  Server,
+  RefreshCw,
 } from 'lucide-react';
 import {
   LineChart,
@@ -45,6 +48,12 @@ import {
   TurnAccuracyDashboard,
   TurnTrajectorySample,
 } from './TurnAccuracyDashboard';
+import {
+  MISSION_CONTROL_ENDPOINTS,
+  MissionCommandResult,
+  MissionControlStatus,
+  missionControlService,
+} from '../services/MissionControlService';
 
 interface Props {
   estopActive: boolean;
@@ -273,6 +282,11 @@ function useVisionNodeTelemetry(
 export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }) => {
   const [missionMode, setMissionMode] = useState<'nav_only' | 'treatment_hook'>('nav_only');
   const [running, setRunning] = useState<boolean>(true);
+  const [missionStarted, setMissionStarted] = useState<boolean>(true);
+  const [piStatus, setPiStatus] = useState<MissionControlStatus | null>(null);
+  const [piStatusLoading, setPiStatusLoading] = useState<boolean>(false);
+  const [lastMissionCmd, setLastMissionCmd] = useState<MissionCommandResult | null>(null);
+  const [missionCmdBusy, setMissionCmdBusy] = useState<boolean>(false);
   const [speedLimit, setSpeedLimit] = useState<number>(0.18);
   const [stanleyGain, setStanleyGain] = useState<number>(1.8);
   const [rowWidthCm, setRowWidthCm] = useState<number>(60);
@@ -784,7 +798,8 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     setSensorFaultInjected(false);
     setFaultReason(null);
     setObstacles([]);
-    setRunning(true);
+    setMissionStarted(false);
+    setRunning(false);
     simRef.current = {
       x: ROW_START_X + 0.25,
       y: startY,
@@ -878,9 +893,203 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     }
   };
 
-  const recoverFromFault = () => {
+  const refreshPiStatus = useCallback(async () => {
+    setPiStatusLoading(true);
+    const status = await missionControlService.getStatus();
+    setPiStatus(status);
+    setPiStatusLoading(false);
+    return status;
+  }, []);
+
+  useEffect(() => {
+    void refreshPiStatus();
+  }, [refreshPiStatus]);
+
+  const handleMissionStart = useCallback(async () => {
+    if (estopActive || faultReason !== null || sensorFaultInjected || missionCmdBusy) return;
+    setMissionCmdBusy(true);
+    const result = await missionControlService.startMission({
+      source_type: 'live_capture',
+      nav_only: missionMode === 'nav_only',
+      operator_confirmed: true,
+      start_row: 1,
+      end_row: NUM_ROWS,
+      speed_limit_mps: speedLimit,
+    });
+    setLastMissionCmd(result);
+    setMissionCmdBusy(false);
+
+    if (result.piExecuted && !result.ok) {
+      setRunning(false);
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.start} rejected (HTTP ${result.httpStatus}): ${
+          result.blockers.length > 0 ? result.blockers.join(', ') : result.detail
+        }`
+      );
+      void refreshPiStatus();
+      return;
+    }
+
+    if (simRef.current.phase === 'MISSION_COMPLETE') {
+      simRef.current.rowIdx = 0;
+      simRef.current.dir = 1;
+      simRef.current.rowProgress = [0, 0, 0, 0];
+      simRef.current.phase = 'FOLLOW_CROP_ROW';
+    }
+    setMissionStarted(true);
+    setRunning(true);
+
+    if (result.piExecuted && result.ok) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.start} accepted (HTTP ${result.httpStatus}, nav_only=${
+          missionMode === 'nav_only'
+        }, state=${result.state ?? 'FOLLOW_ROW'}).`
+      );
+      void refreshPiStatus();
+    } else {
+      onLogEvent(
+        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.start} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local workbench mission started.`
+      );
+    }
+  }, [
+    estopActive,
+    faultReason,
+    sensorFaultInjected,
+    missionCmdBusy,
+    missionMode,
+    speedLimit,
+    onLogEvent,
+    refreshPiStatus,
+  ]);
+
+  const handleMissionPause = useCallback(async () => {
+    if (missionCmdBusy) return;
+    setMissionCmdBusy(true);
+    const result = await missionControlService.pauseMission();
+    setLastMissionCmd(result);
+    setMissionCmdBusy(false);
+
+    setRunning(false);
+    simRef.current.cmdVx = 0;
+    simRef.current.cmdWz = 0;
+
+    if (result.piExecuted && result.ok) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.pause} accepted (HTTP ${result.httpStatus}, state=${
+          result.state ?? 'PAUSED'
+        }) — checkpoint recorded on Pi.`
+      );
+      void refreshPiStatus();
+    } else if (result.piExecuted && !result.ok) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.pause} returned HTTP ${result.httpStatus}: ${result.detail}`
+      );
+      void refreshPiStatus();
+    } else {
+      onLogEvent(
+        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.pause} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local simulation paused with zero velocity.`
+      );
+    }
+  }, [missionCmdBusy, onLogEvent, refreshPiStatus]);
+
+  const handleMissionResume = useCallback(async () => {
+    if (estopActive || faultReason !== null || sensorFaultInjected || missionCmdBusy) return;
+    setMissionCmdBusy(true);
+    const result = await missionControlService.resumeMission();
+    setLastMissionCmd(result);
+    setMissionCmdBusy(false);
+
+    if (result.piExecuted && !result.ok) {
+      setRunning(false);
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.resume} rejected (HTTP ${result.httpStatus}): ${result.detail}`
+      );
+      void refreshPiStatus();
+      return;
+    }
+
+    setMissionStarted(true);
+    setRunning(true);
+
+    if (result.piExecuted && result.ok) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.resume} accepted (HTTP ${result.httpStatus}, state=${
+          result.state ?? 'FOLLOW_ROW'
+        }).`
+      );
+      void refreshPiStatus();
+    } else {
+      onLogEvent(
+        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.resume} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local simulation resumed.`
+      );
+    }
+  }, [
+    estopActive,
+    faultReason,
+    sensorFaultInjected,
+    missionCmdBusy,
+    onLogEvent,
+    refreshPiStatus,
+  ]);
+
+  const handleMissionStop = useCallback(async () => {
+    if (missionCmdBusy) return;
+    setMissionCmdBusy(true);
+    const result = await missionControlService.stopMission();
+    setLastMissionCmd(result);
+    setMissionCmdBusy(false);
+
+    setRunning(false);
+    setMissionStarted(false);
+    simRef.current.cmdVx = 0;
+    simRef.current.cmdWz = 0;
+
+    if (result.piExecuted && result.ackVerified) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.stop} verified (HTTP ${result.httpStatus}) — ${result.detail}`
+      );
+      void refreshPiStatus();
+    } else if (result.piExecuted) {
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.stop} UNVERIFIED (HTTP ${result.httpStatus}) — ${result.detail}`
+      );
+      void refreshPiStatus();
+    } else {
+      onLogEvent(
+        `[Sim Only] POST ${MISSION_CONTROL_ENDPOINTS.stop} returned HTTP ${result.httpStatus} (PI_ROBOT_URL unset) — local simulation stopped; no physical hardware command sent.`
+      );
+    }
+  }, [missionCmdBusy, onLogEvent, refreshPiStatus]);
+
+  const recoverFromFault = async () => {
     const s = simRef.current;
     const rw = rowWidthCm / 100;
+
+    if (piStatus?.configured) {
+      setMissionCmdBusy(true);
+      const result = await missionControlService.recoverMission({
+        operator_confirmed: true,
+        relocalize_pose: [
+          Number((s.x * 100).toFixed(1)),
+          Number((rowCenterY(s.rowIdx, rw) * 100).toFixed(1)),
+          Number((((s.dir > 0 ? 0 : Math.PI) * 180) / Math.PI).toFixed(1)),
+        ],
+      });
+      setLastMissionCmd(result);
+      setMissionCmdBusy(false);
+      if (!result.ok) {
+        onLogEvent(
+          `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.recover} rejected (HTTP ${result.httpStatus}): ${result.detail}`
+        );
+        void refreshPiStatus();
+        return;
+      }
+      onLogEvent(
+        `[Pi Mission API] POST ${MISSION_CONTROL_ENDPOINTS.recover} verified (HTTP ${result.httpStatus}) — Pi controller recovered.`
+      );
+      void refreshPiStatus();
+    }
+
     setSensorFaultInjected(false);
     setFaultReason(null);
     s.slipResidualCm = 0.5;
@@ -894,6 +1103,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     syncVisionTracker(0, 0);
     s.collisionState = 'CLEAR';
     s.phase = 'FOLLOW_CROP_ROW';
+    setMissionStarted(true);
     setRunning(true);
     onLogEvent(
       `[NAV-10] Explicit recover() succeeded: Obstacle sensor validated + ArUco/RTK landmark pose re-localized on Row ${s.rowIdx + 1}.`
@@ -1685,34 +1895,141 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             </div>
           </div>
 
-          {/* Bottom Execution Controls */}
-          <div className="pt-4 border-t border-emerald-900/10 flex items-center gap-2">
+          {/* Pi MissionControlService Lifecycle Controls */}
+          <div className="pt-4 border-t border-emerald-900/10 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+                <Server className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Mission Control API</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded border ${
+                    piStatus?.mode === 'pi_live'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : piStatus?.mode === 'pi_unreachable'
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  {piStatus?.mode === 'pi_live'
+                    ? 'PI LIVE'
+                    : piStatus?.mode === 'pi_unreachable'
+                    ? 'PI OFFLINE'
+                    : 'SIM ONLY'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void refreshPiStatus()}
+                  disabled={piStatusLoading}
+                  title="Refresh Pi mission controller status"
+                  className="p-1 rounded border border-slate-200 bg-[#F8FBF9] hover:bg-emerald-50 text-slate-600 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${piStatusLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Primary Start / Pause / Resume + Stop + Reset Controls */}
+            <div className="grid grid-cols-2 gap-2">
+              {!missionStarted || telemetry.phase === 'MISSION_COMPLETE' ? (
+                <button
+                  type="button"
+                  onClick={() => void handleMissionStart()}
+                  disabled={estopActive || isFaulted || missionCmdBusy}
+                  title={`POST ${MISSION_CONTROL_ENDPOINTS.start}`}
+                  className="px-3 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>{isFaulted ? 'Locked' : missionCmdBusy ? 'Starting…' : 'Start'}</span>
+                </button>
+              ) : running ? (
+                <button
+                  type="button"
+                  onClick={() => void handleMissionPause()}
+                  disabled={estopActive || isFaulted || missionCmdBusy}
+                  title={`POST ${MISSION_CONTROL_ENDPOINTS.pause}`}
+                  className="px-3 py-2 text-xs font-semibold rounded-md bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Pause className="w-3.5 h-3.5" />
+                  <span>{missionCmdBusy ? 'Pausing…' : 'Pause'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void handleMissionResume()}
+                  disabled={estopActive || isFaulted || missionCmdBusy}
+                  title={`POST ${MISSION_CONTROL_ENDPOINTS.resume}`}
+                  className="px-3 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>{isFaulted ? 'Locked' : missionCmdBusy ? 'Resuming…' : 'Resume'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void handleMissionStop()}
+                disabled={missionCmdBusy}
+                title={`POST ${MISSION_CONTROL_ENDPOINTS.stop}`}
+                className="px-3 py-2 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                <span>Stop</span>
+              </button>
+            </div>
+
             <button
-              onClick={() => {
-                if (isFaulted) return;
-                setRunning((r) => {
-                  const next = !r;
-                  onLogEvent(
-                    next
-                      ? '[Navigation] Operator resumed mission.'
-                      : '[NAV-12] Operator paused mission — zero velocity commanded.'
-                  );
-                  return next;
-                });
-              }}
-              disabled={estopActive || isFaulted}
-              className="flex-1 px-4 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-500 text-white transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              {running ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-              <span>{isFaulted ? 'Locked (Fault)' : running ? 'Pause' : 'Resume'}</span>
-            </button>
-            <button
+              type="button"
               onClick={() => resetSimulation()}
-              className="px-3 py-2 text-xs font-medium rounded-md bg-[#F8FBF9] hover:bg-emerald-50 border border-slate-200 text-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
+              className="w-full px-3 py-1.5 text-xs font-medium rounded-md bg-[#F8FBF9] hover:bg-emerald-50 border border-slate-200 text-slate-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>Reset</span>
+              <span>Reset Workbench to Row 1</span>
             </button>
+
+            {/* Last Dispatched Pi Lifecycle Contract Status */}
+            <div className="rounded-md bg-[#F8FBF9] border border-emerald-900/10 p-2 text-[11px] font-mono space-y-1">
+              <div className="flex items-center justify-between gap-2 text-slate-600">
+                <span className="truncate">
+                  {lastMissionCmd
+                    ? `POST ${lastMissionCmd.endpoint}`
+                    : 'POST /api/robot/mission/*'}
+                </span>
+                {lastMissionCmd && (
+                  <span
+                    className={`shrink-0 font-semibold ${
+                      lastMissionCmd.ok
+                        ? 'text-emerald-700'
+                        : lastMissionCmd.simOnly
+                        ? 'text-amber-700'
+                        : 'text-rose-700'
+                    }`}
+                  >
+                    HTTP {lastMissionCmd.httpStatus || 'ERR'}
+                  </span>
+                )}
+              </div>
+              {lastMissionCmd ? (
+                <div className="text-[10px] text-slate-500 leading-snug">
+                  {lastMissionCmd.blockers.length > 0 ? (
+                    <span className="text-rose-700 font-semibold">
+                      Blockers: {lastMissionCmd.blockers.join(', ')}
+                    </span>
+                  ) : (
+                    lastMissionCmd.detail
+                  )}
+                </div>
+              ) : (
+                <div className="text-[10px] text-slate-500 leading-snug">
+                  {piStatus?.mode === 'pi_live'
+                    ? `Pi worker ${piStatus.workerRunning ? 'active' : 'standby'} · state ${
+                        piStatus.piState ?? 'IDLE'
+                      }`
+                    : 'Controls dispatch /start, /pause, /resume, /stop to Pi proxy.'}
+                </div>
+              )}
+            </div>
           </div>
         </aside>
 
@@ -1775,7 +2092,11 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                   <div className="absolute inset-0 bg-rose-900/25 backdrop-blur-[1px] flex items-center justify-center p-4">
                     <div className="bg-white border border-rose-400 px-5 py-3 rounded-md flex items-center gap-2.5 text-rose-800 font-mono text-xs sm:text-sm shadow-sm">
                       <AlertOctagon className="w-5 h-5 text-rose-600 shrink-0" />
-                      <span>HARDWARE E-STOP ENGAGED (GPIO 13) — MOTOR RAIL DE-ENERGIZED</span>
+                      <span>
+                        {piStatus?.mode === 'pi_live'
+                          ? 'SOFTWARE STOP ENGAGED — VERIFY PHYSICAL GPIO 13 CUTOFF'
+                          : 'SIMULATION STOP ACTIVE (PI UNLINKED) — VERIFY PHYSICAL GPIO 13 CUTOFF'}
+                      </span>
                     </div>
                   </div>
                 )}
