@@ -1147,7 +1147,7 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                 className="px-3.5 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
               >
                 <Camera className="w-3.5 h-3.5" />
-                <span>Device Camera</span>
+                <span>Live Camera Check</span>
               </button>
               <button
                 onClick={() => triggerStreamAction('start_webrtc')}

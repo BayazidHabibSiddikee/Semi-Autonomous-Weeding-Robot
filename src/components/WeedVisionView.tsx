@@ -10,6 +10,11 @@ import {
   CornerDownRight,
   CornerDownLeft,
   Route,
+  Save,
+  Trash2,
+  RotateCcw,
+  CheckCircle2,
+  FolderOpen,
 } from 'lucide-react';
 import {
   LineChart,
@@ -30,6 +35,16 @@ import {
   ProjectedTurnDirection,
   drawTurnTrajectoryOverlay,
 } from '../vision/turnTrajectoryOverlay';
+import {
+  DEFAULT_WEED_THRESHOLDS,
+  ThresholdPreset,
+  WeedThresholdConfig,
+  deleteThresholdPreset,
+  loadActiveThresholds,
+  loadThresholdPresets,
+  saveActiveThresholds,
+  upsertThresholdPreset,
+} from '../services/thresholdPresetStorage';
 
 interface Props {
   mode: 'vision' | 'calibration';
@@ -45,8 +60,14 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [overlayMode, setOverlayMode] = useState<CameraOverlayMode>('overlay');
-  const [minExgFloor, setMinExgFloor] = useState<number>(24);
-  const [minBlobArea, setMinBlobArea] = useState<number>(50);
+  const [thresholds, setThresholds] = useState<WeedThresholdConfig>(() => loadActiveThresholds());
+  const [presets, setPresets] = useState<ThresholdPreset[]>(() => loadThresholdPresets());
+  const [presetName, setPresetName] = useState<string>('');
+  const [presetNotes, setPresetNotes] = useState<string>('');
+  const [presetFeedback, setPresetFeedback] = useState<{
+    kind: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const [sourceName, setSourceName] = useState<string>('No camera active');
 
   // Row-end turn trajectory overlay controls
@@ -89,10 +110,105 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
   const objectUrlRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Sync active weed detection thresholds to localStorage so Vision & Calibration stay aligned
+  useEffect(() => {
+    saveActiveThresholds(thresholds);
+  }, [thresholds]);
+
+  const updateThreshold = useCallback(
+    <K extends keyof WeedThresholdConfig>(key: K, value: WeedThresholdConfig[K]) => {
+      setThresholds((prev) => ({ ...prev, [key]: value }));
+    },
+    []
+  );
+
+  const matchingPreset = presets.find(
+    (p) =>
+      p.config.minExgFloor === thresholds.minExgFloor &&
+      p.config.minBlobAreaPx === thresholds.minBlobAreaPx &&
+      Math.abs(p.config.cropAreaFracPct - thresholds.cropAreaFracPct) < 0.05 &&
+      p.config.minConfidencePct === thresholds.minConfidencePct
+  );
+
+  const existingNameMatch = presetName.trim()
+    ? presets.find((p) => p.name.toLowerCase() === presetName.trim().toLowerCase())
+    : undefined;
+
+  const handleSavePreset = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const trimmed = presetName.trim();
+      if (!trimmed) {
+        setPresetFeedback({
+          kind: 'error',
+          text: 'Enter a configuration preset name before saving.',
+        });
+        return;
+      }
+
+      const { presets: nextPresets, saved, replaced } = upsertThresholdPreset(
+        trimmed,
+        thresholds,
+        presetNotes
+      );
+      setPresets(nextPresets);
+      setPresetName('');
+      setPresetNotes('');
+      setPresetFeedback({
+        kind: 'success',
+        text: replaced
+          ? `Updated preset "${saved.name}" in local storage.`
+          : `Saved preset "${saved.name}" to local storage.`,
+      });
+      onLogEvent(
+        `[Calibration] ${replaced ? 'Updated' : 'Saved'} weed threshold preset "${saved.name}" (ExG≥${saved.config.minExgFloor}, Area≥${saved.config.minBlobAreaPx}px², Canopy=${saved.config.cropAreaFracPct.toFixed(1)}%, Conf≥${saved.config.minConfidencePct}%).`
+      );
+    },
+    [presetName, presetNotes, thresholds, onLogEvent]
+  );
+
+  const handleApplyPreset = useCallback(
+    (preset: ThresholdPreset) => {
+      setThresholds({ ...preset.config });
+      setPresetFeedback({
+        kind: 'success',
+        text: `Applied preset "${preset.name}" to live weed detection.`,
+      });
+      onLogEvent(
+        `[Calibration] Applied preset "${preset.name}" (ExG≥${preset.config.minExgFloor}, Area≥${preset.config.minBlobAreaPx}px², Canopy=${preset.config.cropAreaFracPct.toFixed(1)}%, Conf≥${preset.config.minConfidencePct}%).`
+      );
+    },
+    [onLogEvent]
+  );
+
+  const handleDeletePreset = useCallback(
+    (preset: ThresholdPreset) => {
+      const next = deleteThresholdPreset(preset.id);
+      setPresets(next);
+      setPresetFeedback({
+        kind: 'success',
+        text: `Deleted preset "${preset.name}" from local storage.`,
+      });
+      onLogEvent(`[Calibration] Deleted weed threshold preset "${preset.name}".`);
+    },
+    [onLogEvent]
+  );
+
+  const handleResetThresholds = useCallback(() => {
+    setThresholds({ ...DEFAULT_WEED_THRESHOLDS });
+    setPresetFeedback({
+      kind: 'success',
+      text: 'Restored default weed detection thresholds.',
+    });
+    onLogEvent('[Calibration] Restored default weed detection thresholds.');
+  }, [onLogEvent]);
+
   const paramsRef = useRef({
     overlayMode,
-    minExgFloor,
-    minBlobArea,
+    minExgFloor: thresholds.minExgFloor,
+    minBlobAreaPx: thresholds.minBlobAreaPx,
+    cropAreaFracPct: thresholds.cropAreaFracPct,
+    minConfidencePct: thresholds.minConfidencePct,
     showTurnOverlay,
     turnDirection,
     turnRadiusM,
@@ -102,8 +218,10 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
   useEffect(() => {
     paramsRef.current = {
       overlayMode,
-      minExgFloor,
-      minBlobArea,
+      minExgFloor: thresholds.minExgFloor,
+      minBlobAreaPx: thresholds.minBlobAreaPx,
+      cropAreaFracPct: thresholds.cropAreaFracPct,
+      minConfidencePct: thresholds.minConfidencePct,
       showTurnOverlay,
       turnDirection,
       turnRadiusM,
@@ -112,8 +230,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
     };
   }, [
     overlayMode,
-    minExgFloor,
-    minBlobArea,
+    thresholds,
     showTurnOverlay,
     turnDirection,
     turnRadiusM,
@@ -212,7 +329,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
     setMetrics({
       fps: 0,
       processingMs: 0,
-      otsuThreshold: minExgFloor,
+      otsuThreshold: thresholds.minExgFloor,
       greenCoveragePct: 0,
       distanceToFurrowEndM: 1.6,
       rowEndConfidence: 0,
@@ -220,7 +337,7 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
       turnImminent: false,
     });
     onLogEvent('[Weed Vision] Stopped live camera feed.');
-  }, [stopStream, minExgFloor, onLogEvent]);
+  }, [stopStream, thresholds.minExgFloor, onLogEvent]);
 
   const handleLoadFile = useCallback(
     (file: File) => {
@@ -337,7 +454,13 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
       if (hasFrame) {
         const p = paramsRef.current;
         const frame = workCtx.getImageData(0, 0, PROC_W, PROC_H);
-        const res = detectFoliageBlobsFromFrame(frame, p.minExgFloor, p.minBlobArea);
+        const res = detectFoliageBlobsFromFrame(
+          frame,
+          p.minExgFloor,
+          p.minBlobAreaPx,
+          p.cropAreaFracPct / 100,
+          p.minConfidencePct / 100
+        );
         const { observation: rowObs } = detectCropRowFromFrame(frame, {
           rowWidthM: p.rowSpacingM,
           minExgFloor: p.minExgFloor,
@@ -614,6 +737,298 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
                   X = {xMm.toFixed(1)} mm · Y = {yMm.toFixed(1)} mm
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 04. Weed Detection Threshold Configuration & Named Presets (LocalStorage) */}
+        <div className="bg-white border border-emerald-900/10 rounded-lg p-5 space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-emerald-900/10 pb-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900">
+                  04. Weed Detection Threshold Presets
+                </h3>
+                {matchingPreset && (
+                  <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-emerald-50 border border-emerald-300 text-emerald-800 rounded">
+                    Active: {matchingPreset.name}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-600">
+                Save the active ExG + Otsu segmentation thresholds as named configuration profiles in browser{' '}
+                <span className="font-mono text-emerald-800">localStorage</span>. Changes sync automatically with the Weed Vision pipeline.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleResetThresholds}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-[#F8FBF9] hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 flex items-center gap-1.5 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Reset Defaults</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left: Current Active Thresholds + Save Named Preset Form */}
+            <div className="lg:col-span-5 space-y-4">
+              <div className="bg-[#F8FBF9] border border-emerald-900/10 rounded-md p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-900">
+                    Current Weed Detection Thresholds
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-700">
+                    Synced to Vision CV
+                  </span>
+                </div>
+
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                    <span>ExG Green Floor (2G − R − B)</span>
+                    <span className="text-emerald-700 font-semibold">{thresholds.minExgFloor}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={6}
+                    max={65}
+                    value={thresholds.minExgFloor}
+                    onChange={(e) => updateThreshold('minExgFloor', Number(e.target.value))}
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                    <span>Minimum Blob Area</span>
+                    <span className="text-emerald-700 font-semibold">{thresholds.minBlobAreaPx} px²</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={20}
+                    max={300}
+                    step={5}
+                    value={thresholds.minBlobAreaPx}
+                    onChange={(e) => updateThreshold('minBlobAreaPx', Number(e.target.value))}
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                    <span>Crop Canopy Area Cutoff</span>
+                    <span className="text-emerald-700 font-semibold">
+                      {thresholds.cropAreaFracPct.toFixed(1)}% frame
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1.5}
+                    max={12.0}
+                    step={0.5}
+                    value={thresholds.cropAreaFracPct}
+                    onChange={(e) => updateThreshold('cropAreaFracPct', Number(e.target.value))}
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                    <span>Minimum Detection Confidence</span>
+                    <span className="text-emerald-700 font-semibold">{thresholds.minConfidencePct}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={50}
+                    max={95}
+                    step={1}
+                    value={thresholds.minConfidencePct}
+                    onChange={(e) => updateThreshold('minConfidencePct', Number(e.target.value))}
+                    className="w-full accent-emerald-600 cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              <form
+                onSubmit={handleSavePreset}
+                className="bg-white border border-emerald-900/15 rounded-md p-4 space-y-3"
+              >
+                <div className="text-xs font-semibold text-slate-900">
+                  Save Current Thresholds as Named Preset
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="threshold-preset-name"
+                    className="block text-[11px] font-mono text-slate-600"
+                  >
+                    Preset Name
+                  </label>
+                  <input
+                    id="threshold-preset-name"
+                    type="text"
+                    value={presetName}
+                    onChange={(e) => {
+                      setPresetName(e.target.value);
+                      if (presetFeedback?.kind === 'error') setPresetFeedback(null);
+                    }}
+                    placeholder="e.g. Overcast Morning Loam, Bright Noon Glare"
+                    maxLength={48}
+                    className="w-full px-3 py-2 text-xs rounded-md bg-[#F8FBF9] border border-emerald-900/15 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 focus:bg-white"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="threshold-preset-notes"
+                    className="block text-[11px] font-mono text-slate-600"
+                  >
+                    Field / Lighting Notes (optional)
+                  </label>
+                  <input
+                    id="threshold-preset-notes"
+                    type="text"
+                    value={presetNotes}
+                    onChange={(e) => setPresetNotes(e.target.value)}
+                    placeholder="e.g. Wet dark soil, 60 cm tomato furrows"
+                    maxLength={80}
+                    className="w-full px-3 py-2 text-xs rounded-md bg-[#F8FBF9] border border-emerald-900/15 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 focus:bg-white"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2 px-3 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>
+                    {existingNameMatch ? `Update Preset "${existingNameMatch.name}"` : 'Save Preset to Local Storage'}
+                  </span>
+                </button>
+
+                {presetFeedback && (
+                  <div
+                    className={`px-3 py-2 rounded text-xs font-mono border ${
+                      presetFeedback.kind === 'error'
+                        ? 'bg-rose-50 border-rose-200 text-rose-800'
+                        : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    }`}
+                  >
+                    {presetFeedback.text}
+                  </div>
+                )}
+              </form>
+            </div>
+
+            {/* Right: Saved Presets List */}
+            <div className="lg:col-span-7 flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="w-4 h-4 text-emerald-600" />
+                  <h4 className="text-xs font-semibold text-slate-900 uppercase tracking-wide">
+                    Saved Presets (localStorage)
+                  </h4>
+                </div>
+                <span className="text-xs font-mono text-slate-500 tabular-nums">
+                  {presets.length} {presets.length === 1 ? 'preset' : 'presets'} stored
+                </span>
+              </div>
+
+              {presets.length === 0 ? (
+                <div className="flex-1 bg-[#F8FBF9] border border-dashed border-emerald-900/15 rounded-md p-8 flex flex-col items-center justify-center text-center gap-2">
+                  <Save className="w-5 h-5 text-emerald-600/70" />
+                  <div className="text-sm font-semibold text-slate-800">
+                    No saved threshold presets yet
+                  </div>
+                  <p className="text-xs text-slate-500 max-w-sm leading-relaxed">
+                    Adjust the weed detection sliders on the left—or tune them live in the Weed Vision tab—then give the profile a name to store it locally for quick field recall.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5 max-h-[430px] overflow-y-auto pr-1">
+                  {presets.map((preset) => {
+                    const isActive = matchingPreset?.id === preset.id;
+                    return (
+                      <div
+                        key={preset.id}
+                        className={`rounded-md border p-3.5 transition-colors ${
+                          isActive
+                            ? 'bg-emerald-50/60 border-emerald-400'
+                            : 'bg-[#F8FBF9] border-emerald-900/10 hover:border-emerald-300'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="space-y-0.5 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-semibold text-slate-900 truncate">
+                                {preset.name}
+                              </span>
+                              {isActive && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-600 text-white">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  ACTIVE
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              Saved {preset.savedAt}
+                              {preset.notes ? ` · ${preset.notes}` : ''}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleApplyPreset(preset)}
+                              disabled={isActive}
+                              className={`px-2.5 py-1 text-xs font-semibold rounded border transition-colors ${
+                                isActive
+                                  ? 'bg-white border-emerald-200 text-emerald-700 cursor-default'
+                                  : 'bg-emerald-600 hover:bg-emerald-700 border-emerald-600 text-white cursor-pointer'
+                              }`}
+                            >
+                              {isActive ? 'Loaded' : 'Load Preset'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeletePreset(preset)}
+                              aria-label={`Delete preset ${preset.name}`}
+                              title="Delete preset"
+                              className="p-1.5 rounded border border-emerald-900/15 bg-white hover:bg-rose-50 hover:border-rose-300 text-slate-500 hover:text-rose-700 cursor-pointer transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3 pt-2.5 border-t border-emerald-900/10 text-[11px] font-mono tabular-nums">
+                          <div className="bg-white border border-emerald-900/10 rounded px-2 py-1">
+                            <div className="text-slate-400 text-[10px]">ExG Floor</div>
+                            <div className="text-slate-900 font-semibold">{preset.config.minExgFloor}</div>
+                          </div>
+                          <div className="bg-white border border-emerald-900/10 rounded px-2 py-1">
+                            <div className="text-slate-400 text-[10px]">Min Area</div>
+                            <div className="text-slate-900 font-semibold">{preset.config.minBlobAreaPx} px²</div>
+                          </div>
+                          <div className="bg-white border border-emerald-900/10 rounded px-2 py-1">
+                            <div className="text-slate-400 text-[10px]">Canopy Cutoff</div>
+                            <div className="text-slate-900 font-semibold">
+                              {preset.config.cropAreaFracPct.toFixed(1)}%
+                            </div>
+                          </div>
+                          <div className="bg-white border border-emerald-900/10 rounded px-2 py-1">
+                            <div className="text-slate-400 text-[10px]">Min Conf</div>
+                            <div className="text-slate-900 font-semibold">
+                              {preset.config.minConfidencePct}%
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -916,38 +1331,79 @@ export const WeedVisionView: React.FC<Props> = ({ mode, estopActive, onLogEvent 
           </div>
 
           <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
-              <h3 className="text-sm font-semibold text-slate-900">Real-Time Segmentation Tuning</h3>
-            </div>
-            <div className="space-y-1.5 text-xs">
-              <div className="flex justify-between font-mono text-slate-600 tabular-nums">
-                <span>ExG Green Floor (2G − R − B)</span>
-                <span className="text-emerald-700 font-semibold">{minExgFloor}</span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900">Real-Time Segmentation Tuning</h3>
               </div>
-              <input
-                type="range"
-                min={6}
-                max={65}
-                value={minExgFloor}
-                onChange={(e) => setMinExgFloor(Number(e.target.value))}
-                className="w-full accent-emerald-600 cursor-pointer"
-              />
+              {matchingPreset && (
+                <span className="text-[11px] font-mono text-emerald-700 font-semibold truncate max-w-[160px]">
+                  Preset: {matchingPreset.name}
+                </span>
+              )}
             </div>
-            <div className="space-y-1.5 text-xs">
-              <div className="flex justify-between font-mono text-slate-600 tabular-nums">
-                <span>Minimum Blob Area</span>
-                <span className="text-emerald-700 font-semibold">{minBlobArea} px²</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>ExG Floor</span>
+                  <span className="text-emerald-700 font-semibold">{thresholds.minExgFloor}</span>
+                </div>
+                <input
+                  type="range"
+                  min={6}
+                  max={65}
+                  value={thresholds.minExgFloor}
+                  onChange={(e) => updateThreshold('minExgFloor', Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
               </div>
-              <input
-                type="range"
-                min={20}
-                max={300}
-                step={5}
-                value={minBlobArea}
-                onChange={(e) => setMinBlobArea(Number(e.target.value))}
-                className="w-full accent-emerald-600 cursor-pointer"
-              />
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>Min Blob Area</span>
+                  <span className="text-emerald-700 font-semibold">{thresholds.minBlobAreaPx} px²</span>
+                </div>
+                <input
+                  type="range"
+                  min={20}
+                  max={300}
+                  step={5}
+                  value={thresholds.minBlobAreaPx}
+                  onChange={(e) => updateThreshold('minBlobAreaPx', Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>Canopy Cutoff</span>
+                  <span className="text-emerald-700 font-semibold">
+                    {thresholds.cropAreaFracPct.toFixed(1)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={1.5}
+                  max={12.0}
+                  step={0.5}
+                  value={thresholds.cropAreaFracPct}
+                  onChange={(e) => updateThreshold('cropAreaFracPct', Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex justify-between font-mono text-slate-600 tabular-nums">
+                  <span>Min Confidence</span>
+                  <span className="text-emerald-700 font-semibold">{thresholds.minConfidencePct}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={50}
+                  max={95}
+                  step={1}
+                  value={thresholds.minConfidencePct}
+                  onChange={(e) => updateThreshold('minConfidencePct', Number(e.target.value))}
+                  className="w-full accent-emerald-600 cursor-pointer"
+                />
+              </div>
             </div>
           </div>
 

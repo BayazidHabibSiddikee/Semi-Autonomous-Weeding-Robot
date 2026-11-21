@@ -7,9 +7,17 @@ import {
   EyeOff,
   FlipHorizontal2,
   AlertCircle,
+  CheckCircle2,
+  AlertTriangle,
+  Activity,
+  Download,
+  X,
+  HardDrive,
 } from 'lucide-react';
 import type { VisionAlignmentData } from './CropRowAlignmentGauge';
 import { detectCropRowFromFrame } from '../vision/cropRowVision';
+import { loadActiveThresholds } from '../services/thresholdPresetStorage';
+import { MaixSenseLiveCheck } from './MaixSenseLiveCheck';
 
 export interface CameraFeedTrigger {
   action: 'start' | 'stop';
@@ -23,6 +31,20 @@ interface Props {
   externalTrigger?: CameraFeedTrigger | null;
   onAlignmentUpdate?: (alignment: VisionAlignmentData, active: boolean) => void;
   onLogEvent?: (msg: string) => void;
+}
+
+type CheckStatus = 'pass' | 'warn' | 'fail' | 'checking' | 'idle';
+
+interface LiveCameraDiagnostics {
+  trackLive: boolean;
+  trackMuted: boolean;
+  negotiatedFps: number | null;
+  framesCaptured: number;
+  meanLuma: number;
+  lumaStd: number;
+  motionDelta: number;
+  exposureState: 'ok' | 'dark' | 'overexposed' | 'idle';
+  lastCheckTime: string | null;
 }
 
 const PROC_W = 320;
@@ -39,6 +61,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
   onAlignmentUpdate,
   onLogEvent,
 }) => {
+  const [sourceMode, setSourceMode] = useState<'maixsense' | 'webcam'>('maixsense');
   const [status, setStatus] = useState<'idle' | 'requesting' | 'active' | 'error'>('idle');
   const [errorText, setErrorText] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
@@ -46,9 +69,11 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [showHudOverlay, setShowHudOverlay] = useState<boolean>(true);
   const [mirrored, setMirrored] = useState<boolean>(false);
-  const [minExgFloor, setMinExgFloor] = useState<number>(22);
+  const [minExgFloor, setMinExgFloor] = useState<number>(() => loadActiveThresholds().minExgFloor);
   const [cameraLabel, setCameraLabel] = useState<string>('Standby');
   const [resolution, setResolution] = useState<string>('—');
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
+  const [snapshotMeta, setSnapshotMeta] = useState<string>('');
 
   const [telemetry, setTelemetry] = useState({
     fps: 0,
@@ -64,10 +89,25 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     detectionMode: 'none' as 'dual_row' | 'single_band' | 'none',
   });
 
+  const [diagnostics, setDiagnostics] = useState<LiveCameraDiagnostics>({
+    trackLive: false,
+    trackMuted: false,
+    negotiatedFps: null,
+    framesCaptured: 0,
+    meanLuma: 0,
+    lumaStd: 0,
+    motionDelta: 0,
+    exposureState: 'idle',
+    lastCheckTime: null,
+  });
+
+  const sectionRef = useRef<HTMLElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const workCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const prevLumaSampleRef = useRef<Float32Array | null>(null);
+  const autoCheckedOnMountRef = useRef<boolean>(false);
 
   const onAlignmentUpdateRef = useRef(onAlignmentUpdate);
   const onLogEventRef = useRef(onLogEvent);
@@ -103,81 +143,94 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     hasEverLocked: false,
     lastUiEmit: 0,
     frameCount: 0,
+    totalFrames: 0,
     fpsWindowStart: performance.now(),
     currentFps: 0,
   });
 
-  const refreshVideoDevices = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
+  const refreshVideoDevices = useCallback(async (): Promise<MediaDeviceInfo[]> => {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
     try {
       const all = await navigator.mediaDevices.enumerateDevices();
-      setDevices(all.filter((d) => d.kind === 'videoinput'));
+      const cams = all.filter((d) => d.kind === 'videoinput');
+      setDevices(cams);
+      return cams;
     } catch {
-      // Ignore device enumeration errors prior to permission grant
+      return [];
     }
   }, []);
 
-  const stopCamera = useCallback(
-    (emitLog = true) => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.pause();
-        videoRef.current.srcObject = null;
-      }
-      const hud = hudCanvasRef.current;
-      if (hud) {
-        const ctx = hud.getContext('2d');
-        ctx?.clearRect(0, 0, hud.width, hud.height);
-      }
+  const stopCamera = useCallback((emitLog = true) => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+    const hud = hudCanvasRef.current;
+    if (hud) {
+      const ctx = hud.getContext('2d');
+      ctx?.clearRect(0, 0, hud.width, hud.height);
+    }
 
-      trackerRef.current.missedFrames = 0;
-      trackerRef.current.hasEverLocked = false;
-      setStatus('idle');
-      setErrorText(null);
-      setCameraLabel('Standby');
-      setResolution('—');
-      setTelemetry({
-        fps: 0,
-        processingMs: 0,
-        otsuThreshold: paramsRef.current.minExgFloor,
+    prevLumaSampleRef.current = null;
+    trackerRef.current.missedFrames = 0;
+    trackerRef.current.hasEverLocked = false;
+    trackerRef.current.totalFrames = 0;
+    setStatus('idle');
+    setErrorText(null);
+    setCameraLabel('Standby');
+    setResolution('—');
+    setTelemetry({
+      fps: 0,
+      processingMs: 0,
+      otsuThreshold: paramsRef.current.minExgFloor,
+      lateralOffsetM: 0,
+      headingErrorRad: 0,
+      rowEndConfidence: 0,
+      distanceToFurrowEndM: 2.0,
+      greenRatioNear: 0,
+      greenRatioFar: 0,
+      trackingLocked: false,
+      detectionMode: 'none',
+    });
+    setDiagnostics({
+      trackLive: false,
+      trackMuted: false,
+      negotiatedFps: null,
+      framesCaptured: 0,
+      meanLuma: 0,
+      lumaStd: 0,
+      motionDelta: 0,
+      exposureState: 'idle',
+      lastCheckTime: null,
+    });
+
+    onAlignmentUpdateRef.current?.(
+      {
+        trackingLocked: false,
         lateralOffsetM: 0,
+        rawLateralOffsetM: 0,
         headingErrorRad: 0,
+        rawHeadingErrorRad: 0,
+        rowWidthM: paramsRef.current.rowWidthM,
         rowEndConfidence: 0,
         distanceToFurrowEndM: 2.0,
-        greenRatioNear: 0,
         greenRatioFar: 0,
-        trackingLocked: false,
-        detectionMode: 'none',
-      });
+        greenRatioNear: 0,
+        missedFrames: 0,
+        cmdWzRadS: 0,
+        currentRow: 1,
+      },
+      false
+    );
 
-      onAlignmentUpdateRef.current?.(
-        {
-          trackingLocked: false,
-          lateralOffsetM: 0,
-          rawLateralOffsetM: 0,
-          headingErrorRad: 0,
-          rawHeadingErrorRad: 0,
-          rowWidthM: paramsRef.current.rowWidthM,
-          rowEndConfidence: 0,
-          distanceToFurrowEndM: 2.0,
-          greenRatioFar: 0,
-          greenRatioNear: 0,
-          missedFrames: 0,
-          cmdWzRadS: 0,
-          currentRow: 1,
-        },
-        false
-      );
-
-      if (emitLog) {
-        onLogEventRef.current?.('[RealTimeCameraFeed] Stopped live device camera stream.');
-      }
-    },
-    []
-  );
+    if (emitLog) {
+      onLogEventRef.current?.('[Live Camera Check] Stopped live device camera stream.');
+    }
+  }, []);
 
   const startCamera = useCallback(
     async (opts?: { facing?: 'environment' | 'user'; deviceId?: string }) => {
@@ -187,15 +240,15 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         const msg =
-          'navigator.mediaDevices.getUserMedia is not available in this browser context.';
+          'navigator.mediaDevices.getUserMedia is not available in this browser context (requires HTTPS or localhost).';
         setStatus('error');
         setErrorText(msg);
-        onLogEventRef.current?.(`[RealTimeCameraFeed] ${msg}`);
+        onLogEventRef.current?.(`[Live Camera Check] FAIL — ${msg}`);
         return;
       }
 
       const targetFacing = opts?.facing ?? facingMode;
-      const targetDevice = opts?.deviceId ?? selectedDeviceId;
+      const targetDevice = opts?.deviceId !== undefined ? opts.deviceId : selectedDeviceId;
 
       const videoConstraints: MediaTrackConstraints = targetDevice
         ? {
@@ -238,6 +291,9 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
         if (settings?.width && settings?.height) {
           setResolution(`${settings.width}×${settings.height}`);
         }
+        if (settings?.deviceId) {
+          setSelectedDeviceId(settings.deviceId);
+        }
 
         const videoEl = videoRef.current;
         if (videoEl) {
@@ -252,31 +308,80 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
           }
         }
 
-        setStatus('active');
+        prevLumaSampleRef.current = null;
         trackerRef.current.fpsWindowStart = performance.now();
         trackerRef.current.frameCount = 0;
+        trackerRef.current.totalFrames = 0;
 
-        await refreshVideoDevices();
+        setDiagnostics({
+          trackLive: track?.readyState === 'live',
+          trackMuted: Boolean(track?.muted),
+          negotiatedFps: typeof settings?.frameRate === 'number' ? settings.frameRate : null,
+          framesCaptured: 0,
+          meanLuma: 0,
+          lumaStd: 0,
+          motionDelta: 0,
+          exposureState: 'idle',
+          lastCheckTime: new Date().toLocaleTimeString(),
+        });
+
+        setStatus('active');
+
+        const cams = await refreshVideoDevices();
         onLogEventRef.current?.(
-          `[RealTimeCameraFeed] Live <video> crop-row feed active (${label}) — ExG + Otsu HUD running.`
+          `[Live Camera Check] LIVE — "${label}" (${settings?.width ?? '?'}×${settings?.height ?? '?'}, ${cams.length} video device${cams.length === 1 ? '' : 's'} detected).`
         );
       } catch (err: unknown) {
         const e = err as { name?: string; message?: string };
         const msg =
           e?.name === 'NotAllowedError'
-            ? 'Camera permission denied. Grant camera access in your browser address bar and click Retry.'
+            ? 'Camera permission denied. Allow camera access in your browser address bar and click Run Live Check.'
             : e?.name === 'NotFoundError'
-            ? 'No camera device detected on this machine.'
+            ? 'No connected camera hardware detected by browser. Verify USB/camera connection and click Rescan.'
             : e?.name === 'NotReadableError'
-            ? 'Camera is currently in use by another tab or application.'
-            : `Could not start camera: ${e?.message || 'Unknown error'}`;
+            ? 'Camera is currently locked by another app or tab. Close other video apps and click Retry.'
+            : `Could not open camera stream: ${e?.message || 'Unknown error'}`;
         setStatus('error');
         setErrorText(msg);
-        onLogEventRef.current?.(`[RealTimeCameraFeed] ${msg}`);
+        await refreshVideoDevices();
+        onLogEventRef.current?.(`[Live Camera Check] FAIL — ${msg}`);
       }
     },
     [facingMode, selectedDeviceId, stopCamera, refreshVideoDevices]
   );
+
+  // Enumerate cameras on mount, watch USB hot-plug events, and auto-run live check if permission is already granted
+  useEffect(() => {
+    void refreshVideoDevices();
+
+    const handleDeviceChange = () => {
+      void refreshVideoDevices().then((cams) => {
+        onLogEventRef.current?.(
+          `[Live Camera Check] Video hardware changed — ${cams.length} camera input${cams.length === 1 ? '' : 's'} available.`
+        );
+      });
+    };
+
+    navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
+
+    if (sourceMode === 'webcam' && !autoCheckedOnMountRef.current && navigator.permissions?.query) {
+      autoCheckedOnMountRef.current = true;
+      navigator.permissions
+        .query({ name: 'camera' as PermissionName })
+        .then((perm) => {
+          if (perm.state === 'granted') {
+            void startCamera();
+          }
+        })
+        .catch(() => {
+          // Permissions API query('camera') not supported in all browsers
+        });
+    }
+
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
+    };
+  }, [sourceMode, refreshVideoDevices, startCamera]);
 
   // Respond to external Start/Stop commands from NavigationWorkbench top bar
   const lastTriggerSeqRef = useRef<number>(0);
@@ -284,6 +389,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     if (!externalTrigger || externalTrigger.seq === lastTriggerSeqRef.current) return;
     lastTriggerSeqRef.current = externalTrigger.seq;
     if (externalTrigger.action === 'start') {
+      sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       void startCamera();
     } else if (externalTrigger.action === 'stop') {
       stopCamera(true);
@@ -300,7 +406,32 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     };
   }, []);
 
-  // Real-time ExG + Otsu crop-row analysis directly from the live <video> element
+  const handleCaptureTestSnapshot = useCallback(() => {
+    const videoEl = videoRef.current;
+    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
+
+    const snapCanvas = document.createElement('canvas');
+    snapCanvas.width = videoEl.videoWidth;
+    snapCanvas.height = videoEl.videoHeight;
+    const ctx = snapCanvas.getContext('2d');
+    if (!ctx) return;
+
+    if (mirrored) {
+      ctx.translate(snapCanvas.width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(videoEl, 0, 0, snapCanvas.width, snapCanvas.height);
+
+    const dataUrl = snapCanvas.toDataURL('image/jpeg', 0.88);
+    const ts = new Date().toLocaleTimeString();
+    setSnapshotUrl(dataUrl);
+    setSnapshotMeta(`${cameraLabel} · ${snapCanvas.width}×${snapCanvas.height} · Captured ${ts}`);
+    onLogEventRef.current?.(
+      `[Live Camera Check] Test snapshot verified (${snapCanvas.width}×${snapCanvas.height}) from "${cameraLabel}".`
+    );
+  }, [cameraLabel, mirrored]);
+
+  // Real-time ExG + Otsu crop-row analysis + hardware signal verification directly from live <video>
   useEffect(() => {
     if (status !== 'active') return;
 
@@ -329,8 +460,45 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
             minExgFloor: p.minExgFloor,
           });
 
+          // Live pixel signal check (luminance, contrast std-dev, and frame-to-frame motion delta)
+          const data = frame.data;
+          const stride = 8; // sample every 8th pixel for ultra-fast <0.2ms check
+          const sampleCount = Math.floor((PROC_W * PROC_H) / stride);
+          if (!prevLumaSampleRef.current || prevLumaSampleRef.current.length !== sampleCount) {
+            prevLumaSampleRef.current = new Float32Array(sampleCount);
+          }
+          const prevBuf = prevLumaSampleRef.current;
+          let sumLuma = 0;
+          let sumSq = 0;
+          let sumDiff = 0;
+          const hasPrev = trackerRef.current.totalFrames > 0;
+
+          for (let s = 0; s < sampleCount; s++) {
+            const idx = s * stride * 4;
+            const luma = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+            sumLuma += luma;
+            sumSq += luma * luma;
+            if (hasPrev) {
+              sumDiff += Math.abs(luma - prevBuf[s]);
+            }
+            prevBuf[s] = luma;
+          }
+
+          const meanLuma = sumLuma / Math.max(1, sampleCount);
+          const variance = Math.max(0, sumSq / Math.max(1, sampleCount) - meanLuma * meanLuma);
+          const lumaStd = Math.sqrt(variance);
+          const motionDelta = hasPrev ? sumDiff / Math.max(1, sampleCount) : 0;
+
+          const exposureState: LiveCameraDiagnostics['exposureState'] =
+            meanLuma < 10 && lumaStd < 4
+              ? 'dark'
+              : meanLuma > 246 && lumaStd < 5
+              ? 'overexposed'
+              : 'ok';
+
           const tr = trackerRef.current;
           tr.frameCount += 1;
+          tr.totalFrames += 1;
           const elapsed = now - tr.fpsWindowStart;
           if (elapsed >= 500) {
             tr.currentFps = (tr.frameCount * 1000) / elapsed;
@@ -452,12 +620,28 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
             }
           }
 
-          if (now - tr.lastUiEmit >= 75) {
+          if (now - tr.lastUiEmit >= 90) {
             tr.lastUiEmit = now;
 
             if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
               setResolution(`${videoEl.videoWidth}×${videoEl.videoHeight}`);
             }
+
+            const track = streamRef.current?.getVideoTracks()[0];
+            const trackSettings = track?.getSettings?.();
+
+            setDiagnostics({
+              trackLive: track?.readyState === 'live',
+              trackMuted: Boolean(track?.muted),
+              negotiatedFps:
+                typeof trackSettings?.frameRate === 'number' ? trackSettings.frameRate : null,
+              framesCaptured: tr.totalFrames,
+              meanLuma,
+              lumaStd,
+              motionDelta,
+              exposureState,
+              lastCheckTime: new Date().toLocaleTimeString(),
+            });
 
             const cmdWz = locked
               ? Math.max(
@@ -514,62 +698,307 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
     return () => cancelAnimationFrame(rafId);
   }, [status]);
 
+  // Compute live 5-point hardware verification checks
+  const hwStatus: CheckStatus =
+    status === 'error'
+      ? 'fail'
+      : devices.length > 0 || status === 'active'
+      ? 'pass'
+      : status === 'requesting'
+      ? 'checking'
+      : 'idle';
+
+  const streamStatus: CheckStatus =
+    status === 'error'
+      ? 'fail'
+      : status === 'requesting'
+      ? 'checking'
+      : status === 'active' && diagnostics.trackLive && !diagnostics.trackMuted && resolution !== '—'
+      ? 'pass'
+      : status === 'active'
+      ? 'warn'
+      : 'idle';
+
+  const signalStatus: CheckStatus =
+    status !== 'active'
+      ? 'idle'
+      : diagnostics.framesCaptured < 2
+      ? 'checking'
+      : diagnostics.exposureState === 'ok'
+      ? 'pass'
+      : 'warn';
+
+  const motionStatus: CheckStatus =
+    status !== 'active'
+      ? 'idle'
+      : diagnostics.framesCaptured < 4
+      ? 'checking'
+      : diagnostics.framesCaptured >= 4 && telemetry.fps > 1
+      ? 'pass'
+      : 'warn';
+
+  const cvStatus: CheckStatus =
+    status !== 'active'
+      ? 'idle'
+      : diagnostics.framesCaptured < 2
+      ? 'checking'
+      : 'pass';
+
+  const checks: Array<{
+    id: string;
+    label: string;
+    state: CheckStatus;
+    detail: string;
+  }> = [
+    {
+      id: 'hw',
+      label: '01. Camera Hardware',
+      state: hwStatus,
+      detail:
+        status === 'active'
+          ? `${devices.length || 1} detected · ${cameraLabel}`
+          : devices.length > 0
+          ? `${devices.length} input${devices.length === 1 ? '' : 's'} ready`
+          : 'Click Run Live Check',
+    },
+    {
+      id: 'stream',
+      label: '02. Live Video Track',
+      state: streamStatus,
+      detail:
+        status === 'active'
+          ? `${resolution} · ${telemetry.fps.toFixed(0)} FPS${
+              diagnostics.negotiatedFps ? ` (${Math.round(diagnostics.negotiatedFps)} Hz)` : ''
+            }`
+          : status === 'requesting'
+          ? 'Negotiating stream...'
+          : 'Not started',
+    },
+    {
+      id: 'signal',
+      label: '03. Pixel Signal & Exposure',
+      state: signalStatus,
+      detail:
+        status !== 'active'
+          ? 'Awaiting frames'
+          : diagnostics.exposureState === 'dark'
+          ? `Low light / covered (Y=${diagnostics.meanLuma.toFixed(0)})`
+          : diagnostics.exposureState === 'overexposed'
+          ? `Overexposed (Y=${diagnostics.meanLuma.toFixed(0)})`
+          : `Y=${diagnostics.meanLuma.toFixed(0)} · σ=${diagnostics.lumaStd.toFixed(1)}`,
+    },
+    {
+      id: 'motion',
+      label: '04. Frame Flow (Non-Frozen)',
+      state: motionStatus,
+      detail:
+        status !== 'active'
+          ? 'Awaiting frames'
+          : `${diagnostics.framesCaptured} frames · Δ${diagnostics.motionDelta.toFixed(2)}`,
+    },
+    {
+      id: 'cv',
+      label: '05. ExG Crop-Row CV',
+      state: cvStatus,
+      detail:
+        status !== 'active'
+          ? 'Standby'
+          : `${telemetry.processingMs.toFixed(1)} ms · Green ${(
+              telemetry.greenRatioNear * 100
+            ).toFixed(1)}%`,
+    },
+  ];
+
+  const allChecksPassed =
+    status === 'active' &&
+    hwStatus === 'pass' &&
+    streamStatus === 'pass' &&
+    signalStatus === 'pass' &&
+    motionStatus === 'pass' &&
+    cvStatus === 'pass';
+
+  const renderBadge = (state: CheckStatus) => {
+    if (state === 'pass') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold text-emerald-700">
+          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+          PASS
+        </span>
+      );
+    }
+    if (state === 'warn') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold text-amber-700">
+          <AlertTriangle className="w-3 h-3 text-amber-600" />
+          CHECK
+        </span>
+      );
+    }
+    if (state === 'fail') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold text-rose-700">
+          <AlertCircle className="w-3 h-3 text-rose-600" />
+          FAIL
+        </span>
+      );
+    }
+    if (state === 'checking') {
+      return <span className="text-[10px] font-mono font-semibold text-emerald-700">PROBING…</span>;
+    }
+    return <span className="text-[10px] font-mono text-slate-400">IDLE</span>;
+  };
+
   return (
     <section
-      aria-label="Real-Time Camera Feed"
+      ref={sectionRef}
+      aria-label="Real-Time Camera Feed & Live Check"
       className="bg-white border border-emerald-900/10 rounded-lg p-4 space-y-4"
     >
       {/* Header Row */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-emerald-900/10 pb-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <div className="flex items-center gap-2">
-            <Camera className="w-4 h-4 text-emerald-600 shrink-0" />
+            {sourceMode === 'maixsense' ? (
+              <HardDrive className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <Camera className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
             <h3 className="text-sm font-semibold text-slate-900">
-              Live Crop-Row Camera Feed (RealTimeCameraFeed)
+              {sourceMode === 'maixsense'
+                ? 'MaixSense Camera Check (USB Drive + IP)'
+                : 'Live Camera Check & Crop-Row Feed'}
             </h3>
           </div>
-          <span className="text-xs font-mono text-slate-500">
-            getUserMedia &lt;video&gt; · {cameraLabel} · {resolution}
-          </span>
+          {sourceMode === 'webcam' && (
+            <span className="text-xs font-mono text-slate-500">
+              {cameraLabel} · {resolution}
+              {devices.length > 0 ? ` · ${devices.length} cam${devices.length === 1 ? '' : 's'}` : ''}
+            </span>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span
-            className={`text-xs font-mono font-semibold tabular-nums ${
-              status === 'active'
-                ? 'text-emerald-700'
-                : status === 'error'
-                ? 'text-rose-700'
-                : 'text-slate-500'
-            }`}
-          >
-            {status === 'active'
-              ? `● LIVE ${telemetry.fps.toFixed(0)} FPS`
-              : status === 'requesting'
-              ? 'REQUESTING...'
-              : status === 'error'
-              ? '✖ CAMERA ERROR'
-              : '○ STANDBY'}
-          </span>
+          {/* Source Switcher: MaixSense (Drive + IP) vs Browser Webcam */}
+          <div className="flex items-center p-0.5 bg-[#EDF5F0] border border-emerald-900/10 rounded-md">
+            <button
+              type="button"
+              onClick={() => {
+                if (status === 'active') stopCamera(false);
+                setSourceMode('maixsense');
+              }}
+              className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer flex items-center gap-1.5 ${
+                sourceMode === 'maixsense'
+                  ? 'bg-white text-emerald-800 border border-emerald-200 font-semibold'
+                  : 'text-slate-600 hover:text-emerald-800 border border-transparent'
+              }`}
+            >
+              <HardDrive className="w-3.5 h-3.5 text-emerald-600" />
+              <span>MaixSense (Drive + IP)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSourceMode('webcam')}
+              className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer flex items-center gap-1.5 ${
+                sourceMode === 'webcam'
+                  ? 'bg-white text-emerald-800 border border-emerald-200 font-semibold'
+                  : 'text-slate-600 hover:text-emerald-800 border border-transparent'
+              }`}
+            >
+              <Camera className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Browser Webcam</span>
+            </button>
+          </div>
 
-          {status === 'active' ? (
-            <button
-              onClick={() => stopCamera(true)}
-              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
-            >
-              <CameraOff className="w-3.5 h-3.5" />
-              <span>Stop Camera</span>
-            </button>
-          ) : (
-            <button
-              onClick={() => void startCamera()}
-              className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Start Live Feed</span>
-            </button>
+          {sourceMode === 'webcam' && (
+            <>
+              <span
+                className={`text-xs font-mono font-semibold tabular-nums ${
+                  allChecksPassed
+                    ? 'text-emerald-700'
+                    : status === 'active'
+                    ? 'text-amber-700'
+                    : status === 'error'
+                    ? 'text-rose-700'
+                    : 'text-slate-500'
+                }`}
+              >
+                {allChecksPassed
+                  ? `● LIVE VERIFIED · ${telemetry.fps.toFixed(0)} FPS`
+                  : status === 'active'
+                  ? `● LIVE ${telemetry.fps.toFixed(0)} FPS`
+                  : status === 'requesting'
+                  ? 'PROBING CAMERA...'
+                  : status === 'error'
+                  ? '✖ CAMERA CHECK FAILED'
+                  : '○ READY FOR CHECK'}
+              </span>
+
+              {status === 'active' && (
+                <button
+                  onClick={handleCaptureTestSnapshot}
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-md bg-[#F8FBF9] hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Activity className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Test Snapshot</span>
+                </button>
+              )}
+
+              {status === 'active' ? (
+                <button
+                  onClick={() => stopCamera(true)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CameraOff className="w-3.5 h-3.5" />
+                  <span>Stop Camera</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => void startCamera()}
+                  className="px-3.5 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Run Live Camera Check</span>
+                </button>
+              )}
+            </>
           )}
         </div>
+      </div>
+
+      {sourceMode === 'maixsense' ? (
+        <MaixSenseLiveCheck
+          rowWidthM={rowWidthM}
+          stanleyGain={stanleyGain}
+          speedLimit={speedLimit}
+          onAlignmentUpdate={onAlignmentUpdate}
+          onLogEvent={onLogEvent}
+        />
+      ) : (
+        <>
+          {/* 5-Point Live Camera Hardware & Pixel Diagnostic Strip */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+        {checks.map((chk) => (
+          <div
+            key={chk.id}
+            className={`rounded-md border px-3 py-2 space-y-1 transition-colors ${
+              chk.state === 'pass'
+                ? 'bg-emerald-50/60 border-emerald-200'
+                : chk.state === 'warn'
+                ? 'bg-amber-50/70 border-amber-200'
+                : chk.state === 'fail'
+                ? 'bg-rose-50/70 border-rose-200'
+                : 'bg-[#F8FBF9] border-emerald-900/10'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[11px] font-semibold text-slate-800 truncate">{chk.label}</span>
+              {renderBadge(chk.state)}
+            </div>
+            <div className="text-[11px] font-mono text-slate-600 truncate tabular-nums" title={chk.detail}>
+              {chk.detail}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Main 2-Column Body: Live <video> Viewport + White/Green Controls & Telemetry */}
@@ -612,22 +1041,33 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
                 </div>
                 <div className="space-y-1 max-w-sm">
                   <div className="text-sm font-semibold text-slate-900">
-                    Connect Device Camera for Live Crop-Row View
+                    {devices.length > 0
+                      ? `${devices.length} Camera Input${devices.length === 1 ? '' : 's'} Detected — Ready for Live Check`
+                      : 'Connect Device Camera for Live Hardware & Vision Check'}
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Streams real-time video directly via{' '}
-                    <span className="font-mono text-emerald-800">getUserMedia</span> and feeds live
-                    ExG + Otsu lateral offset, heading error, and row-end detection straight into
-                    the workbench gauges.
+                    Opens your connected camera via{' '}
+                    <span className="font-mono text-emerald-800">getUserMedia</span>, verifies live
+                    resolution, FPS, exposure, and frame flow, and feeds real-time ExG + Otsu
+                    crop-row telemetry into the gauges.
                   </p>
                 </div>
-                <button
-                  onClick={() => void startCamera()}
-                  className="px-4 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>Enable Camera Feed</span>
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    onClick={() => void startCamera()}
+                    className="px-4 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Run Live Camera Check</span>
+                  </button>
+                  <button
+                    onClick={() => void refreshVideoDevices()}
+                    className="px-3 py-2 text-xs font-medium rounded-md bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Rescan Devices</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -636,7 +1076,7 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
               <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center gap-2 bg-[#F8FBF9]">
                 <Camera className="w-6 h-6 text-emerald-600" />
                 <span className="text-xs font-mono text-emerald-800">
-                  Requesting camera access via navigator.mediaDevices.getUserMedia...
+                  Opening connected camera &amp; verifying live video track...
                 </span>
               </div>
             )}
@@ -648,12 +1088,20 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
                 <p className="text-xs font-mono text-rose-800 max-w-md leading-relaxed">
                   {errorText}
                 </p>
-                <button
-                  onClick={() => void startCamera()}
-                  className="px-3.5 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
-                >
-                  Retry Camera
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void startCamera()}
+                    className="px-3.5 py-1.5 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                  >
+                    Retry Live Check
+                  </button>
+                  <button
+                    onClick={() => void refreshVideoDevices()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-white border border-emerald-900/15 text-slate-700 cursor-pointer"
+                  >
+                    Rescan Hardware
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -726,27 +1174,39 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
               </button>
             </div>
 
-            {/* Multi-device Camera Selector */}
-            {devices.length > 1 && (
-              <div className="space-y-1">
-                <label className="text-[11px] font-mono text-slate-500">Video Input Device</label>
-                <select
-                  value={selectedDeviceId}
-                  onChange={(e) => {
-                    setSelectedDeviceId(e.target.value);
-                    if (status === 'active') void startCamera({ deviceId: e.target.value });
-                  }}
-                  className="w-full text-xs font-mono bg-white border border-emerald-900/15 rounded px-2.5 py-1.5 text-slate-800"
+            {/* Connected Video Input Device Selector */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-mono text-slate-500">
+                  Connected Video Input ({devices.length})
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void refreshVideoDevices()}
+                  className="text-[11px] font-mono text-emerald-700 hover:underline cursor-pointer"
                 >
-                  <option value="">Auto ({facingMode === 'environment' ? 'Rear' : 'Front'})</option>
-                  {devices.map((d, idx) => (
-                    <option key={d.deviceId} value={d.deviceId}>
-                      {d.label || `Camera ${idx + 1}`}
-                    </option>
-                  ))}
-                </select>
+                  Rescan
+                </button>
               </div>
-            )}
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => {
+                  const nextId = e.target.value;
+                  setSelectedDeviceId(nextId);
+                  if (status === 'active') void startCamera({ deviceId: nextId });
+                }}
+                className="w-full text-xs font-mono bg-white border border-emerald-900/15 rounded px-2.5 py-1.5 text-slate-800"
+              >
+                <option value="">
+                  Auto ({facingMode === 'environment' ? 'Rear / External' : 'Front'})
+                </option>
+                {devices.map((d, idx) => (
+                  <option key={d.deviceId || `cam-${idx}`} value={d.deviceId}>
+                    {d.label || `Video Input #${idx + 1} (grant access to reveal name)`}
+                  </option>
+                ))}
+              </select>
+            </div>
 
             {/* ExG Green Sensitivity Floor */}
             <div className="space-y-1 pt-1">
@@ -823,6 +1283,44 @@ export const RealTimeCameraFeed: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* Optional Captured Test Snapshot Verification Card */}
+      {snapshotUrl && (
+        <div className="bg-[#F8FBF9] border border-emerald-900/15 rounded-md p-3 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <img
+            src={snapshotUrl}
+            alt="Captured camera check test frame"
+            className="w-40 aspect-video object-cover rounded border border-emerald-900/15 shrink-0"
+          />
+          <div className="flex-1 min-w-0 space-y-1">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Test Frame Verified</span>
+            </div>
+            <div className="text-xs font-mono text-slate-600 truncate">{snapshotMeta}</div>
+            <div className="flex items-center gap-2 pt-1">
+              <a
+                href={snapshotUrl}
+                download={`rover-camera-check-${Date.now()}.jpg`}
+                className="px-2.5 py-1 text-xs font-medium rounded bg-white hover:bg-emerald-50 border border-emerald-900/15 text-slate-700 inline-flex items-center gap-1"
+              >
+                <Download className="w-3 h-3 text-emerald-600" />
+                <span>Download JPEG</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setSnapshotUrl(null)}
+                className="px-2 py-1 text-xs text-slate-500 hover:text-slate-800 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+                <span>Dismiss</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+        </>
+      )}
     </section>
   );
 };

@@ -745,7 +745,9 @@ export function renderVisionOverlay(
 export function detectFoliageBlobsFromFrame(
   imageData: ImageData,
   minExgFloor = 24,
-  minBlobAreaPx = 45
+  minBlobAreaPx = 45,
+  cropAreaFracThreshold = 0.045,
+  minConfidence = 0.55
 ): {
   blobs: FoliageBlob[];
   mask: Uint8Array;
@@ -844,8 +846,10 @@ export function detectFoliageBlobsFromFrame(
 
         // Large central/dense foliage clusters classified as crop canopy; smaller scattered clusters as weed candidates
         const areaFrac = area / (W * H);
-        const isCrop = areaFrac > 0.045;
+        const isCrop = areaFrac > cropAreaFracThreshold;
         const confidence = Math.max(0.55, Math.min(0.99, 0.55 + (meanExg / 140) * 0.44));
+
+        if (confidence < minConfidence) continue;
 
         blobs.push({
           id: blobs.length + 1,
