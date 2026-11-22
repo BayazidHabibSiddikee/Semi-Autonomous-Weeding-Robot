@@ -298,6 +298,112 @@ def render_annotated_montage(
     )
 
 
+def _make_ppm_frame(width: int, height: int, pixel_fn) -> bytes:
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    buf = bytearray(width * height * 3)
+    idx = 0
+    for y in range(height):
+        for x in range(width):
+            r, g, b = pixel_fn(x, y)
+            buf[idx] = r
+            buf[idx + 1] = g
+            buf[idx + 2] = b
+            idx += 3
+    return header + bytes(buf)
+
+
+def evaluate_labeled_row_end_benchmark() -> dict:
+    """
+    Ground-truth labeled dataset evaluating visual row-end classification across:
+      - 12 continuous mid-row crop scenes (label=False, varying ridge positions, widths, weeds & lighting)
+      - 6 sparse-weed / bare-soil distractors (label=False, resembling outdoor weed footage)
+      - 12 true headland row-end transitions (label=True, bilateral crop rows in near ROI ending in far soil)
+    """
+    w, h = 120, 90
+    cases: list[tuple[str, bool, bytes]] = []
+
+    # 12 positive mid-row continuous crop-row scenes (ground truth: NOT a row end)
+    for i in range(12):
+        shift = (i % 5) * 4 - 8
+        ridge_w = 16 + (i % 3) * 4
+        shade = 1.0 - (i % 4) * 0.12
+
+        def _mid_row(x: int, y: int, sh=shift, rw=ridge_w, s=shade):
+            lx0, lx1 = 16 + sh, 16 + sh + rw
+            rx0, rx1 = 84 + sh, 84 + sh + rw
+            if lx0 <= x <= lx1 or rx0 <= x <= rx1:
+                return (int(34 * s), int(172 * s), int(42 * s))
+            # Occasional weed patch in central furrow
+            if 54 <= x <= 64 and 48 <= y <= 58 and (i % 2 == 0):
+                return (int(42 * s), int(150 * s), int(46 * s))
+            return (int(116 * s), int(86 * s), int(62 * s))
+
+        cases.append((f"mid_row_continuous_{i+1}", False, _make_ppm_frame(w, h, _mid_row)))
+
+    # 6 sparse-weed / bare-soil distractors (ground truth: NOT a row end)
+    for i in range(6):
+        def _sparse_weed(x: int, y: int, k=i):
+            if k > 0 and (30 + k * 8) <= x <= (42 + k * 8) and 55 <= y <= 68:
+                return (40, 155, 44)
+            return (122, 92, 68)
+
+        cases.append((f"bare_soil_or_sparse_weed_{i+1}", False, _make_ppm_frame(w, h, _sparse_weed)))
+
+    # 12 true headland row-end transitions (ground truth: IS a row end)
+    # Far ROI (0.22..0.55*h) is clear bare headland soil; near ROI (0.55..1.0*h) holds bilateral crop ridges.
+    for i in range(12):
+        shift = (i % 4) * 3 - 4
+        cutoff_y = int(h * (0.55 + (i % 3) * 0.04))
+        shade = 1.0 - (i % 3) * 0.10
+
+        def _row_end(x: int, y: int, sh=shift, cy=cutoff_y, s=shade):
+            if y >= cy and ((16 + sh <= x <= 36 + sh) or (82 + sh <= x <= 102 + sh)):
+                return (int(32 * s), int(174 * s), int(40 * s))
+            return (int(118 * s), int(88 * s), int(64 * s))
+
+        cases.append((f"headland_row_end_{i+1}", True, _make_ppm_frame(w, h, _row_end)))
+
+    tp = fp = tn = fn = 0
+    details: list[dict] = []
+    for name, gt_row_end, ppm in cases:
+        res = analyze_crop_row_frame(ppm)
+        pred = bool(res.row_end_detected)
+        if gt_row_end and pred:
+            tp += 1
+        elif not gt_row_end and pred:
+            fp += 1
+        elif not gt_row_end and not pred:
+            tn += 1
+        else:
+            fn += 1
+        details.append({
+            "case": name,
+            "ground_truth_row_end": gt_row_end,
+            "predicted_row_end": pred,
+            "visual_row_end_conf": res.visual_row_end_conf,
+            "crop_row_structure_detected": res.crop_row_structure_detected,
+        })
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "total_labeled_frames": len(cases),
+        "positive_row_end_frames": tp + fn,
+        "negative_non_row_end_frames": tn + fp,
+        "true_positives": tp,
+        "false_positives": fp,
+        "true_negatives": tn,
+        "false_negatives": fn,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1_score": round(f1, 4),
+        "false_positive_rate": round(fpr, 4),
+    }
+
+
 def run_field_video_evaluation(
     video_path: str = DEFAULT_VIDEO_PATH,
     *,
@@ -338,6 +444,7 @@ def run_field_video_evaluation(
             "lateral_error_m": resp.get("lateral_error_m"),
             "visual_row_end_conf": resp.get("visual_row_end_conf"),
             "row_end_detected": resp.get("row_end_detected"),
+            "crop_row_structure_detected": vision.get("crop_row_structure_detected", False),
             "weed_clusters_count": len(clusters),
             "weed_clusters": clusters,
         })
@@ -360,8 +467,14 @@ def run_field_video_evaluation(
     if generate_assets and selected_samples:
         render_annotated_montage(selected_samples, width, height, DEFAULT_MONTAGE_PNG)
 
+    row_end_confs = [float(f["visual_row_end_conf"] or 0.0) for f in per_frame]
+    false_positive_row_ends = sum(1 for f in per_frame if f.get("row_end_detected"))
+    frames_ge_085 = sum(1 for c in row_end_confs if c >= 0.85)
+    gt_benchmark = evaluate_labeled_row_end_benchmark()
+
     report = {
         "video_file": DEFAULT_VIDEO_REL,
+        "video_ground_truth_label": "non_row_end_outdoor_weed_footage",
         "frames_evaluated": len(frames),
         "frame_resolution_tested": f"{width}x{height}",
         "all_frames_decoded": all_decoded,
@@ -369,6 +482,10 @@ def run_field_video_evaluation(
         "frames_with_vegetation_clusters": frames_with_weeds,
         "total_vegetation_clusters": total_clusters,
         "max_clusters_in_single_frame": max((f["weed_clusters_count"] for f in per_frame), default=0),
+        "real_video_row_end_false_positives": false_positive_row_ends,
+        "real_video_frames_conf_ge_085": frames_ge_085,
+        "real_video_mean_row_end_conf": round(sum(row_end_confs) / max(1, len(row_end_confs)), 4),
+        "ground_truth_row_end_validation": gt_benchmark,
         "paper_trash_frame_20s": per_frame[min(20, len(per_frame) - 1)],
         "rosette_weed_frame_44s": per_frame[min(44, len(per_frame) - 1)],
         "frames": [
@@ -386,6 +503,15 @@ def run_field_video_evaluation(
 
 
 class FieldVideoVisionTest(unittest.TestCase):
+    def test_labeled_ground_truth_row_end_classification(self):
+        gt = evaluate_labeled_row_end_benchmark()
+        self.assertEqual(gt["total_labeled_frames"], 30)
+        self.assertEqual(gt["false_positives"], 0, gt)
+        self.assertEqual(gt["false_positive_rate"], 0.0, gt)
+        self.assertGreaterEqual(gt["recall"], 0.95, gt)
+        self.assertGreaterEqual(gt["precision"], 0.95, gt)
+        self.assertGreaterEqual(gt["f1_score"], 0.95, gt)
+
     def test_real_outdoor_field_video_exg_pipeline(self):
         if not os.path.isfile(DEFAULT_VIDEO_PATH) or not shutil.which("ffmpeg"):
             self.skipTest("Field video or ffmpeg not available in environment")
@@ -398,6 +524,12 @@ class FieldVideoVisionTest(unittest.TestCase):
         # Real video has green weeds/grass across multiple frames
         self.assertGreaterEqual(report["frames_with_vegetation_clusters"], 15)
         self.assertGreaterEqual(report["total_vegetation_clusters"], 25)
+
+        # Ground-truth check: outdoor sparse-weed video contains NO structured crop-row headlands,
+        # so visual row-end detector MUST produce 0 false-positive row-end triggers!
+        self.assertEqual(report["real_video_row_end_false_positives"], 0)
+        self.assertEqual(report["real_video_frames_conf_ge_085"], 0)
+        self.assertLess(report["real_video_mean_row_end_conf"], 0.25)
 
         # At t=20s there is large white crumpled paper + one green shoot at the bottom:
         # ExG must NOT classify the bright white paper as green vegetation (<12% total green)

@@ -30,6 +30,8 @@ setup(
             "esp32_diffdrive_node = rover_hardware.esp32_bridge.esp32_diffdrive_node:main",
             "wheel_odom_node = rover_hardware.wheel_odometry.wheel_odom_node:main",
             "bno055_imu_node = rover_hardware.sensor_drivers.bno055_imu_node:main",
+            "nav_camera_node = rover_hardware.sensor_drivers.nav_camera_node:main",
+            "ultrasonic_scan_node = rover_hardware.sensor_drivers.ultrasonic_scan_node:main",
         ],
     },
 )

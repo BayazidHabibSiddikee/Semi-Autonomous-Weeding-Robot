@@ -41,7 +41,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config_loader import load_yaml_config
-from crop_row_vision import analyze_crop_row_frame
+from crop_row_vision import analyze_crop_row_frame, warp_frame_to_bev
 from esp32_bridge import ESP32Bridge, ESP32Simulator, StopAckResult
 from rover_main import build_navigation_stack
 from state_machine import RoverState
@@ -58,6 +58,7 @@ SAMPLE_IMAGE_MARKERS = (
 
 MAX_INGEST_FRAME_BYTES = 5 * 1024 * 1024  # 5 MB upper bound on uploaded JPEG/PNG frames
 ALLOWED_MODEL_EXTENSIONS = (".pt", ".onnx", ".engine", ".tflite")
+ANDROID_MIN_CONFIDENCE = 0.45
 
 
 def extract_multipart_image(raw_body: bytes, content_type: str) -> tuple[bytes | None, str]:
@@ -86,10 +87,19 @@ def extract_multipart_image(raw_body: bytes, content_type: str) -> tuple[bytes |
     return None, "image/jpeg"
 
 
-def verify_bearer_token(auth_header: str | None, expected_token: str | None) -> bool:
-    """Constant-time verification of `Authorization: Bearer <token>` when PI_API_TOKEN is configured."""
+def verify_bearer_token(
+    auth_header: str | None,
+    expected_token: str | None,
+    *,
+    allow_unauthenticated: bool = False,
+) -> bool:
+    """
+    Constant-time verification of `Authorization: Bearer <token>`.
+    Fails CLOSED when PI_API_TOKEN is unset unless `allow_unauthenticated=True`
+    is explicitly opted into for local-only bench development.
+    """
     if not expected_token:
-        return True
+        return bool(allow_unauthenticated)
     if not auth_header:
         return False
     parts = auth_header.strip().split(" ", 1)
@@ -187,6 +197,10 @@ class HardenedNavigationController:
         self.simulate = simulate
         self.model_loaded = model_loaded
         self.model_path: str | None = None
+        self._model_instance: Any = None
+        self._model_backend: str | None = None
+        self._model_load_error: str | None = None
+        self._treatment_actuator_attached: bool = False
         self._lock = threading.RLock()
 
         self._latest_visual_row_end_conf: float = 0.0
@@ -195,6 +209,12 @@ class HardenedNavigationController:
         self._latest_vision_analysis: dict[str, Any] | None = None
         self._latest_frame_bytes: bytes | None = None
         self._latest_frame_mime: str = "image/jpeg"
+        self._latest_bev_bytes: bytes | None = None
+        self._latest_bev_mime: str = "image/jpeg"
+        self._latest_bev_width: int = 0
+        self._latest_bev_height: int = 0
+        self._latest_bev_corners: list[list[float]] = []
+        self._latest_bev_transform_method: str = "unwarped"
         self._frames_ingested: int = 0
         self._row_width_m: float = float(
             config.get("rover", {}).get("navigation", {}).get("row_width_cm", 60.0)
@@ -237,18 +257,21 @@ class HardenedNavigationController:
         now: float | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """
-        Ingest a live camera frame (from MaixSense bridge, USB cam, or Android POST /image),
-        run live Excess-Green crop-row analysis when decodable image bytes are provided,
-        and refresh CameraHealthMonitor + visual row-end confidence for RoverStateMachine.
+        Ingest a live camera frame (from MaixSense bridge, USB cam, or Android POST /image):
+          1. Run geometric top-down BEV perspective warp (`warp_frame_to_bev`) for `/bev_image`.
+          2. Run Excess-Green crop-row analysis (`analyze_crop_row_frame`) extracting bilateral
+             near/far density, ridges_nx, furrows_nx, lateral/heading error, and row-end confidence.
+          3. Refresh CameraHealthMonitor and return both canonical Pi and Android PiLiveClient fields.
         """
         with self._lock:
             vision_dict: dict[str, Any] | None = None
+            bev_warped = False
             if frame_bytes is not None:
                 if len(frame_bytes) == 0:
                     self.camera_monitor.record_read_failure()
-                    return 400, {"ok": False, "error": "EMPTY_FRAME_PAYLOAD"}
+                    return 400, {"ok": False, "status": "error", "error": "EMPTY_FRAME_PAYLOAD"}
                 if len(frame_bytes) > MAX_INGEST_FRAME_BYTES:
-                    return 413, {"ok": False, "error": "FRAME_TOO_LARGE"}
+                    return 413, {"ok": False, "status": "error", "error": "FRAME_TOO_LARGE"}
                 self._latest_frame_bytes = frame_bytes
                 self._latest_frame_mime = mime_type if mime_type in ("image/jpeg", "image/png") else "image/jpeg"
 
@@ -262,6 +285,23 @@ class HardenedNavigationController:
                         self._latest_visual_lateral_error_m = vision_res.lateral_error_m
                     self._latest_visual_heading_error_rad = vision_res.heading_error_rad
 
+                # Compute genuine geometrically transformed top-down BEV image for GET /bev_image
+                bev_res = warp_frame_to_bev(frame_bytes, out_width=640, out_height=480)
+                if bev_res.warped and bev_res.bev_bytes is not None:
+                    bev_warped = True
+                    self._latest_bev_bytes = bev_res.bev_bytes
+                    self._latest_bev_mime = bev_res.mime_type
+                    self._latest_bev_width = bev_res.bev_width
+                    self._latest_bev_height = bev_res.bev_height
+                    self._latest_bev_corners = bev_res.boundary_corners
+                    self._latest_bev_transform_method = bev_res.transform_method
+                else:
+                    self._latest_bev_bytes = None
+                    self._latest_bev_width = 0
+                    self._latest_bev_height = 0
+                    self._latest_bev_corners = []
+                    self._latest_bev_transform_method = bev_res.transform_method
+
             if visual_row_end_conf is not None and math.isfinite(visual_row_end_conf):
                 self._latest_visual_row_end_conf = max(0.0, min(1.0, float(visual_row_end_conf)))
             if lateral_error_m is not None and math.isfinite(lateral_error_m):
@@ -271,20 +311,47 @@ class HardenedNavigationController:
             self.camera_monitor.record_frame_ok(now=now)
             cam = self.camera_monitor.evaluate(now=now)
             decoded = bool(vision_dict and vision_dict.get("decoded"))
+            ridges_nx: list[float] = list(vision_dict.get("ridges_nx", [])) if decoded and vision_dict else []
+            furrows_nx: list[float] = list(vision_dict.get("furrows_nx", [])) if decoded and vision_dict else []
+            confidence = (
+                float(vision_dict.get("confidence", 0.0))
+                if decoded and vision_dict
+                else 0.0
+            )
+            android_ready = bool(
+                bev_warped
+                and decoded
+                and confidence >= ANDROID_MIN_CONFIDENCE
+                and len(furrows_nx) > 0
+            )
             return 200, {
                 "ok": True,
+                "status": "ok",
                 "frames_ingested": self._frames_ingested,
                 "camera_healthy": cam.healthy,
                 "visual_row_end_conf": round(self._latest_visual_row_end_conf, 3),
                 "lateral_error_m": round(self._latest_visual_lateral_error_m, 4),
                 "heading_error_rad": round(self._latest_visual_heading_error_rad, 4),
-                # Android PiLiveClient BEV compatibility fields
-                "bev_ready": self._latest_frame_bytes is not None,
+                # Android PiLiveClient PiImageUploadResponse exact contract fields
+                "ready": android_ready,
+                "bev_ready": bev_warped,
+                "bev_warped": bev_warped,
+                "bev_transform_method": self._latest_bev_transform_method,
                 "bev_url": "/bev_image",
+                "bev_width": self._latest_bev_width,
+                "bev_height": self._latest_bev_height,
+                "boundary_corners": self._latest_bev_corners,
+                "ridges_nx": ridges_nx,
+                "furrows_nx": furrows_nx,
+                "confidence": round(confidence, 3),
+                "min_confidence": ANDROID_MIN_CONFIDENCE,
+                "map_feed": "/map_feed",
+                "video_feed": "/video_feed",
+                # Rich perception telemetry
                 "vision_decoded": decoded,
                 "analysis_source": vision_dict.get("analysis_source") if vision_dict else "metadata_only",
-                "confidence": vision_dict.get("confidence", 0.0) if decoded and vision_dict else round(self._latest_visual_row_end_conf, 3),
-                "row_end_detected": self._latest_visual_row_end_conf >= 0.75,
+                "crop_row_structure_detected": bool(vision_dict.get("crop_row_structure_detected", False)) if vision_dict else False,
+                "row_end_detected": bool(vision_dict.get("row_end_detected", False)) if decoded and vision_dict else False,
                 "green_ratio_near": vision_dict.get("green_ratio_near", 0.0) if vision_dict else 0.0,
                 "green_ratio_far": vision_dict.get("green_ratio_far", 0.0) if vision_dict else 0.0,
                 "image_width": vision_dict.get("image_width", 0) if vision_dict else 0,
@@ -292,10 +359,122 @@ class HardenedNavigationController:
                 "furrows": vision_dict.get("furrows", []) if decoded and vision_dict else [],
             }
 
-    def load_weed_model(self, model_path: Any) -> tuple[int, dict[str, Any]]:
+    @staticmethod
+    def _instantiate_inference_runtime(resolved_path: str) -> tuple[bool, str | None, Any, str | None, int]:
         """
-        Verify and register a real trained weed-vs-crop detector weights file on disk.
-        Strictly path-confined inside WEED_MODEL_DIR (or repo root) and never fakes model_loaded=True.
+        Actually instantiate a real ML inference runtime for the requested weights file.
+        Never claims model_loaded=True merely because a file exists on disk!
+        Returns: (ok, backend_name, model_obj, error_code_and_detail, http_status)
+        """
+        low = resolved_path.lower()
+        if low.endswith(".pt"):
+            try:
+                from ultralytics import YOLO  # type: ignore[import-not-found]
+            except ImportError:
+                return (
+                    False,
+                    None,
+                    None,
+                    "INFERENCE_RUNTIME_NOT_AVAILABLE:ultralytics package not installed on Pi; cannot instantiate .pt model",
+                    503,
+                )
+            try:
+                model = YOLO(resolved_path)
+                if not hasattr(model, "predict"):
+                    return (
+                        False,
+                        None,
+                        None,
+                        "MODEL_INSTANTIATION_FAILED:loaded object missing predict() interface",
+                        422,
+                    )
+                return True, "ultralytics_yolo", model, None, 200
+            except Exception as exc:
+                return (
+                    False,
+                    None,
+                    None,
+                    f"MODEL_INSTANTIATION_FAILED:{exc}",
+                    422,
+                )
+
+        if low.endswith(".onnx"):
+            try:
+                import onnxruntime as ort  # type: ignore[import-not-found]
+            except ImportError:
+                return (
+                    False,
+                    None,
+                    None,
+                    "INFERENCE_RUNTIME_NOT_AVAILABLE:onnxruntime package not installed on Pi; cannot instantiate .onnx model",
+                    503,
+                )
+            try:
+                session = ort.InferenceSession(resolved_path, providers=["CPUExecutionProvider"])
+                if not session.get_inputs() or not session.get_outputs():
+                    return (
+                        False,
+                        None,
+                        None,
+                        "MODEL_INSTANTIATION_FAILED:ONNX graph has no valid inputs/outputs",
+                        422,
+                    )
+                return True, "onnxruntime", session, None, 200
+            except Exception as exc:
+                return (
+                    False,
+                    None,
+                    None,
+                    f"MODEL_INSTANTIATION_FAILED:{exc}",
+                    422,
+                )
+
+        if low.endswith(".tflite"):
+            interpreter_cls = None
+            try:
+                from tflite_runtime.interpreter import Interpreter as interpreter_cls  # type: ignore[import-not-found]
+            except ImportError:
+                try:
+                    from tensorflow.lite.python.interpreter import Interpreter as interpreter_cls  # type: ignore[import-not-found]
+                except ImportError:
+                    return (
+                        False,
+                        None,
+                        None,
+                        "INFERENCE_RUNTIME_NOT_AVAILABLE:tflite_runtime/tensorflow not installed on Pi",
+                        503,
+                    )
+            try:
+                interp = interpreter_cls(model_path=resolved_path)
+                interp.allocate_tensors()
+                return True, "tflite", interp, None, 200
+            except Exception as exc:
+                return (
+                    False,
+                    None,
+                    None,
+                    f"MODEL_INSTANTIATION_FAILED:{exc}",
+                    422,
+                )
+
+        return (
+            False,
+            None,
+            None,
+            "INFERENCE_RUNTIME_NOT_AVAILABLE:TensorRT .engine inference runtime is not configured on this host",
+            503,
+        )
+
+    def load_weed_model(
+        self,
+        model_path: Any,
+        *,
+        model_loader_fn=None,
+    ) -> tuple[int, dict[str, Any]]:
+        """
+        Verify, path-confine, AND instantiate a real weed-vs-crop inference model.
+        Strictly path-confined inside WEED_MODEL_DIR (or repo root). Never marks
+        `model_loaded=True` simply because a file exists on disk!
         """
         if not isinstance(model_path, str) or not model_path.strip():
             return 400, {"ok": False, "model_loaded": False, "error": "MODEL_PATH_REQUIRED"}
@@ -319,12 +498,48 @@ class HardenedNavigationController:
         if not os.path.isfile(resolved):
             return 404, {"ok": False, "model_loaded": False, "error": "MODEL_FILE_NOT_FOUND"}
 
+        if os.path.getsize(resolved) == 0:
+            return 422, {"ok": False, "model_loaded": False, "error": "MODEL_FILE_EMPTY"}
+
+        if model_loader_fn is not None:
+            try:
+                loaded_obj = model_loader_fn(resolved)
+                if loaded_obj is None:
+                    raise ValueError("Custom model loader returned None")
+                ok_inst, backend, model_obj, err_msg, http_code = True, "verified_runtime", loaded_obj, None, 200
+            except Exception as exc:
+                ok_inst, backend, model_obj, err_msg, http_code = (
+                    False,
+                    None,
+                    None,
+                    f"MODEL_INSTANTIATION_FAILED:{exc}",
+                    422,
+                )
+        else:
+            ok_inst, backend, model_obj, err_msg, http_code = self._instantiate_inference_runtime(resolved)
+
         with self._lock:
+            if not ok_inst or model_obj is None:
+                self.model_loaded = False
+                self._model_instance = None
+                self._model_backend = None
+                self._model_load_error = err_msg
+                return http_code, {
+                    "ok": False,
+                    "model_loaded": False,
+                    "model_file": os.path.basename(resolved),
+                    "error": err_msg or "MODEL_INSTANTIATION_FAILED",
+                }
+
             self.model_loaded = True
             self.model_path = resolved
+            self._model_instance = model_obj
+            self._model_backend = backend
+            self._model_load_error = None
             return 200, {
                 "ok": True,
                 "model_loaded": True,
+                "inference_backend": backend,
                 "model_file": os.path.basename(resolved),
                 "size_bytes": os.path.getsize(resolved),
             }
@@ -1019,8 +1234,13 @@ class HardenedNavigationController:
                     "visual_lateral_error_m": round(self._latest_visual_lateral_error_m, 4),
                     "visual_heading_error_rad": round(self._latest_visual_heading_error_rad, 4),
                     "model_loaded": self.model_loaded,
+                    "model_backend": self._model_backend,
                     "model_file": os.path.basename(self.model_path) if self.model_path else None,
+                    "model_load_error": self._model_load_error,
                     "homography_calibrated": self.target_mgr.is_calibrated,
+                    "treatment_actuator_attached": self._treatment_actuator_attached,
+                    "bev_warped": self._latest_bev_bytes is not None,
+                    "bev_transform_method": self._latest_bev_transform_method,
                 },
                 "vision_analysis": self._latest_vision_analysis,
                 "weeds_eliminated": self.target_mgr.weeds_eliminated,
@@ -1166,13 +1386,15 @@ def create_fastapi_app(
     start_worker: bool = True,
     worker_hz: float = 10.0,
     api_token: str | None = None,
+    allow_unauthenticated_local: bool | None = None,
 ):
     """
     FastAPI app factory for Raspberry Pi 5 runtime on port 8000 with:
       - asyncio background control loop worker
-      - server-side Bearer token authentication when PI_API_TOKEN (or api_token) is set
+      - fail-closed server-side Bearer token authentication (requires PI_API_TOKEN unless
+        PI_ALLOW_INSECURE_LOCAL_DEV=1 is explicitly set for local bench development)
       - read-only default startup handshake (never auto-clears E-stop/watchdog latches)
-      - real ExG crop-row vision analysis on /camera/frame and multipart Android /image
+      - geometric BEV perspective warp + ExG crop-row vision on /camera/frame and /image
     """
     from fastapi import Depends, FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
@@ -1183,9 +1405,27 @@ def create_fastapi_app(
         if isinstance(api_token, str) and api_token.strip()
         else (os.environ.get("PI_API_TOKEN", "").strip() or None)
     )
+    allow_insecure_local = (
+        bool(allow_unauthenticated_local)
+        if allow_unauthenticated_local is not None
+        else os.environ.get("PI_ALLOW_INSECURE_LOCAL_DEV", "").strip().lower() in ("1", "true", "yes")
+    )
+    auth_enforced = bool(expected_token) or (not allow_insecure_local)
 
     def require_bearer_auth(request: Request) -> None:
-        if not verify_bearer_token(request.headers.get("authorization"), expected_token):
+        if not expected_token and not allow_insecure_local:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "AUTH_NOT_CONFIGURED: Set matching PI_API_TOKEN on both Raspberry Pi and client "
+                    "(or set PI_ALLOW_INSECURE_LOCAL_DEV=1 for isolated local bench testing only)."
+                ),
+            )
+        if not verify_bearer_token(
+            request.headers.get("authorization"),
+            expected_token,
+            allow_unauthenticated=allow_insecure_local,
+        ):
             raise HTTPException(
                 status_code=401,
                 detail="UNAUTHORIZED: Valid Authorization: Bearer <PI_API_TOKEN> header required.",
@@ -1215,6 +1455,7 @@ def create_fastapi_app(
     app.state.worker = worker
     app.state.control_loop_task = None
     app.state.auth_enabled = bool(expected_token)
+    app.state.auth_enforced = auth_enforced
 
     app.add_middleware(
         CORSMiddleware,
@@ -1230,11 +1471,21 @@ def create_fastapi_app(
         return {
             "ok": True,
             "auth_enabled": bool(expected_token),
+            "auth_enforced": auth_enforced,
             "worker_running": worker.is_running,
             "worker_hz": worker.hz,
             "worker_ticks": controller.worker_ticks,
             "worker_last_error": worker.last_error,
             "status": status,
+        }
+
+    @app.get("/auth/verify", dependencies=[Depends(require_bearer_auth)])
+    def get_auth_verify():
+        return {
+            "ok": True,
+            "authenticated": True,
+            "auth_enabled": bool(expected_token),
+            "auth_enforced": auth_enforced,
         }
 
     @app.get("/cut_plan")
@@ -1389,12 +1640,20 @@ def create_fastapi_app(
 
     @app.get("/bev_image")
     def get_bev_image():
-        if controller._latest_frame_bytes is None:
+        if controller._latest_bev_bytes is None:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "BEV_FRAME_UNAVAILABLE"},
+                content={
+                    "ok": False,
+                    "error": "BEV_WARP_UNAVAILABLE",
+                    "detail": "No geometrically warped Bird's-Eye-View frame has been generated yet.",
+                },
             )
-        return Response(content=controller._latest_frame_bytes, media_type=controller._latest_frame_mime)
+        return Response(
+            content=controller._latest_bev_bytes,
+            media_type=controller._latest_bev_mime,
+            headers={"X-BEV-Transform": controller._latest_bev_transform_method},
+        )
 
     @app.get("/map_feed")
     def get_map_feed():

@@ -368,17 +368,32 @@ class NavigationAuditTestSuite(unittest.TestCase):
         ctrl = HardenedNavigationController(self.config, simulate=True)
         self.assertFalse(ctrl.get_status()["hardware"]["camera_healthy"])
 
-        # Ingest live JPEG bytes + visual row-end confidence
+        # Ingest live JPEG bytes + high visual row-end confidence at row start (x=30 cm, 0% progress)
         code, resp = ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9", visual_row_end_conf=0.92)
         self.assertEqual(code, 200)
         self.assertTrue(resp["camera_healthy"])
         self.assertAlmostEqual(resp["visual_row_end_conf"], 0.92, places=2)
 
-        # Start mission and verify visual row-end confidence triggers HEADLAND_TURN
+        # Start mission: mid-row single-frame visual spike MUST NOT cause premature HEADLAND_TURN
         start_code, start_data = ctrl.handle_start_mission(nav_only=True, operator_confirmed=True)
         self.assertEqual(start_code, 200, start_data)
         ctrl.step_control_loop()
-        self.assertEqual(ctrl.sm.state, RoverState.HEADLAND_TURN)
+        self.assertEqual(ctrl.sm.state, RoverState.NAVIGATING_ROW)
+
+        # Advance rover odometry past 75% row progress (215 cm on 300 cm field with 30 cm headland -> 77%)
+        # while staying well short of the 270 cm geometric boundary so visual streak (3 frames) governs turn
+        ctrl.sm.rover.localizer.x_cm = 215.0
+        ctrl.sm.rover.localizer.y_cm = 50.0
+        ctrl.sm.rover.localizer.theta_deg = 0.0
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9", visual_row_end_conf=0.92)
+        ctrl.step_control_loop()
+        self.assertEqual(ctrl.sm.state, RoverState.NAVIGATING_ROW)  # streak 1/3
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9", visual_row_end_conf=0.92)
+        ctrl.step_control_loop()
+        self.assertEqual(ctrl.sm.state, RoverState.NAVIGATING_ROW)  # streak 2/3
+        ctrl.ingest_camera_frame(b"\xff\xd8\xff\xd9", visual_row_end_conf=0.92)
+        ctrl.step_control_loop()
+        self.assertEqual(ctrl.sm.state, RoverState.HEADLAND_TURN)  # streak 3/3
 
         # Verify BackgroundControlWorker thread executes control ticks autonomously
         worker = BackgroundControlWorker(ctrl, hz=25.0)
@@ -430,6 +445,32 @@ class NavigationAuditTestSuite(unittest.TestCase):
             tree = ET.parse(pkg_xml)
             self.assertEqual(tree.getroot().findtext("name"), pkg)
 
+        # Verify dedicated ament_cmake interface package for FollowCropRow.action
+        iface_dir = os.path.join(REPO, "ros2_ws", "src", "crop_row_interfaces")
+        iface_xml = os.path.join(iface_dir, "package.xml")
+        iface_cmake = os.path.join(iface_dir, "CMakeLists.txt")
+        iface_action = os.path.join(iface_dir, "action", "FollowCropRow.action")
+        self.assertTrue(os.path.exists(iface_xml), "Missing crop_row_interfaces/package.xml")
+        self.assertTrue(os.path.exists(iface_cmake), "Missing crop_row_interfaces/CMakeLists.txt")
+        self.assertTrue(os.path.exists(iface_action), "Missing crop_row_interfaces/action/FollowCropRow.action")
+        with open(iface_xml, "r", encoding="utf-8") as fh:
+            iface_xml_src = fh.read()
+        self.assertIn("ament_cmake", iface_xml_src)
+        self.assertIn("rosidl_default_generators", iface_xml_src)
+        self.assertIn("rosidl_interface_packages", iface_xml_src)
+        with open(iface_cmake, "r", encoding="utf-8") as fh:
+            cmake_src = fh.read()
+        self.assertIn("rosidl_generate_interfaces", cmake_src)
+        self.assertIn("action/FollowCropRow.action", cmake_src)
+
+        # Verify crop_row_navigation depends on crop_row_interfaces and has no silent nav2_msgs fallback
+        with open(os.path.join(REPO, "ros2_ws", "src", "crop_row_navigation", "package.xml"), "r", encoding="utf-8") as fh:
+            self.assertIn("<exec_depend>crop_row_interfaces</exec_depend>", fh.read())
+        with open(os.path.join(REPO, "ros2_ws", "src", "crop_row_navigation", "row_follow_action.py"), "r", encoding="utf-8") as fh:
+            row_action_src = fh.read()
+        self.assertIn("from crop_row_interfaces.action import FollowCropRow", row_action_src)
+        self.assertNotIn("FollowWaypoints", row_action_src)
+
         launch_path = os.path.join(
             REPO, "ros2_ws", "src", "robot_bringup", "launch", "rover_bringup.launch.py"
         )
@@ -438,6 +479,19 @@ class NavigationAuditTestSuite(unittest.TestCase):
         self.assertIn("nav2_collision_monitor", launch_src)
         self.assertIn("/cmd_vel_nav", launch_src)
         self.assertIn("/cmd_vel_safe", launch_src)
+        self.assertIn("nav_camera_node", launch_src)
+        self.assertIn("/nav_camera/image_raw", launch_src)
+        self.assertIn("ultrasonic_scan_node", launch_src)
+        self.assertIn("/scan", launch_src)
+
+        sim_launch_path = os.path.join(
+            REPO, "ros2_ws", "src", "robot_bringup", "launch", "sim_bringup.launch.py"
+        )
+        with open(sim_launch_path, "r", encoding="utf-8") as fh:
+            sim_launch_src = fh.read()
+        self.assertIn("ros_gz_bridge", sim_launch_src)
+        self.assertIn("/nav_camera/image_raw", sim_launch_src)
+        self.assertIn("/scan", sim_launch_src)
 
     def test_audit_f_detections_remain_fail_closed_until_calibrated_and_loaded(self):
         from pi_server import HardenedNavigationController
@@ -663,27 +717,60 @@ class NavigationAuditTestSuite(unittest.TestCase):
         from pi_server import HardenedNavigationController, extract_multipart_image
 
         boundary = "----AndroidPiLiveClientBoundary"
-        sample_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
-        body = (
+        # 1. Undecodable stub JPEG: multipart extraction works, BEV warp honestly reports not ready
+        stub_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+        stub_body = (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="frame.jpg"\r\n'
+            f'Content-Disposition: form-data; name="file"; filename="stub.jpg"\r\n'
             f"Content-Type: image/jpeg\r\n\r\n"
-        ).encode("utf-8") + sample_jpeg + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        ).encode("utf-8") + stub_jpeg + f"\r\n--{boundary}--\r\n".encode("utf-8")
         content_type = f"multipart/form-data; boundary={boundary}"
 
-        extracted, mime = extract_multipart_image(body, content_type)
-        self.assertEqual(extracted, sample_jpeg)
+        extracted, mime = extract_multipart_image(stub_body, content_type)
+        self.assertEqual(extracted, stub_jpeg)
         self.assertEqual(mime, "image/jpeg")
 
         ctrl = HardenedNavigationController(self.config, simulate=True)
-        code, resp = ctrl.ingest_camera_frame(extracted, mime_type=mime)
+        c_stub, r_stub = ctrl.ingest_camera_frame(extracted, mime_type=mime)
+        self.assertEqual(c_stub, 200)
+        self.assertFalse(r_stub["ready"])
+        self.assertFalse(r_stub["bev_warped"])
+
+        # 2. Real decodable crop-row image: Pi geometrically warps BEV & matches Android PiImageUploadResponse
+        def row_px(x: int, y: int):
+            if 12 <= x <= 26 or 54 <= x <= 68:
+                return (30, 175, 40)
+            return (110, 82, 58)
+
+        real_png = self._make_synthetic_png(80, 60, row_px)
+        real_body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="field.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode("utf-8") + real_png + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        extracted_png, mime_png = extract_multipart_image(real_body, content_type)
+        self.assertEqual(extracted_png, real_png)
+        self.assertEqual(mime_png, "image/png")
+
+        code, resp = ctrl.ingest_camera_frame(extracted_png, mime_type=mime_png)
         self.assertEqual(code, 200)
         self.assertTrue(resp["ok"])
+        self.assertTrue(resp["ready"])
         self.assertTrue(resp["bev_ready"])
+        self.assertTrue(resp["bev_warped"])
         self.assertEqual(resp["bev_url"], "/bev_image")
-        self.assertIn("furrows", resp)
-        self.assertIn("row_end_detected", resp)
-        self.assertIn("confidence", resp)
+        self.assertGreater(resp["bev_width"], 0)
+        self.assertGreater(resp["bev_height"], 0)
+        self.assertIsInstance(resp["furrows_nx"], list)
+        self.assertGreaterEqual(len(resp["furrows_nx"]), 1)
+        self.assertTrue(all(isinstance(v, float) and 0.0 < v < 1.0 for v in resp["furrows_nx"]))
+        self.assertIsInstance(resp["ridges_nx"], list)
+        self.assertGreaterEqual(len(resp["ridges_nx"]), 2)
+        self.assertEqual(len(resp["boundary_corners"]), 4)
+        self.assertIn("min_confidence", resp)
+        # /bev_image bytes MUST be a genuine geometrically warped image, not raw input pass-through
+        self.assertIsNotNone(ctrl._latest_bev_bytes)
+        self.assertNotEqual(ctrl._latest_bev_bytes, real_png)
 
     def test_load_weed_model_path_confinement_and_verification(self):
         import tempfile
@@ -719,16 +806,28 @@ class NavigationAuditTestSuite(unittest.TestCase):
                 self.assertEqual(c3, 404)
                 self.assertFalse(ctrl.model_loaded)
 
-                # Accept verified real .pt file inside WEED_MODEL_DIR
+                # Dummy .pt bytes MUST NOT report model_loaded=True without a verified inference runtime
                 pt_path = os.path.join(tmpdir, "weed_detector_v1.pt")
                 with open(pt_path, "wb") as fh:
                     fh.write(b"WEIGHTS_PAYLOAD_BYTES")
                 c4, b4 = ctrl.load_weed_model("weed_detector_v1.pt")
-                self.assertEqual(c4, 200, b4)
-                self.assertTrue(b4["model_loaded"])
+                self.assertIn(c4, (422, 503), b4)
+                self.assertFalse(b4["model_loaded"])
+                self.assertFalse(ctrl.model_loaded)
+                self.assertFalse(ctrl.get_status()["hardware"]["treatment_actuator_attached"])
+
+                # Only succeeds when an inference runtime genuinely instantiates the model
+                def verified_loader(path: str):
+                    self.assertTrue(path.endswith("weed_detector_v1.pt"))
+                    return {"runtime": "ultralytics_yolo", "path": path}
+
+                c5, b5 = ctrl.load_weed_model("weed_detector_v1.pt", model_loader_fn=verified_loader)
+                self.assertEqual(c5, 200, b5)
+                self.assertTrue(b5["model_loaded"])
                 self.assertTrue(ctrl.model_loaded)
-                self.assertEqual(b4["model_file"], "weed_detector_v1.pt")
-                self.assertGreater(b4["size_bytes"], 0)
+                self.assertEqual(b5["inference_backend"], "verified_runtime")
+                self.assertEqual(b5["model_file"], "weed_detector_v1.pt")
+                self.assertGreater(b5["size_bytes"], 0)
             finally:
                 if prev_env is None:
                     os.environ.pop("WEED_MODEL_DIR", None)
@@ -781,13 +880,17 @@ class NavigationAuditTestSuite(unittest.TestCase):
     def test_bearer_token_authentication_verification(self):
         from pi_server import verify_bearer_token
 
-        # Open when no token configured (local bench default)
-        self.assertTrue(verify_bearer_token(None, None))
-        self.assertTrue(verify_bearer_token(None, ""))
+        # Fail CLOSED by default when PI_API_TOKEN is unset (unless explicitly opted into local dev)
+        self.assertFalse(verify_bearer_token(None, None))
+        self.assertFalse(verify_bearer_token(None, ""))
+        self.assertFalse(verify_bearer_token("Bearer anything", ""))
+        self.assertTrue(verify_bearer_token(None, None, allow_unauthenticated=True))
+        self.assertTrue(verify_bearer_token(None, "", allow_unauthenticated=True))
 
-        # Enforced when PI_API_TOKEN is configured
+        # Enforced when PI_API_TOKEN is configured (even if allow_unauthenticated=True)
         secret = "field-rover-secret-token-99"
         self.assertFalse(verify_bearer_token(None, secret))
+        self.assertFalse(verify_bearer_token(None, secret, allow_unauthenticated=True))
         self.assertFalse(verify_bearer_token("", secret))
         self.assertFalse(verify_bearer_token("Basic abc123", secret))
         self.assertFalse(verify_bearer_token("Bearer wrong-token", secret))

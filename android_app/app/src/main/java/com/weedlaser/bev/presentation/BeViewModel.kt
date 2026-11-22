@@ -66,7 +66,9 @@ class BeViewModel(
         private set
     var endPoint by mutableStateOf<NormalizedPoint?>(null)
         private set
-    var relayMode by mutableStateOf("grinder")
+    var relayMode by mutableStateOf("nav_only")
+        private set
+    var operatorConfirmed by mutableStateOf(false)
         private set
 
     // Status & error banners
@@ -111,6 +113,7 @@ class BeViewModel(
             detectionConfidence >= MIN_CONFIDENCE &&
             furrowsNx.isNotEmpty() &&
             startPoint != null &&
+            operatorConfirmed &&
             !isUploading &&
             !isStartingMission
 
@@ -120,6 +123,7 @@ class BeViewModel(
             piIp = trimmed
             // Endpoint changed: require fresh upload to new Pi host
             isPiBevReady = false
+            operatorConfirmed = false
         }
     }
 
@@ -129,6 +133,7 @@ class BeViewModel(
         if (digitsOnly != piPortText) {
             piPortText = digitsOnly
             isPiBevReady = false
+            operatorConfirmed = false
         }
     }
 
@@ -137,9 +142,18 @@ class BeViewModel(
     }
 
     fun updateRelayMode(mode: String) {
-        if (mode in listOf("grinder", "flame", "both")) {
-            relayMode = mode
+        if (mode in listOf("nav_only", "grinder", "flame", "both")) {
+            if (mode != relayMode) {
+                relayMode = mode
+                // Changing to/from treatment mode requires re-confirming physical readiness
+                operatorConfirmed = false
+            }
         }
+    }
+
+    fun updateOperatorConfirmed(confirmed: Boolean) {
+        operatorConfirmed = confirmed
+        if (confirmed) errorMessage = null
     }
 
     fun updateStartPoint(pt: NormalizedPoint) {
@@ -220,6 +234,7 @@ class BeViewModel(
         detectionConfidence = 0f
         startPoint = null
         endPoint = null
+        operatorConfirmed = false
         errorMessage = null
         uploadCurrentPhotoToPi()
     }
@@ -253,6 +268,7 @@ class BeViewModel(
                     port = effectivePort,
                     bevUrlPath = resp.bevUrl,
                     destFile = localBevFile,
+                    bearerToken = apiToken.ifBlank { null },
                 )
 
                 bevDownload.onSuccess { savedBev ->
@@ -328,7 +344,7 @@ class BeViewModel(
     fun launchMission(onSuccessNavigateToLive: () -> Unit) {
         val sp = startPoint
         if (!canStartMission || sp == null) {
-            errorMessage = "Upload field photo to Pi (>=45% confidence) and tap a Start point first."
+            errorMessage = "Upload field photo to Pi (>=45% confidence), tap a Start point, and confirm safety readiness first."
             return
         }
         viewModelScope.launch {
@@ -342,6 +358,8 @@ class BeViewModel(
                 start = sp,
                 end = endPoint,
                 relayMode = relayMode,
+                navOnly = (relayMode == "nav_only"),
+                operatorConfirmed = operatorConfirmed,
                 bearerToken = apiToken.ifBlank { null },
             ).onSuccess {
                 statusMessage = "Mission running on Pi — switching to Live Monitor."
@@ -363,7 +381,7 @@ class BeViewModel(
         livePollJob = viewModelScope.launch {
             var wasConnected = false
             while (isActive) {
-                piClient.fetchCutPlan(piIp, effectivePort)
+                piClient.fetchCutPlan(piIp, effectivePort, apiToken.ifBlank { null })
                     .onSuccess { data ->
                         telemetry = data
                         if (!wasConnected) {

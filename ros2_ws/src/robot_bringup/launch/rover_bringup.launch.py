@@ -27,6 +27,9 @@ def generate_launch_description():
     serial_port = LaunchConfiguration("serial_port", default="/dev/ttyUSB0")
     enable_weeding = LaunchConfiguration("enable_weeding", default="false")
     use_nav2 = LaunchConfiguration("use_nav2", default="true")
+    enable_camera_driver = LaunchConfiguration("enable_camera_driver", default="true")
+    camera_device_index = LaunchConfiguration("camera_device_index", default="0")
+    enable_ultrasonic_scan = LaunchConfiguration("enable_ultrasonic_scan", default="true")
 
     loc_share = get_package_share_directory("rover_localization")
     nav_share = get_package_share_directory("rover_navigation")
@@ -40,8 +43,11 @@ def generate_launch_description():
         DeclareLaunchArgument("serial_port", default_value="/dev/ttyUSB0"),
         DeclareLaunchArgument("enable_weeding", default_value="false"),
         DeclareLaunchArgument("use_nav2", default_value="true"),
+        DeclareLaunchArgument("enable_camera_driver", default_value="true"),
+        DeclareLaunchArgument("camera_device_index", default_value="0"),
+        DeclareLaunchArgument("enable_ultrasonic_scan", default_value="true"),
 
-        # 1. Physical Hardware Drivers (ROS 2 ODOM streaming firmware on ESP32)
+        # 1. Physical Hardware Drivers (ROS 2 ODOM streaming firmware on ESP32 + Camera + Scan)
         Node(
             package="rover_hardware",
             executable="esp32_diffdrive_node",
@@ -60,6 +66,27 @@ def generate_launch_description():
             executable="bno055_imu_node",
             name="bno055_imu_node",
             output="screen",
+        ),
+        Node(
+            package="rover_hardware",
+            executable="nav_camera_node",
+            name="nav_camera_node",
+            output="screen",
+            condition=IfCondition(enable_camera_driver),
+            parameters=[{
+                "device_index": camera_device_index,
+                "image_topic": "/nav_camera/image_raw",
+            }],
+        ),
+        Node(
+            package="rover_hardware",
+            executable="ultrasonic_scan_node",
+            name="ultrasonic_scan_node",
+            output="screen",
+            condition=IfCondition(enable_ultrasonic_scan),
+            parameters=[{
+                "scan_topic": "/scan",
+            }],
         ),
 
         # 2. Sensor Fusion Localization (Encoders + BNO055 + RTK-GNSS)

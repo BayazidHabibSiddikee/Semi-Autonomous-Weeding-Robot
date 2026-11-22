@@ -9,7 +9,7 @@ export const MISSION_CONTROL_ENDPOINTS = {
 
 export type MissionLifecycleAction = 'start' | 'stop' | 'pause' | 'resume' | 'recover';
 export type MissionLifecycleState = 'IDLE' | 'ACTIVE' | 'PAUSED' | 'ERROR';
-export type PiConnectionMode = 'pi_live' | 'pi_unreachable' | 'sim_only' | 'checking';
+export type PiConnectionMode = 'pi_live' | 'pi_auth_error' | 'pi_unreachable' | 'sim_only' | 'checking';
 
 export interface MissionLifecycleSummary {
   state: MissionLifecycleState;
@@ -104,7 +104,10 @@ export class MissionControlService {
           ? (data.status as Record<string, unknown>)
           : null;
       const mode: PiConnectionMode =
-        data.mode === 'pi_live' || data.mode === 'pi_unreachable' || data.mode === 'sim_only'
+        data.mode === 'pi_live' ||
+        data.mode === 'pi_auth_error' ||
+        data.mode === 'pi_unreachable' ||
+        data.mode === 'sim_only'
           ? data.mode
           : data.configured
           ? 'pi_unreachable'
@@ -343,6 +346,19 @@ export function deriveMissionLifecycleState(params: {
           : lastCommand.detail,
       blockers,
       updatedAt: lastCommand.executedAt,
+    };
+  }
+
+  if (piStatus?.mode === 'pi_auth_error') {
+    return {
+      state: 'ERROR',
+      sourceEndpoint: `GET ${MISSION_CONTROL_ENDPOINTS.status}`,
+      httpStatus: 401,
+      reason:
+        piStatus.detail ||
+        'Raspberry Pi rejected authentication (HTTP 401). Set matching PI_API_TOKEN on Pi and dashboard server.',
+      blockers,
+      updatedAt: piStatus.checkedAt,
     };
   }
 

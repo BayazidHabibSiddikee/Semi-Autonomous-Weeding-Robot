@@ -49,7 +49,7 @@ export interface CameraReadinessDetails {
 export interface StartupHandshakeReport {
   ok: boolean;
   configured: boolean;
-  mode: 'pi_live' | 'pi_simulated' | 'pi_unreachable' | 'usb_unlinked';
+  mode: 'pi_live' | 'pi_simulated' | 'pi_auth_error' | 'pi_unreachable' | 'usb_unlinked';
   usbPort: string;
   detectedUsbPorts: string[];
   esp32Ready: boolean;
@@ -266,6 +266,10 @@ export class StartupHandshakeService {
     const blockers: string[] = [];
     if (!handshakeResp?.configured) {
       blockers.push('Pi robot controller not linked (PI_ROBOT_URL unset)');
+    } else if (handshakeResp?.mode === 'pi_auth_error') {
+      blockers.push(
+        'Raspberry Pi rejected Bearer authentication (HTTP 401/403) — verify PI_API_TOKEN matches on both Pi and server'
+      );
     } else if (requiresManualRecovery) {
       blockers.push(
         'Latched E-stop or watchdog fault active — click "Confirm Hardware Recovery" after inspecting the physical rover'

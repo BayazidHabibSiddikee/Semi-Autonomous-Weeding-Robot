@@ -2014,13 +2014,15 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             className={`px-2 py-1 text-[11px] font-mono font-semibold rounded border ${
               piStatus?.mode === 'pi_live'
                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : piStatus?.mode === 'pi_unreachable'
+                : piStatus?.mode === 'pi_auth_error' || piStatus?.mode === 'pi_unreachable'
                 ? 'bg-rose-50 text-rose-700 border-rose-200'
                 : 'bg-amber-50 text-amber-800 border-amber-200'
             }`}
           >
             {piStatus?.mode === 'pi_live'
               ? 'PI LIVE'
+              : piStatus?.mode === 'pi_auth_error'
+              ? 'PI AUTH ERROR'
               : piStatus?.mode === 'pi_unreachable'
               ? 'PI OFFLINE'
               : 'SIM ONLY'}
@@ -2271,13 +2273,15 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
                   className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded border ${
                     piStatus?.mode === 'pi_live'
                       ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                      : piStatus?.mode === 'pi_unreachable'
+                      : piStatus?.mode === 'pi_auth_error' || piStatus?.mode === 'pi_unreachable'
                       ? 'bg-rose-50 text-rose-700 border-rose-200'
                       : 'bg-amber-50 text-amber-800 border-amber-200'
                   }`}
                 >
                   {piStatus?.mode === 'pi_live'
                     ? 'PI LIVE'
+                    : piStatus?.mode === 'pi_auth_error'
+                    ? 'PI AUTH ERROR'
                     : piStatus?.mode === 'pi_unreachable'
                     ? 'PI OFFLINE'
                     : 'SIM ONLY'}

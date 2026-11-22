@@ -65,16 +65,11 @@ except ImportError:
     TF2_AVAILABLE = False
 
 try:
-    from crop_row_navigation.action import FollowCropRow as RowFollowActionType  # type: ignore[import-not-found]
+    from crop_row_interfaces.action import FollowCropRow as RowFollowActionType  # type: ignore[import-not-found]
     CUSTOM_ACTION_AVAILABLE = True
 except ImportError:
     RowFollowActionType = None
     CUSTOM_ACTION_AVAILABLE = False
-    if ROS2_AVAILABLE:
-        try:
-            from nav2_msgs.action import FollowWaypoints as RowFollowActionType  # type: ignore[import-not-found]
-        except ImportError:
-            RowFollowActionType = None
 
 try:
     from .row_detector import CropRowDetector
@@ -827,7 +822,7 @@ if ROS2_AVAILABLE:
 
             self._action_server = None
             action_name = str(self.get_parameter("action_name").value)
-            if RowFollowActionType is not None:
+            if RowFollowActionType is not None and CUSTOM_ACTION_AVAILABLE:
                 self._action_server = ActionServer(
                     self,
                     RowFollowActionType,
@@ -839,12 +834,13 @@ if ROS2_AVAILABLE:
                     callback_group=self._cb_group,
                 )
                 self.get_logger().info(
-                    f"FollowCropRow ActionServer active on '{action_name}' "
-                    f"({'custom FollowCropRow' if CUSTOM_ACTION_AVAILABLE else 'nav2_msgs/FollowWaypoints fallback'})"
+                    f"FollowCropRow ActionServer active on '{action_name}' (crop_row_interfaces/action/FollowCropRow)"
                 )
             else:
                 self.get_logger().error(
-                    "No ROS 2 action interface available (install nav2_msgs or build FollowCropRow.action)"
+                    "crop_row_interfaces/action/FollowCropRow is not built/sourced. "
+                    "Run `colcon build --packages-select crop_row_interfaces crop_row_navigation` "
+                    "and source `install/setup.bash` before launching."
                 )
 
         def _refresh_camera_extrinsics_from_tf(self):

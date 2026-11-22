@@ -37,7 +37,9 @@ data class PiImageUploadResponse(
     @SerialName("furrows_nx") val furrowsNx: List<Float> = emptyList(),
     val confidence: Float = 0f,
     @SerialName("min_confidence") val minConfidence: Float = 0.45f,
-    val ready: Boolean = false,
+    @SerialName("ready") val ready: Boolean = false,
+    @SerialName("bev_warped") val bevWarped: Boolean = false,
+    @SerialName("bev_transform_method") val bevTransformMethod: String = "",
     @SerialName("map_feed") val mapFeed: String = "/map_feed",
     @SerialName("video_feed") val videoFeed: String = "/video_feed",
 )
@@ -46,7 +48,10 @@ data class PiImageUploadResponse(
 data class PiStartMissionRequest(
     val start: NormalizedPoint,
     val end: NormalizedPoint? = null,
-    @SerialName("relay_mode") val relayMode: String = "grinder",
+    @SerialName("relay_mode") val relayMode: String = "nav_only",
+    @SerialName("nav_only") val navOnly: Boolean = true,
+    @SerialName("operator_confirmed") val operatorConfirmed: Boolean = false,
+    @SerialName("source_type") val sourceType: String = "live_capture",
 )
 
 @Serializable
@@ -74,6 +79,8 @@ data class HardwareStatus(
     @SerialName("yolo_loaded") val yoloLoaded: Boolean = false,
     @SerialName("esp32_serial") val esp32Serial: Boolean = false,
     @SerialName("simulation_mode") val simulationMode: Boolean = true,
+    @SerialName("treatment_actuator_attached") val treatmentActuatorAttached: Boolean = false,
+    @SerialName("model_backend") val modelBackend: String = "none",
 )
 
 @Serializable
@@ -92,7 +99,7 @@ data class CutPlanTelemetry(
     @SerialName("turret_angle_deg") val turretAngleDeg: Float = 0f,
     @SerialName("relay1_grinder") val relay1Grinder: Boolean = false,
     @SerialName("relay2_flame") val relay2Flame: Boolean = false,
-    @SerialName("relay_mode") val relayMode: String = "grinder",
+    @SerialName("relay_mode") val relayMode: String = "nav_only",
     @SerialName("weeds_eliminated") val weedsEliminated: Int = 0,
     @SerialName("cut_queue") val cutQueue: List<CutQueueItem> = emptyList(),
     @SerialName("chlorosis_clips") val chlorosisClips: List<ChlorosisClipInfo> = emptyList(),
@@ -198,11 +205,13 @@ class PiLiveClient {
         port: Int,
         bevUrlPath: String,
         destFile: File,
+        bearerToken: String? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val normalizedPath = if (bevUrlPath.startsWith("/")) bevUrlPath else "/$bevUrlPath"
             val request = Request.Builder()
                 .url("http://$ip:$port$normalizedPath")
+                .withAuth(bearerToken)
                 .get()
                 .build()
 
@@ -223,11 +232,23 @@ class PiLiveClient {
         port: Int,
         start: NormalizedPoint,
         end: NormalizedPoint?,
-        relayMode: String = "grinder",
+        relayMode: String = "nav_only",
+        navOnly: Boolean = (relayMode == "nav_only"),
+        operatorConfirmed: Boolean = false,
+        sourceType: String = "live_capture",
         bearerToken: String? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val payload = json.encodeToString(PiStartMissionRequest(start, end, relayMode))
+            val payload = json.encodeToString(
+                PiStartMissionRequest(
+                    start = start,
+                    end = end,
+                    relayMode = relayMode,
+                    navOnly = navOnly,
+                    operatorConfirmed = operatorConfirmed,
+                    sourceType = sourceType,
+                )
+            )
             val request = Request.Builder()
                 .url("http://$ip:$port/start_mission")
                 .withAuth(bearerToken)
@@ -279,10 +300,15 @@ class PiLiveClient {
         }
     }
 
-    suspend fun fetchCutPlan(ip: String, port: Int): Result<CutPlanTelemetry> = withContext(Dispatchers.IO) {
+    suspend fun fetchCutPlan(
+        ip: String,
+        port: Int,
+        bearerToken: String? = null,
+    ): Result<CutPlanTelemetry> = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder()
                 .url("http://$ip:$port/cut_plan")
+                .withAuth(bearerToken)
                 .get()
                 .build()
             probeClient.newCall(request).execute().use { resp ->

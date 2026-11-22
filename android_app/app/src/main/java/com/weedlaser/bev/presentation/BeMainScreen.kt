@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -338,23 +339,64 @@ fun BeMainScreen(
             }
         }
 
-        // Actuator Relay Mode
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            listOf(
-                "grinder" to Strings.relayGrinder(lang),
-                "flame" to Strings.relayFlame(lang),
-                "both" to Strings.relayDual(lang),
-            ).forEach { (mode, label) ->
-                FilterChip(
-                    selected = viewModel.relayMode == mode,
-                    onClick = { viewModel.updateRelayMode(mode) },
-                    label = { Text(label, fontSize = 11.sp, maxLines = 1) },
-                    modifier = Modifier.weight(1f),
+        // Safe Navigation-Only default + Actuator Relay Modes
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "nav_only" to Strings.relayNavOnly(lang),
+                    "grinder" to Strings.relayGrinder(lang),
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.relayMode == mode,
+                        onClick = { viewModel.updateRelayMode(mode) },
+                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "flame" to Strings.relayFlame(lang),
+                    "both" to Strings.relayDual(lang),
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.relayMode == mode,
+                        onClick = { viewModel.updateRelayMode(mode) },
+                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (viewModel.relayMode != "nav_only") {
+                Text(
+                    text = Strings.treatmentInterlockHint(lang),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
+        }
+
+        // Explicit Operator Confirmation before launching physical motion
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Checkbox(
+                checked = viewModel.operatorConfirmed,
+                onCheckedChange = viewModel::updateOperatorConfirmed,
+            )
+            Text(
+                text = Strings.operatorConfirmLabel(lang),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
         }
 
         // Error card (never hidden or swallowed)

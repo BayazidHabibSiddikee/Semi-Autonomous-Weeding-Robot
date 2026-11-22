@@ -125,6 +125,11 @@ object Strings {
         AppLanguage.EN -> "Tap on a furrow entrance (yellow line) to place the Rover Start pin"
     }
 
+    fun relayNavOnly(lang: AppLanguage) = when (lang) {
+        AppLanguage.BN -> "শুধু নেভিগেশন (নিরাপদ)"
+        AppLanguage.EN -> "Nav Only (Safe)"
+    }
+
     fun relayGrinder(lang: AppLanguage) = when (lang) {
         AppLanguage.BN -> "রিলে ১: গ্রাইন্ডার"
         AppLanguage.EN -> "Relay 1: Grinder"
@@ -140,14 +145,24 @@ object Strings {
         AppLanguage.EN -> "Dual Relay"
     }
 
+    fun treatmentInterlockHint(lang: AppLanguage) = when (lang) {
+        AppLanguage.BN -> "ট্রিটমেন্ট মোড চালু করতে Pi-তে যাচাইকৃত YOLO মডেল ও হোমোগ্রাফি ক্যালিব্রেশন প্রয়োজন।"
+        AppLanguage.EN -> "Treatment modes require verified weed model weights and homography calibration loaded on the Pi."
+    }
+
+    fun operatorConfirmLabel(lang: AppLanguage) = when (lang) {
+        AppLanguage.BN -> "আমি নিশ্চিত করছি যে রোভারের আশেপাশে নিরাপদ এবং হার্ডওয়্যার E-STOP হাতের নাগালে আছে।"
+        AppLanguage.EN -> "I confirm the path is clear and the physical hardware E-STOP is within reach."
+    }
+
     fun launchMissionButton(lang: AppLanguage, busy: Boolean) = when (lang) {
         AppLanguage.BN -> if (busy) "Pi-তে পাঠানো হচ্ছে..." else "রোভার মিশন চালু করুন (লাইভ দেখুন)"
         AppLanguage.EN -> if (busy) "Starting Mission..." else "Start Rover Mission (Open Live)"
     }
 
     fun launchDisabledHint(lang: AppLanguage) = when (lang) {
-        AppLanguage.BN -> "মিশন চালু করতে: ১) Pi-তে ছবি আপলোড সম্পন্ন (>=৪৫% আত্মবিশ্বাস ও সারি শনাক্ত) এবং ২) শুরু বিন্দু নির্বাচন করুন।"
-        AppLanguage.EN -> "To launch: 1) Upload photo to Pi (>=45% confidence with furrows) and 2) tap a Start point on the BEV map."
+        AppLanguage.BN -> "মিশন চালু করতে: ১) Pi-তে ছবি আপলোড সম্পন্ন (>=৪৫% আত্মবিশ্বাস ও সারি শনাক্ত), ২) শুরু বিন্দু নির্বাচন এবং ৩) অপারেটর নিরাপত্তা নিশ্চিত করুন।"
+        AppLanguage.EN -> "To launch: 1) Upload photo to Pi (>=45% confidence with furrows), 2) tap a Start point on the BEV map, and 3) check operator confirmation."
     }
 
     // Live Monitor Screen

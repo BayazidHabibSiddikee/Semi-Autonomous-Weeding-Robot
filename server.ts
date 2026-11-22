@@ -1412,16 +1412,64 @@ async function startServer() {
         configured: true,
         connected: false,
         mode: 'pi_unreachable',
+        statusCode: r.statusCode,
         detail: r.error || `Pi server returned HTTP ${r.statusCode}`,
         status: null,
       });
       return;
     }
 
+    if (r.statusCode === 401 || r.statusCode === 403) {
+      res.json({
+        ok: false,
+        configured: true,
+        connected: false,
+        mode: 'pi_auth_error',
+        authError: true,
+        statusCode: r.statusCode,
+        detail: `Raspberry Pi rejected authentication (HTTP ${r.statusCode}). Configure matching PI_API_TOKEN on both Pi and dashboard server.`,
+        status: null,
+      });
+      return;
+    }
+
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      res.json({
+        ok: false,
+        configured: true,
+        connected: false,
+        mode: 'pi_unreachable',
+        statusCode: r.statusCode,
+        detail: `Pi server /health returned unexpected HTTP ${r.statusCode}.`,
+        status: null,
+      });
+      return;
+    }
+
+    // Verify Bearer token against protected /auth/verify whenever Pi enforces authentication
+    if (r.body?.auth_enforced !== false) {
+      const authProbe = await proxyPiRequest('GET', '/auth/verify', undefined, 'application/json', 1500);
+      if (authProbe.reachable && (authProbe.statusCode === 401 || authProbe.statusCode === 403)) {
+        res.json({
+          ok: false,
+          configured: true,
+          connected: false,
+          mode: 'pi_auth_error',
+          authError: true,
+          statusCode: authProbe.statusCode,
+          detail:
+            authProbe.body?.detail ||
+            `Raspberry Pi rejected Bearer token on /auth/verify (HTTP ${authProbe.statusCode}). Set matching PI_API_TOKEN on both Pi and server.`,
+          status: null,
+        });
+        return;
+      }
+    }
+
     res.json({
       ok: true,
       configured: true,
-      connected: r.statusCode >= 200 && r.statusCode < 300,
+      connected: true,
       mode: 'pi_live',
       detail: 'Connected to Raspberry Pi navigation controller.',
       workerRunning: Boolean(r.body?.worker_running),
@@ -1838,8 +1886,47 @@ async function startServer() {
       return;
     }
 
+    if (r.statusCode === 401 || r.statusCode === 403) {
+      res.status(r.statusCode).json({
+        ok: false,
+        configured: true,
+        mode: 'pi_auth_error',
+        authError: true,
+        isCloudContainer,
+        detectedUsbPorts,
+        usbPort: detectedUsbPorts[0] || '/dev/ttyUSB0',
+        esp32Ready: false,
+        watchdogInitialized: false,
+        estopOk: false,
+        latchLocked: true,
+        clearLatchAttempted: false,
+        inspectionOnly: !allowClearLatch,
+        cameraHealthy: wsCameraPublishers > 0,
+        cameraSummary: {
+          wsPublishers: wsCameraPublishers,
+          wsFramesRelayed,
+          resolvedIp: activeCameraIp,
+          piCameraHealthy: false,
+          piCameraReason: 'PI_AUTH_ERROR',
+        },
+        navigationDispatchUnlocked: false,
+        durationMs: Date.now() - startedAt,
+        steps: [
+          {
+            id: 'pi_auth',
+            command: 'POST /handshake',
+            status: 'fail',
+            response: `HTTP_${r.statusCode}_UNAUTHORIZED`,
+            detail: `Raspberry Pi rejected authentication (HTTP ${r.statusCode}). Configure matching PI_API_TOKEN on both Pi and dashboard server.`,
+          },
+        ],
+        executedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
     const piData = r.body || {};
-    const esp32Ready = Boolean(piData.esp32_ready);
+    const esp32Ready = r.statusCode >= 200 && r.statusCode < 300 && Boolean(piData.esp32_ready);
     const watchdogInitialized = Boolean(piData.watchdog_initialized);
     const piCameraHealthy = Boolean(piData.camera_healthy);
     const latchLocked =
@@ -1848,7 +1935,7 @@ async function startServer() {
     res.status(r.statusCode).json({
       ok: esp32Ready,
       configured: true,
-      mode: piData.simulated ? 'pi_simulated' : 'pi_live',
+      mode: r.statusCode >= 200 && r.statusCode < 300 ? (piData.simulated ? 'pi_simulated' : 'pi_live') : 'pi_unreachable',
       isCloudContainer,
       detectedUsbPorts,
       usbPort: piData.usb_port || detectedUsbPorts[0] || '/dev/ttyUSB0',

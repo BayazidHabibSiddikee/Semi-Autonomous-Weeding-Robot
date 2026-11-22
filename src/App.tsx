@@ -7,7 +7,7 @@ import { WeedVisionView } from './components/WeedVisionView';
 import { MobileCameraPublisher } from './components/MobileCameraPublisher';
 
 type TabId = 'navigation' | 'hardware' | 'ros2' | 'vision' | 'calibration';
-type RobotLinkMode = 'sim_only' | 'pi_live' | 'pi_unreachable';
+type RobotLinkMode = 'sim_only' | 'pi_live' | 'pi_auth_error' | 'pi_unreachable';
 
 const NAV_ITEMS: Array<{ id: TabId; label: string }> = [
   { id: 'navigation', label: 'Navigation' },
@@ -47,11 +47,19 @@ export default function App() {
         const data = await res.json();
         if (!active) return;
         const nextMode: RobotLinkMode =
-          data.mode === 'pi_live' ? 'pi_live' : data.configured ? 'pi_unreachable' : 'sim_only';
+          data.mode === 'pi_live'
+            ? 'pi_live'
+            : data.mode === 'pi_auth_error'
+            ? 'pi_auth_error'
+            : data.configured
+            ? 'pi_unreachable'
+            : 'sim_only';
         setRobotLinkMode(nextMode);
         if (isInitial) {
           if (nextMode === 'pi_live') {
             appendLog('[RobotLink] Connected to live Raspberry Pi controller via /api/robot/* proxy.');
+          } else if (nextMode === 'pi_auth_error') {
+            appendLog(`[RobotLink] Pi authentication rejected (${data.detail || 'HTTP 401'}). Check PI_API_TOKEN on Pi and server.`);
           } else if (nextMode === 'pi_unreachable') {
             appendLog(`[RobotLink] PI_ROBOT_URL configured but unreachable (${data.detail || 'timeout'}) — simulation mode only.`);
           } else {
@@ -221,6 +229,8 @@ export default function App() {
                 className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
                   robotLinkMode === 'pi_live'
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : robotLinkMode === 'pi_auth_error'
+                    ? 'bg-rose-50 text-rose-700 border-rose-200'
                     : robotLinkMode === 'pi_unreachable'
                     ? 'bg-amber-50 text-amber-800 border-amber-200'
                     : 'bg-slate-100 text-slate-600 border-slate-200'
@@ -228,6 +238,8 @@ export default function App() {
               >
                 {robotLinkMode === 'pi_live'
                   ? 'PI LIVE'
+                  : robotLinkMode === 'pi_auth_error'
+                  ? 'PI AUTH ERROR'
                   : robotLinkMode === 'pi_unreachable'
                   ? 'PI UNREACHABLE'
                   : 'SIM ONLY'}

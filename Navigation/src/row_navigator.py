@@ -52,6 +52,14 @@ class RowNavigator:
         self.current_row = 0
         self.rows_completed = 0
 
+        # Fused visual row-end guards (prevent premature single-frame mid-row turns)
+        self.visual_row_end_threshold = float(nav.get("visual_row_end_threshold", 0.85))
+        self.visual_row_end_min_frames = max(1, int(nav.get("visual_row_end_min_frames", 3)))
+        self.visual_row_end_min_progress = max(
+            0.0, min(1.0, float(nav.get("visual_row_end_min_progress", 0.75)))
+        )
+        self._visual_end_streak = 0
+
     @property
     def num_rows(self) -> int:
         return len(self.row_centers_y)
@@ -65,17 +73,44 @@ class RowNavigator:
         """Even rows travel +X (0 deg); odd rows travel -X (180 deg)."""
         return 0.0 if (self.current_row % 2 == 0) else 180.0
 
+    def row_progress_fraction(self, x_cm: float) -> float:
+        """Normalized travel progress (0.0..1.0) along the active navigable row."""
+        navigable_len = max(1.0, self.field_length_cm - 2.0 * self.headland_margin_cm)
+        if self.current_row % 2 == 0:
+            prog = (x_cm - self.headland_margin_cm) / navigable_len
+        else:
+            prog = ((self.field_length_cm - self.headland_margin_cm) - x_cm) / navigable_len
+        return max(0.0, min(1.0, prog))
+
+    def reset_visual_row_end_streak(self) -> None:
+        self._visual_end_streak = 0
+
     def is_row_end(self, x_cm: float, visual_row_end_conf: float = 0.0) -> bool:
         """
         Fused row-end detector (NAV-07):
-        Uses known field geometry + continuous localizer X along row, optionally
-        confirmed by visual row-end confidence — never a single sonar distance!
+        1. Geometric boundary check from FieldLocalizer pose ALWAYS triggers at headland margin.
+        2. Visual row-end can trigger an early headland transition ONLY when ALL three hold:
+           - visual_row_end_conf >= visual_row_end_threshold (default 0.85)
+           - Confirmed across >= visual_row_end_min_frames consecutive evaluations (default 3)
+           - Odometry confirms rover has traversed >= visual_row_end_min_progress (default 75%)
+             of the current row (prevents premature mid-row turns on gaps/shadows/sparse weeds).
         """
         if self.current_row % 2 == 0:
             geom_end = x_cm >= (self.field_length_cm - self.headland_margin_cm)
         else:
             geom_end = x_cm <= self.headland_margin_cm
-        return geom_end or (visual_row_end_conf >= 0.85)
+
+        if geom_end:
+            self._visual_end_streak = 0
+            return True
+
+        progress = self.row_progress_fraction(x_cm)
+        if visual_row_end_conf >= self.visual_row_end_threshold and progress >= self.visual_row_end_min_progress:
+            self._visual_end_streak += 1
+        else:
+            self._visual_end_streak = 0
+
+        return self._visual_end_streak >= self.visual_row_end_min_frames
 
     def compute_aligned_heading_deg(self, y_cm: float) -> float:
         """Steer gently back toward the current crop-row centerline."""
@@ -190,6 +225,7 @@ class RowNavigator:
 
         self.rows_completed += 1
         self.current_row = next_row
+        self._visual_end_streak = 0
         return True, f"ENTERED_ROW_{next_row}"
 
     def get_status(self) -> dict:
@@ -199,4 +235,7 @@ class RowNavigator:
             "rows_completed": self.rows_completed,
             "active_row_y_cm": round(self.active_row_y, 1),
             "active_row_heading_deg": self.active_row_heading_deg,
+            "visual_end_streak": self._visual_end_streak,
+            "visual_end_min_frames": self.visual_row_end_min_frames,
+            "visual_end_min_progress": self.visual_row_end_min_progress,
         }

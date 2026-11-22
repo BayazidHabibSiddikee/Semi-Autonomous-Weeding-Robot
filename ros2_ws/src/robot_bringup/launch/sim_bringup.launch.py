@@ -22,6 +22,20 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="true"),
 
         Node(
+            package="ros_gz_bridge",
+            executable="parameter_bridge",
+            name="gz_sensor_bridge",
+            output="screen",
+            arguments=[
+                "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                "/nav_camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
+                "/nav_camera/depth/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
+                "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
+                "/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU",
+            ],
+            parameters=[{"use_sim_time": use_sim_time}],
+        ),
+        Node(
             package="robot_localization",
             executable="ekf_node",
             name="ekf_local_node",
