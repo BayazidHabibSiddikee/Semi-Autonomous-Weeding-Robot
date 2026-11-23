@@ -5,12 +5,14 @@ import { HardwareAuditView } from './components/HardwareAuditView';
 import { Ros2ToolsView } from './components/Ros2ToolsView';
 import { WeedVisionView } from './components/WeedVisionView';
 import { MobileCameraPublisher } from './components/MobileCameraPublisher';
+import { SimplaBotView } from './components/SimplaBotView';
 
-type TabId = 'navigation' | 'hardware' | 'ros2' | 'vision' | 'calibration';
+type TabId = 'navigation' | 'simpla_bot' | 'hardware' | 'ros2' | 'vision' | 'calibration';
 type RobotLinkMode = 'sim_only' | 'pi_live' | 'pi_auth_error' | 'pi_unreachable';
 
 const NAV_ITEMS: Array<{ id: TabId; label: string }> = [
   { id: 'navigation', label: 'Navigation' },
+  { id: 'simpla_bot', label: 'Simpla Bot' },
   { id: 'hardware', label: 'Sector Audit' },
   { id: 'ros2', label: 'ROS 2 Tools' },
   { id: 'vision', label: 'Weed Vision' },
@@ -207,6 +209,9 @@ export default function App() {
       <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 py-6 space-y-6">
         {activeTab === 'navigation' && (
           <NavigationWorkbench estopActive={estopActive} onLogEvent={appendLog} />
+        )}
+        {activeTab === 'simpla_bot' && (
+          <SimplaBotView estopActive={estopActive} onLogEvent={appendLog} />
         )}
         {activeTab === 'hardware' && <HardwareAuditView />}
         {activeTab === 'ros2' && (

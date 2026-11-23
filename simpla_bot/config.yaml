@@ -1,0 +1,107 @@
+# =============================================================================
+# Simpla Bot Configuration (branch: simpla_bot)
+# Minimal hardware: MaixSense-A075V + Normal Motor Driver + Flame + Grinder
+# =============================================================================
+
+maixsense:
+  # Default USB-RNDIS IP address of Sipeed MaixSense-A075V
+  host: "192.168.233.1"
+  port: 80
+  timeout_s: 1.5
+  # Depth frame resolution (standard MaixSense A075V ToF is 160x120 or 320x240)
+  depth_width: 160
+  depth_height: 120
+  # Valid ToF depth bounds in millimeters (A075V range is 200mm - 2500mm)
+  min_valid_mm: 180
+  max_valid_mm: 2400
+  # Watchdog: stop motors & tools if no fresh camera frame within this time
+  max_frame_age_s: 1.0
+  # Mounting geometry (measure with a ruler on your chassis!)
+  camera_height_mm: 420.0
+  camera_pitch_deg: 28.0
+  # Horizontal distance from camera lens forward to the flame/grinder tool tip
+  # Positive means tool is in FRONT of camera; negative means tool is BEHIND camera
+  tool_offset_forward_mm: -120.0
+
+navigation:
+  # Normal forward cruising speed (0..100%)
+  cruise_speed_pct: 45
+  # Slow approach speed when centering a weed under the tool (0..100%)
+  approach_speed_pct: 28
+  # Turning speed (0..100%)
+  turn_speed_pct: 42
+  # Stop immediately if anything in front-center is closer than this (mm)
+  obstacle_stop_mm: 320
+  # Desired distance to stop before a front wall / fence / corner boundary (mm)
+  corner_stop_mm: 520
+  # A side (left or right) is considered OPEN for a 90-deg turn if median depth >= this (mm)
+  corner_open_side_mm: 1050
+  # Difference required between left and right zones to prefer one turn side (mm)
+  side_asymmetry_mm: 280
+  # If front suddenly drops off / opens up beyond this (mm) with no crop walls -> headland/row-end
+  headland_open_mm: 1850
+  # Fallback row length in mm if running on an open field without end walls
+  max_row_length_mm: 15000
+  # Maximum number of corners / rows to execute before automatic mission finish
+  max_turns: 4
+  # How close (mm) the weed must be to the tool center before firing
+  weed_align_tolerance_mm: 45
+  # Minimum weed green-pixel cluster size (pixels) to trigger a stop-and-treat
+  weed_min_cluster_px: 18
+  # Excess-Green (2G - R - B) threshold for weed detection on RGB frame
+  weed_exg_threshold: 38
+  # Proportional steering gain for keeping centered between left/right walls or rows
+  centering_kp: 0.04
+  max_steer_adjust_pct: 18
+
+motor_driver:
+  # Backend options: "sim" (bench simulation), "gpio" (direct Pi GPIO), "serial" (Arduino/ESP32 USB)
+  backend: "sim"
+  # Driver wiring type when backend == "gpio": "l298n" (IN1/IN2+ENA) or "bts7960" (RPWM/LPWM)
+  driver_type: "l298n"
+  # Serial settings when backend == "serial"
+  serial_port: "/dev/ttyUSB0"
+  serial_baud: 115200
+  pwm_freq_hz: 1000
+  # Raspberry Pi BCM GPIO pins (used when backend == "gpio")
+  left_ena_pin: 12
+  left_in1_pin: 5
+  left_in2_pin: 6
+  right_enb_pin: 13
+  right_in3_pin: 20
+  right_in4_pin: 21
+  # Calibration constants (measure on your actual floor / soil!)
+  # How many mm the rover travels per second at 100% motor PWM
+  speed_mm_per_sec_at_100pct: 520.0
+  # How many seconds a 90-degree pivot turn takes at 50% motor PWM
+  turn_90_deg_sec_at_50pct: 1.35
+  # Invert left or right motor polarity if a wheel spins backwards
+  invert_left: false
+  invert_right: false
+
+tools:
+  # SAFETY DEFAULT: dry_run MUST stay true during bench testing!
+  # Pass --arm-tools on CLI (and set dry_run: false only when ready for field)
+  dry_run: true
+  # Default treatment mode: "none", "grinder", "flame", or "both" (grinder then flame)
+  default_mode: "grinder"
+  # Relay wiring: most 2-channel opto-isolated relay boards are active-low (LOW = ON)
+  relay_active_low: true
+  # Raspberry Pi BCM GPIO pins for 2-channel relay module (used when backend == "gpio")
+  grinder_relay_pin: 17
+  flame_relay_pin: 27
+  # Physical Normally-Closed (NC) E-Stop switch input pin (HIGH/open = ESTOP TRIGGERED)
+  estop_pin: 22
+  estop_active_high: true
+  # Mandatory dwell time after stopping motors before energizing grinder or flame (seconds)
+  settle_before_fire_s: 0.45
+  # Grinding machine ON time per weed (seconds)
+  grinder_duration_s: 2.0
+  # Flame valve/igniter ON time per weed (seconds) — HARD CAPPED by max_flame_burn_s
+  flame_duration_s: 1.2
+  # Absolute hard safety cap for any single flame pulse (seconds)
+  max_flame_burn_s: 2.5
+  # Mandatory cooldown between flame bursts (seconds)
+  flame_cooldown_s: 3.0
+  # Post-treatment wait before resuming driving (seconds)
+  post_treat_pause_s: 0.4

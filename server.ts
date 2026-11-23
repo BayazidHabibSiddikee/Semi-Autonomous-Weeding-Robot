@@ -1961,6 +1961,184 @@ async function startServer() {
     });
   });
 
+  // Safety-interlocked Simpla Bot command interface (Normal Motor Driver + Grinder CH1 + Flame CH2)
+  const simplaState = {
+    leftPct: 0,
+    rightPct: 0,
+    grinderOn: false,
+    flameOn: false,
+    lastFlameEndMs: 0,
+    lastCommandAt: Date.now(),
+  };
+
+  app.post('/api/simpla-bot/command', async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const kind = typeof body.kind === 'string' ? body.kind.trim().toLowerCase() : '';
+    const dryRun = body.dryRun !== false;
+    const estopActive = Boolean(body.estopActive);
+    const now = Date.now();
+
+    if (!['motor', 'move_mm', 'turn_deg', 'relay', 'stop', 'ping'].includes(kind)) {
+      res.status(400).json({ ok: false, error: 'Invalid command kind.' });
+      return;
+    }
+
+    if (kind === 'ping') {
+      res.json({
+        ok: true,
+        kind: 'ping',
+        wireCommand: 'PING',
+        ack: `PONG ESTOP=${estopActive ? 1 : 0}`,
+        dryRun,
+        state: { ...simplaState },
+        ts: now,
+      });
+      return;
+    }
+
+    if (kind === 'stop' || estopActive) {
+      simplaState.leftPct = 0;
+      simplaState.rightPct = 0;
+      simplaState.grinderOn = false;
+      simplaState.flameOn = false;
+      simplaState.lastCommandAt = now;
+
+      let piAck = false;
+      if (getConfiguredPiBaseUrl()) {
+        const piRes = await proxyPiRequest('POST', '/stop', { reason: 'simpla_bot_stop' }, 'application/json', 1500);
+        piAck = Boolean(piRes.reachable && piRes.statusCode >= 200 && piRes.statusCode < 300);
+      }
+
+      res.json({
+        ok: !estopActive || kind === 'stop',
+        kind: 'stop',
+        wireCommand: 'STOP',
+        ack: estopActive && kind !== 'stop' ? 'ERR INTERLOCK_BLOCKED (E-STOP)' : 'OK STOP',
+        piForwarded: piAck,
+        dryRun,
+        state: { ...simplaState },
+        ts: now,
+      });
+      return;
+    }
+
+    if (kind === 'motor' || kind === 'move_mm' || kind === 'turn_deg') {
+      const clampPct = (v: unknown) => {
+        const n = typeof v === 'number' && Number.isFinite(v) ? v : 0;
+        return Math.max(-100, Math.min(100, Math.round(n)));
+      };
+
+      let leftPct = 0;
+      let rightPct = 0;
+      let detail = '';
+
+      if (kind === 'motor') {
+        leftPct = clampPct(body.leftPct);
+        rightPct = clampPct(body.rightPct);
+        detail = `Direct PWM L=${leftPct}% R=${rightPct}%`;
+      } else if (kind === 'move_mm') {
+        const distMm = typeof body.distanceMm === 'number' && Number.isFinite(body.distanceMm)
+          ? Math.max(-3000, Math.min(3000, Math.round(body.distanceMm)))
+          : 0;
+        const speedPct = Math.max(15, Math.min(100, clampPct(body.speedPct ?? 35)));
+        const dir = distMm >= 0 ? 1 : -1;
+        leftPct = distMm === 0 ? 0 : dir * speedPct;
+        rightPct = distMm === 0 ? 0 : dir * speedPct;
+        detail = `Calibrated roll ${distMm >= 0 ? '+' : ''}${distMm}mm @ ${speedPct}%`;
+      } else {
+        const angleDeg = typeof body.angleDeg === 'number' && Number.isFinite(body.angleDeg)
+          ? Math.max(-180, Math.min(180, Math.round(body.angleDeg)))
+          : 0;
+        const speedPct = Math.max(15, Math.min(100, clampPct(body.speedPct ?? 42)));
+        leftPct = angleDeg > 0 ? speedPct : angleDeg < 0 ? -speedPct : 0;
+        rightPct = angleDeg > 0 ? -speedPct : angleDeg < 0 ? speedPct : 0;
+        detail = `Pivot ${angleDeg >= 0 ? '+' : ''}${angleDeg} deg @ ${speedPct}%`;
+      }
+
+      // Stationary interlock: any wheel motion forces both relays OFF
+      if (leftPct !== 0 || rightPct !== 0) {
+        simplaState.grinderOn = false;
+        simplaState.flameOn = false;
+      }
+      simplaState.leftPct = leftPct;
+      simplaState.rightPct = rightPct;
+      simplaState.lastCommandAt = now;
+
+      const wireCommand = `M ${leftPct} ${rightPct}`;
+      res.json({
+        ok: true,
+        kind,
+        wireCommand,
+        ack: dryRun ? `DRY_RUN ${wireCommand}` : `OK ${wireCommand}`,
+        detail,
+        dryRun,
+        state: { ...simplaState },
+        ts: now,
+      });
+      return;
+    }
+
+    // kind === 'relay' (Grinder CH1 / Flame CH2)
+    const grinderOn = Boolean(body.grinderOn);
+    const flameOn = Boolean(body.flameOn);
+    const requestedFlameMs = typeof body.flameDurationMs === 'number' && Number.isFinite(body.flameDurationMs)
+      ? Math.max(100, Math.min(2500, Math.round(body.flameDurationMs)))
+      : 1200;
+
+    if ((grinderOn || flameOn) && (simplaState.leftPct !== 0 || simplaState.rightPct !== 0)) {
+      simplaState.grinderOn = false;
+      simplaState.flameOn = false;
+      res.status(409).json({
+        ok: false,
+        kind: 'relay',
+        wireCommand: 'R 0 0',
+        ack: 'ERR INTERLOCK_BLOCKED (ROVER_MOVING)',
+        detail: 'Stop motors (0% PWM) before energizing Grinder or Flame relays.',
+        dryRun,
+        state: { ...simplaState },
+        ts: now,
+      });
+      return;
+    }
+
+    if (flameOn && !simplaState.flameOn) {
+      const cooldownRemMs = Math.max(0, 3000 - (now - simplaState.lastFlameEndMs));
+      if (cooldownRemMs > 0) {
+        res.status(429).json({
+          ok: false,
+          kind: 'relay',
+          wireCommand: `R ${grinderOn ? 1 : 0} 0`,
+          ack: `ERR FLAME_COOLDOWN (${(cooldownRemMs / 1000).toFixed(1)}s)`,
+          detail: `Flame cooldown active (${(cooldownRemMs / 1000).toFixed(1)}s remaining).`,
+          dryRun,
+          state: { ...simplaState },
+          ts: now,
+        });
+        return;
+      }
+    }
+
+    if (simplaState.flameOn && !flameOn) {
+      simplaState.lastFlameEndMs = now;
+    }
+
+    simplaState.grinderOn = grinderOn;
+    simplaState.flameOn = flameOn;
+    simplaState.lastCommandAt = now;
+
+    const wireCommand = `R ${grinderOn ? 1 : 0} ${flameOn ? 1 : 0}`;
+    res.json({
+      ok: true,
+      kind: 'relay',
+      wireCommand,
+      ack: dryRun ? `DRY_RUN ${wireCommand}` : `OK ${wireCommand}`,
+      cappedFlameMs: requestedFlameMs,
+      dryRun,
+      state: { ...simplaState },
+      ts: now,
+    });
+  });
+
   let lastPiFrameForwardMs = 0;
 
   const server = http.createServer(app);
@@ -2145,8 +2323,15 @@ async function startServer() {
           fps: safeNum(msg.fps) ?? 0,
           latencyMs: reportedLatency ?? 0,
           centerDepthMm: safeNum(msg.centerDepthMm),
+          leftDepthMm: safeNum(msg.leftDepthMm),
+          rightDepthMm: safeNum(msg.rightDepthMm),
           minDepthMm: safeNum(msg.minDepthMm),
           maxDepthMm: safeNum(msg.maxDepthMm),
+          weedDetected: typeof msg.weedDetected === 'boolean' ? msg.weedDetected : null,
+          weedDepthMm: safeNum(msg.weedDepthMm),
+          weedCxNorm: safeNum(msg.weedCxNorm),
+          cornerType: safeStr(msg.cornerType, 32) || null,
+          recommendedTravelMm: safeNum(msg.recommendedTravelMm),
           rgbBytes: safeNum(msg.rgbBytes) ?? 0,
           depthBytes: safeNum(msg.depthBytes) ?? 0,
           ts: Date.now(),
