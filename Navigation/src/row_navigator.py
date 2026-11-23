@@ -85,7 +85,13 @@ class RowNavigator:
     def reset_visual_row_end_streak(self) -> None:
         self._visual_end_streak = 0
 
-    def is_row_end(self, x_cm: float, visual_row_end_conf: float = 0.0) -> bool:
+    def is_row_end(
+        self,
+        x_cm: float,
+        visual_row_end_conf: float = 0.0,
+        *,
+        update_visual_streak: bool = True,
+    ) -> bool:
         """
         Fused row-end detector (NAV-07):
         1. Geometric boundary check from FieldLocalizer pose ALWAYS triggers at headland margin.
@@ -103,6 +109,9 @@ class RowNavigator:
         if geom_end:
             self._visual_end_streak = 0
             return True
+
+        if not update_visual_streak:
+            return False
 
         progress = self.row_progress_fraction(x_cm)
         if visual_row_end_conf >= self.visual_row_end_threshold and progress >= self.visual_row_end_min_progress:
@@ -177,7 +186,8 @@ class RowNavigator:
             )
 
         nx, _ny, _nh = self.rover.get_position()
-        reached_end = self.is_row_end(nx, visual_row_end_conf=visual_row_end_conf)
+        # Post-move check inspects geometric headland boundary only (avoid double-counting same camera frame)
+        reached_end = self.is_row_end(nx, visual_row_end_conf=0.0, update_visual_streak=False)
         return RowStepOutcome(
             moved=True,
             distance_cm=actual_cm,
