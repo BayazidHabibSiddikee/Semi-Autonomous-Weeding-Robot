@@ -254,9 +254,20 @@ def build_weed_cut_queue(results, rgb_img, depth_map, current_turret_deg):
 # =========================================================================
 # 5. CAMERA INTERFACE & MASTER CONTROL LOOP
 # =========================================================================
+def init_maixsense_camera():
+    """Initializes MaixSense-A075V stream with 16-bit depth + JPEG RGB."""
+    import struct
+    try:
+        cfg = struct.pack("<BBBBBBBBi", 1, 1, 255, 0, 0, 7, 1, 0, 0)
+        r = requests.post(f"http://{HOST}/set_cfg", data=cfg, timeout=2.0)
+        return r.status_code == 200
+    except Exception as e:
+        print("[CAMERA] set_cfg notice:", e)
+        return False
+
 def fetch_maixsense():
     try:
-        r = requests.get(f"http://{HOST}/getdeep", timeout=1.0)
+        r = requests.get(f"http://{HOST}/getdeep", timeout=1.5)
         if r.status_code != 200 or len(r.content) < 153628:
             return None, None
         payload = r.content[28:]
@@ -271,6 +282,8 @@ def fetch_maixsense():
 
 def pi_master_loop():
     global latest_video_jpg, latest_map_jpg
+    init_maixsense_camera()
+    print("[MASTER LOOP] MaixSense stream initialized.")
     while True:
         depth, rgb = fetch_maixsense()
         if depth is None or rgb is None:
