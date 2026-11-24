@@ -32,7 +32,12 @@ def stop_all() -> None:
     # Signal the autonomous loop before issuing STOP. Its movement helpers check
     # tools.is_estop_safe every 50 ms, so the stop request interrupts long moves.
     auto_stop.set()
-    motor.stop()
+    try:
+        motor.stop()
+    except Exception as exc:
+        with lock:
+            state["fault"] = f"Motor STOP failed: {exc}"
+            state["esp32_serial_open"] = False
     with lock:
         state["mode"] = "manual"
 
@@ -106,7 +111,8 @@ def sensor_worker() -> None:
         time.sleep(0.4)
 
 threading.Thread(target=watchdog, daemon=True).start()
-threading.Thread(target=sensor_worker, daemon=True).start()
+# The camera is read by the autonomous controller only. A second polling
+# thread would issue overlapping MaixSense requests over the same USB-RNDIS link.
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_: Any) -> None:
@@ -136,11 +142,13 @@ class Handler(BaseHTTPRequestHandler):
             payload.update({
                 "mode": state["mode"],
                 "esp32_serial_open": motor._serial is not None,
+                "esp32_online": False,  # Port-open is not proof of firmware response.
                 "moving": motor.is_moving,
                 "heading_deg": motor.heading_deg,
                 "distance_mm": motor.total_distance_mm,
                 "tools_dry_run": True,
                 "last_camera_frame_age_s": (round(time.time() - state["last_camera_frame"], 2) if state["last_camera_frame"] else None),
+                "camera_online": bool(state["last_camera_frame"] and time.time() - state["last_camera_frame"] <= 2.0),
             })
         self.send_json(200, payload)
     def do_POST(self) -> None:
@@ -181,7 +189,18 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json(409, {"error":"manual mode is not active"}); return
                     left = max(-35, min(35, int(data.get("left", 0))))
                     right = max(-35, min(35, int(data.get("right", 0))))
-                    motor.drive(left, right)
+                    try:
+                        motor.drive(left, right)
+                    except Exception as exc:
+                        state["fault"] = f"ESP32 serial write failed: {exc}"
+                        state["esp32_serial_open"] = False
+                        state["mode"] = "manual"
+                        try:
+                            motor.stop()
+                        except Exception:
+                            pass
+                        self.send_json(503, {"error": "ESP32 serial unavailable; command rejected"})
+                        return
                     state["last_command"] = time.monotonic()
                 self.send_json(200, {"ok":True, "left":left, "right":right})
                 return
