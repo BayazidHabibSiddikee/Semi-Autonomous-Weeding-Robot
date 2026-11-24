@@ -58,6 +58,7 @@ class NormalMotorDriver:
         self._pwm_left: Any = None
         self._pwm_right: Any = None
         self._serial: Any = None
+        self._serial_error: Optional[str] = None
         self._serial_lock = threading.Lock()
         self._command_log: list[str] = []
 
@@ -105,8 +106,16 @@ class NormalMotorDriver:
             raise RuntimeError(
                 "backend='serial' requires pyserial (`pip install pyserial`)."
             ) from exc
-        self._serial = serial.Serial(self.serial_port, self.serial_baud, timeout=0.2, write_timeout=0.2)
-        self._sleep(1.5)  # Allow Arduino auto-reset
+        try:
+            self._serial = serial.Serial(
+                self.serial_port, self.serial_baud, timeout=0.2, write_timeout=0.2
+            )
+            self._sleep(1.5)  # Allow ESP32 USB auto-reset
+            self._serial_error = None
+        except Exception as exc:
+            # Keep the Pi hub available for camera diagnostics while USB reconnect retries.
+            self._serial = None
+            self._serial_error = str(exc)
 
     # ------------------------------------------------------------------
     # Telemetry properties
@@ -185,10 +194,12 @@ class NormalMotorDriver:
                     self.serial_port, self.serial_baud, timeout=0.2, write_timeout=0.2
                 )
             self._sleep(1.5)
+            self._serial_error = None
             self._left_pct = self._right_pct = 0.0
             return True
-        except Exception:
+        except Exception as exc:
             self._serial = None
+            self._serial_error = str(exc)
             self._left_pct = self._right_pct = 0.0
             return False
 
