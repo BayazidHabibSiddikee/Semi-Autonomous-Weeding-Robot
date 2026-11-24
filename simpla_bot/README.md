@@ -16,7 +16,7 @@ Motor voltage and stall current are not known yet. The config therefore defaults
 
 ## Motor mapping
 
-The existing driver maps one logical left channel and one logical right channel:
+There is exactly ONE L298N module. Its two H-bridge channels map one logical left side and one logical right side:
 
 | L298N terminal | Raspberry Pi BCM |
 |---|---:|
@@ -27,7 +27,7 @@ The existing driver maps one logical left channel and one logical right channel:
 | IN3 | 20 |
 | IN4 | 21 |
 
-Channel A drives both left motors in parallel. Channel B drives both right motors in parallel. Both motors on each side always receive the same direction and PWM. There is no independent wheel control.
+Channel A drives both left motors in parallel. Channel B drives both right motors in parallel. Both motors on each side always receive the same direction and PWM. There is no independent wheel control. Remove the ENA and ENB jumper caps if the ESP32 is driving those enable pins with PWM. Tie ESP32 GND, L298N logic GND, and the motor-supply negative together. Keep motor supply wiring separate from Pi/ESP32 logic power. Never connect the L298N 5V output to the ESP32 5V/3V3 rail.
 
 ## MG996R
 
@@ -93,21 +93,51 @@ The Pi is the network and autonomy hub. The Android app connects to the Pi's Wi-
 
 ### Start the hub
 
-1. Flash `simpla_bot/firmware/esp32_motor_controller.ino` to the ESP32. The sketch's example GPIO mapping must be checked against your ESP32 board and wiring.
-2. Connect ESP32 USB to the Pi. Check the port with `ls -l /dev/serial/by-id/`; update `motor_driver.serial_port` in `config.yaml` if needed.
-3. Keep the robot lifted and motor power disconnected for the first serial test. Install the camera/runtime dependencies and pyserial.
-4. From the repository root run:
+1. Flash `simpla_bot/firmware/esp32_motor_controller.ino` to the ESP32. Confirm the GPIO mapping against the exact ESP32 board and wiring.
+2. Connect ESP32 USB to the Pi and identify its stable device name:
 
 ```bash
-python3 -m pip install pyserial
+ls -l /dev/serial/by-id/
+```
+
+Set `SIMPLA_ESP32_PORT` to that exact path. If `/dev/serial/by-id/` is empty, use the detected `/dev/ttyUSB0` or `/dev/ttyACM0` only after confirming which device is the ESP32.
+3. Install Pi dependencies:
+
+```bash
+python3 -m pip install -r simpla_bot/requirements-pi.txt
+```
+
+4. Verify the MaixSense USB-RNDIS network before starting the hub. The camera default in `config.yaml` is `192.168.233.1:80`. Confirm that the Pi can reach it:
+
+```bash
+ip -br addr
+ip route
+ping -c 3 192.168.233.1
+```
+
+If the RNDIS interface has no address, configure the Pi-side USB network interface according to the MaixSense network settings; do not change the camera's address blindly. Then run the camera-only check:
+
+```bash
+python3 -m simpla_bot.run_simpla_bot --check-maixsense
+```
+
+5. Set a stable API token and start the hub from the repository root:
+
+```bash
+export SIMPLA_ESP32_PORT=/dev/serial/by-id/YOUR_ESP32_DEVICE
+export SIMPLA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python3 -m simpla_bot.hub_server
 ```
 
-The control API listens on port 8080:
-- `GET /api/status`
+Copy the printed/configured token into the Android app's **Pi API token** field. Keep the token private. If you omit `SIMPLA_API_TOKEN`, the hub generates a temporary token and prints it at startup; it changes after a restart.
+
+The authenticated API listens on port 8080:
+- `GET /api/status` — camera freshness, ESP32 heartbeat, depth zones and robot state
 - `POST /api/mode` with `{"mode":"manual"}` or `{"mode":"autonomous"}`
-- `POST /api/drive` with `{"left":20,"right":20}` (manual mode only; app sends repeated hold commands)
+- `POST /api/drive` with `{"left":20,"right":20}` (manual mode only; app repeats commands while held)
 - `POST /api/stop`
+
+Every endpoint requires `Authorization: Bearer <token>`. The hub has no permissive CORS policy. The ESP32 must answer `PING` with `PONG ESTOP=0`; an open E-stop loop or missing heartbeat blocks motion.
 
 ### Pi Wi-Fi and Ethernet
 
@@ -121,10 +151,12 @@ NetworkManager's default shared hotspot address is commonly `10.42.0.1`; open th
 
 ### Operating modes
 
-- **Manual:** hold a direction in the app. Repeated commands refresh the ESP32 watchdog; releasing the control sends STOP. The Pi also stops if the command stream expires.
-- **Autonomous:** the Pi runs the existing experimental MaixSense row-navigation loop and sends motor commands to the ESP32 over USB.
-- Switching mode first stops the motor output. Phone loss stops manual movement; the ESP32 serial watchdog stops motor output if Pi-to-ESP32 commands stop.
+- **Manual:** hold a direction in the app. Repeated drive commands refresh the motor watchdog; releasing the control sends STOP. The Pi command watchdog also stops motion if the phone command stream expires.
+- **Camera:** one dedicated Pi worker reads MaixSense. It publishes the latest frame to the manual telemetry display and the autonomous controller; the camera transport is never read concurrently.
+- **Autonomous:** the Pi requires a fresh MaixSense frame and a healthy ESP32 heartbeat before starting. It consumes each camera frame once and halts if frames become stale.
+- **ESP32 heartbeat:** PING checks firmware/E-stop health but does not refresh the motor movement watchdog. Only valid drive commands refresh that watchdog.
+- Switching mode first stops motor output. Phone loss stops manual movement; loss of Pi drive commands stops the ESP32 output.
 
-The app status panel shows Pi/ESP32 connectivity, camera state, depth-zone readings, corner/weed flags, and estimated travel. This is telemetry, not a certified safety system.
+The app status panel shows Pi/ESP32 heartbeat, camera freshness, depth-zone readings, corner/weed flags, and estimated travel. The Android APK is not included or built by this branch; build it locally from `android_app/` after checking out this branch. This telemetry is not a certified safety system.
 
 **Commissioning limits:** motor output is software-limited to 35% in this initial firmware, but this does not make an electrically overloaded L298N safe. Confirm each motor's rated voltage and stall current, the combined current per L298N channel, wiring, and cooling before connecting motor power. Use a physical normally-closed E-stop that independently removes actuator power. Treatment outputs remain disabled/dry-run; no unattended operation is supported. The autonomous controller is experimental and must be supervised.
