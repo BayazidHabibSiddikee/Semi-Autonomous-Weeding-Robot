@@ -1,0 +1,18 @@
+{
+  "id": "bayazidhs/weed-detector-yolo26-pi4",
+  "title": "Weed Detector YOLO26 Pi4 NCNN Training",
+  "code_file": "train_weed_kaggle.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "ravirajsinh45/crop-and-weed-detection-data-with-bounding-boxes",
+    "vinayakshanawad/weedcrop-image-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
