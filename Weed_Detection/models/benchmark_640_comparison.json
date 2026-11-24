@@ -1,0 +1,42 @@
+[
+  {
+    "model": "yolo26n_ncnn",
+    "imgsz": "640x640",
+    "conf": 0.3,
+    "mean_ms": 255.56,
+    "median_ms": 245.53,
+    "p95_ms": 296.66,
+    "fps": 3.91,
+    "avg_detections": 5.73
+  },
+  {
+    "model": "yolo26n_onnx",
+    "imgsz": "640x640",
+    "conf": 0.3,
+    "mean_ms": 84.52,
+    "median_ms": 76.79,
+    "p95_ms": 114.88,
+    "fps": 11.83,
+    "avg_detections": 5.73
+  },
+  {
+    "model": "yolo26s_ncnn",
+    "imgsz": "640x640",
+    "conf": 0.3,
+    "mean_ms": 593.46,
+    "median_ms": 643.47,
+    "p95_ms": 702.22,
+    "fps": 1.69,
+    "avg_detections": 6.27
+  },
+  {
+    "model": "yolo26s_onnx",
+    "imgsz": "640x640",
+    "conf": 0.3,
+    "mean_ms": 229.05,
+    "median_ms": 220.01,
+    "p95_ms": 273.86,
+    "fps": 4.37,
+    "avg_detections": 6.8
+  }
+]

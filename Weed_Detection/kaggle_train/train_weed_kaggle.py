@@ -16,6 +16,7 @@ from pathlib import Path
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-U", "ultralytics", "ncnn", "onnx", "onnxslim"])
 
 import yaml
+from PIL import Image
 from ultralytics import YOLO
 
 SEED = 42
@@ -29,6 +30,7 @@ for sub in ["images/train", "images/val", "images/test", "labels/train", "labels
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 seen_hashes = set()
+seen_dhashes = set()
 counts = {"train": 0, "val": 0, "test": 0}
 
 
@@ -40,13 +42,33 @@ def md5_file(p: Path) -> str:
     return h.hexdigest()
 
 
+def compute_dhash(p: Path, hash_size: int = 8) -> int:
+    """64-bit perceptual difference hash to catch resized/recompressed near-duplicates."""
+    with Image.open(p) as im:
+        gray = im.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
+        pixels = list(gray.getdata())
+    bits = 0
+    for row in range(hash_size):
+        offset = row * (hash_size + 1)
+        for col in range(hash_size):
+            bits = (bits << 1) | int(pixels[offset + col] > pixels[offset + col + 1])
+    return bits
+
+
 def copy_sample(img_path: Path, lbl_path: Path, split: str, class_map: dict, prefix: str):
     if not img_path.exists() or not lbl_path.exists():
         return
     digest = md5_file(img_path)
     if digest in seen_hashes:
         return
+    try:
+        dhash = compute_dhash(img_path)
+    except Exception:
+        return
+    if dhash in seen_dhashes:
+        return
     seen_hashes.add(digest)
+    seen_dhashes.add(dhash)
 
     lines_out = []
     for raw in lbl_path.read_text().splitlines():

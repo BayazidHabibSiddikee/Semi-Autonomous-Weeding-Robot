@@ -56,6 +56,7 @@ class WeedLaserRobot:
         config_path: str = "configs/robot_config.yaml",
         model_path: Optional[str] = None,
         simulate: bool = False,
+        arm_actuator: bool = False,
     ):
         cfg_file = Path(config_path)
         if not cfg_file.is_absolute():
@@ -65,6 +66,9 @@ class WeedLaserRobot:
 
         self.explicit_model = model_path
         self.simulate = simulate
+        self.arm_actuator = arm_actuator
+        if not self.arm_actuator:
+            print("[SAFETY] Actuator DISARMED (dry-run logging only). Pass --arm-actuator only with hardware interlocks & E-Stop verified.")
         self.running = False
         self.detector = None
         self.calibrator = None
@@ -144,9 +148,11 @@ class WeedLaserRobot:
             weed.gantry_xy = (x_mm, y_mm)
 
             self.gantry.move_to(x_mm, y_mm, speed=self.config["gantry"]["max_speed"])
-            if self.safety.check_safety():
+            if self.arm_actuator and self.safety.check_safety():
                 dwell = self.config["laser"]["dwell_time_ms"]
                 self.laser.fire(duration_ms=dwell)
+            elif not self.arm_actuator:
+                print(f"  [DRY-RUN] Weed at ({x_mm:.1f}, {y_mm:.1f} mm) — actuator disarmed")
 
         self.gantry.move_home()
         return detections
@@ -201,6 +207,7 @@ def main():
     parser.add_argument("--model", type=str, default=None, help="Path to NCNN dir, ONNX, or .pt model")
     parser.add_argument("--source", type=str, default="0", help="Camera index, video, or image path (detect-only)")
     parser.add_argument("--simulate", action="store_true", help="Run in simulation mode")
+    parser.add_argument("--arm-actuator", action="store_true", help="Arm physical actuator (requires hardware interlock & E-Stop)")
     parser.add_argument("--detect-only", action="store_true", help="Detection only, no gantry/laser")
     args = parser.parse_args()
 
@@ -241,7 +248,12 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
     else:
-        robot = WeedLaserRobot(config_path=args.config, model_path=args.model, simulate=args.simulate)
+        robot = WeedLaserRobot(
+            config_path=args.config,
+            model_path=args.model,
+            simulate=args.simulate,
+            arm_actuator=args.arm_actuator,
+        )
         if robot.start():
             robot.run()
 

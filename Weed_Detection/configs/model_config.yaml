@@ -1,33 +1,29 @@
 # Model Training & Raspberry Pi 4 Deployment Configuration
+# Matches the deployed 2-class Kaggle-trained YOLO26 weights (0: crop, 1: weed).
 
-# Classes (matching configs/weed_data.yaml)
 classes:
-  - crop_tomato
-  - crop_chili
-  - crop_flower
-  - weed_grass
-  - weed_dandelion
-  - weed_purslane
-  - weed_amaranth
-  - weed_other
+  - crop
+  - weed
 
-num_classes: 8
+num_classes: 2
 
 # Primary Real-Time Detector (YOLO26 -> NCNN on Pi 4)
+# Provisional Pi 4 default: YOLO26n (higher weed recall 0.7459 & 3x faster NCNN than YOLO26s)
 yolo:
-  primary_model: "yolo26s.pt"       # Primary candidate (best accuracy/speed balance)
-  fallback_model: "yolo26n.pt"      # Fallback if YOLO26s is too slow/hot on Pi 4
-  experiment_model: "yolo26m.pt"    # Optional PC-only high-capacity experiment
-  deployed_model: "models/weed_detector_ncnn_model"  # Exported NCNN directory for Pi 4
+  primary_model: "yolo26n.pt"                 # Provisional Pi 4 default (speed + weed recall)
+  accuracy_candidate: "yolo26s.pt"            # Higher overall mAP50 / crop precision
+  experiment_model: "yolo26m.pt"              # Optional PC-only high-capacity experiment
+  deployed_model: "models/weed_detector_ncnn_model"
   fallback_weights:
-    - "models/yolo_weeds.pt"
-    - "../weed_detection_bot/yolo_models/best.onnx"
-    - "../weed_detection_bot/yolo_models/best.pt"
+    - "models/yolo26n_best.pt"
+    - "models/yolo26n_best.onnx"
+    - "models/yolo26s_ncnn_model"
+    - "models/yolo26s_best.pt"
   input_size: 640
   conf_threshold: 0.30
-  batch_size: -1                    # Auto-batch on GPU during training
-  epochs: 200
-  patience: 40
+  batch_size: -1
+  epochs: 80
+  patience: 20
   augment: true
   export_format: "ncnn"
   half: true
@@ -49,13 +45,3 @@ clip:
   enabled: false
   model: "ViT-B/32"
   input_size: 224
-  text_prompts:
-    - "a photo of a tomato plant"
-    - "a photo of a chili pepper plant"
-    - "a photo of a flower plant"
-    - "a photo of grass weed"
-    - "a photo of dandelion weed"
-    - "a photo of purslane weed"
-    - "a photo of amaranth weed"
-    - "bare soil"
-    - "rock or debris"

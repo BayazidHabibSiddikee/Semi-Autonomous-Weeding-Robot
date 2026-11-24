@@ -1,4 +1,4 @@
-# Standard YOLO Object-Detection Dataset Configuration
+# Standard YOLO Object-Detection Dataset Configuration (2-Class Deployed Schema)
 # Structure:
 #   dataset/
 #     images/{train,val,test}/
@@ -11,11 +11,5 @@ val: images/val
 test: images/test
 
 names:
-  0: crop_tomato
-  1: crop_chili
-  2: crop_flower
-  3: weed_grass
-  4: weed_dandelion
-  5: weed_purslane
-  6: weed_amaranth
-  7: weed_other
+  0: crop
+  1: weed
