@@ -1,5 +1,5 @@
 {
-  "id": "bayazidhs/weed-detector-yolo26-pi4",
+  "id": "bayazidhs/weed-detector-yolo26-pi4-ncnn-training",
   "title": "Weed Detector YOLO26 Pi4 NCNN Training",
   "code_file": "train_weed_kaggle.py",
   "language": "python",

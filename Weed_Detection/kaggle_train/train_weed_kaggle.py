@@ -75,20 +75,23 @@ def copy_sample(img_path: Path, lbl_path: Path, split: str, class_map: dict, pre
 
 
 # -------------------------------------------------------------------------
-# 1. Ingest Dataset A: vinayakshanawad/weedcrop-image-dataset
+# 1. Discover all mounted datasets dynamically under /kaggle/input
 # -------------------------------------------------------------------------
-ds_a_root = Path("/kaggle/input/weedcrop-image-dataset")
-for yaml_path in ds_a_root.rglob("data.yaml"):
+INPUT_ROOT = Path("/kaggle/input")
+print("Mounted /kaggle/input entries:", [str(p) for p in INPUT_ROOT.iterdir()] if INPUT_ROOT.exists() else [])
+
+handled_dirs = set()
+
+# A) Standard YOLO datasets with data.yaml (e.g., WeedCrop.v1i.yolov5pytorch)
+for yaml_path in sorted(INPUT_ROOT.rglob("data.yaml")):
     base = yaml_path.parent
+    handled_dirs.add(base.resolve())
     cfg = yaml.safe_load(yaml_path.read_text()) or {}
     names = cfg.get("names", [])
     if isinstance(names, dict):
         names = [names[k] for k in sorted(names.keys())]
-    class_map_a = {}
-    for idx, name in enumerate(names):
-        low = str(name).lower()
-        class_map_a[idx] = 1 if "weed" in low else 0
-    print(f"[Dataset A] {base} | names={names} -> map={class_map_a}")
+    class_map_a = {idx: (1 if "weed" in str(name).lower() else 0) for idx, name in enumerate(names)}
+    print(f"[YOLO YAML Dataset] {base} | names={names} -> map={class_map_a}")
 
     for src_split, dst_split in [("train", "train"), ("valid", "val"), ("val", "val"), ("test", "test")]:
         img_dir = base / src_split / "images"
@@ -99,31 +102,34 @@ for yaml_path in ds_a_root.rglob("data.yaml"):
             if img_p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
                 copy_sample(img_p, lbl_dir / f"{img_p.stem}.txt", dst_split, class_map_a, "wc")
 
-# -------------------------------------------------------------------------
-# 2. Ingest Dataset B: ravirajsinh45/crop-and-weed-detection-data-with-bounding-boxes
-# -------------------------------------------------------------------------
-ds_b_root = Path("/kaggle/input/crop-and-weed-detection-data-with-bounding-boxes")
-if ds_b_root.exists():
-    classes_file = next(ds_b_root.rglob("classes.txt"), None)
+# B) Flat YOLO image+txt pairs (e.g., ravirajsinh45/crop-and-weed-detection-data-with-bounding-boxes)
+flat_imgs = []
+for p in INPUT_ROOT.rglob("*"):
+    if p.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+        continue
+    if any(hd in p.resolve().parents for hd in handled_dirs):
+        continue
+    if p.with_suffix(".txt").exists():
+        flat_imgs.append(p)
+
+if flat_imgs:
+    classes_file = next((c for c in INPUT_ROOT.rglob("classes.txt") if not any(hd in c.resolve().parents for hd in handled_dirs)), None)
     class_map_b = {0: 0, 1: 1}
     if classes_file:
         c_names = [line.strip().lower() for line in classes_file.read_text().splitlines() if line.strip()]
         class_map_b = {i: (1 if "weed" in n else 0) for i, n in enumerate(c_names)}
-        print(f"[Dataset B] classes.txt={c_names} -> map={class_map_b}")
+        print(f"[Flat YOLO Dataset] classes.txt={c_names} -> map={class_map_b}")
+    else:
+        print(f"[Flat YOLO Dataset] found {len(flat_imgs)} image+txt pairs, using default map={class_map_b}")
 
-    imgs_b = [p for p in ds_b_root.rglob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
-    imgs_b.sort()
-    random.shuffle(imgs_b)
-    n_b = len(imgs_b)
-    for i, img_p in enumerate(imgs_b):
-        lbl_p = img_p.with_suffix(".txt")
-        if i < int(0.8 * n_b):
-            sp = "train"
-        elif i < int(0.9 * n_b):
-            sp = "val"
-        else:
-            sp = "test"
-        copy_sample(img_p, lbl_p, sp, class_map_b, "agri")
+    flat_imgs.sort()
+    random.shuffle(flat_imgs)
+    n_b = len(flat_imgs)
+    for i, img_p in enumerate(flat_imgs):
+        sp = "train" if i < int(0.8 * n_b) else ("val" if i < int(0.9 * n_b) else "test")
+        copy_sample(img_p, img_p.with_suffix(".txt"), sp, class_map_b, "agri")
+
+assert sum(counts.values()) > 0, f"No samples ingested from {INPUT_ROOT}!"
 
 print(f"\nUnified Dataset Counts: {counts} (total={sum(counts.values())})")
 
