@@ -47,8 +47,10 @@ A software E-stop is not a safety-rated disconnect. Use a physical normally-clos
 
 ## Software layout
 
-- `config.yaml`: Pi 4 pins, paired motor topology, MaixSense parameters, servo MCU serial settings.
-- `motor_driver.py`: existing two-channel differential drive interface.
+- `config.yaml`: paired motor topology, MaixSense parameters, ESP32 and servo serial settings.
+- `motor_driver.py`: two-channel differential drive interface, with USB serial output to ESP32.
+- `hub_server.py`: lightweight HTTP API for the Android app and autonomous/manual mode switching.
+- `firmware/esp32_motor_controller.ino`: ESP32 USB serial motor firmware.
 - `maixsense_perception.py`: camera transport and depth/RGB analysis.
 - `simpla_bot_controller.py`: existing experimental row-navigation state machine.
 - `hardware/bottle_servo.py`: MG996R serial adapter.
@@ -69,7 +71,7 @@ A software E-stop is not a safety-rated disconnect. Use a physical normally-clos
 
 ```bash
 # Install the light runtime dependencies as required by the camera decoder
-python3 -m pip install -r simpla_bot/requirements.txt
+python3 -m pip install pyserial pillow
 
 # Offline simulation; no hardware outputs
 python3 -m simpla_bot.run_simpla_bot --mode sim --tool none
