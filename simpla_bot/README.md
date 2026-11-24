@@ -107,15 +107,24 @@ Set `SIMPLA_ESP32_PORT` to that exact path. If `/dev/serial/by-id/` is empty, us
 python3 -m pip install -r simpla_bot/requirements-pi.txt
 ```
 
-4. Verify the MaixSense USB-RNDIS network before starting the hub. The camera default in `config.yaml` is `192.168.233.1:80`. Confirm that the Pi can reach it:
+4. Verify the MaixSense USB-RNDIS network before starting the hub. The A075V uses `192.168.233.1`; Sipeed warns that `192.168.233.0/24` must not already be used by the router LAN. The camera can take around 10–15 seconds after power-on to become ready. Check the Pi interfaces:
 
 ```bash
+ip -br link
 ip -br addr
 ip route
 ping -c 3 192.168.233.1
 ```
 
-If the RNDIS interface has no address, configure the Pi-side USB network interface according to the MaixSense network settings; do not change the camera's address blindly. Then run the camera-only check:
+If the RNDIS interface has no address, identify its actual interface name from `ip -br link` (often an `enx...` device), then assign the Pi-side address:
+
+```bash
+sudo nmcli connection add type ethernet ifname RNDIS_INTERFACE con-name maixsense-rndis ipv4.method manual ipv4.addresses 192.168.233.2/24 ipv4.never-default yes ipv6.method disabled
+sudo nmcli connection up maixsense-rndis
+ping -c 3 192.168.233.1
+```
+
+Replace `RNDIS_INTERFACE` with the real interface name. Do not create a duplicate connection if one already exists or if the interface already has a working address. Then run the camera-only check:
 
 ```bash
 python3 -m simpla_bot.run_simpla_bot --check-maixsense
