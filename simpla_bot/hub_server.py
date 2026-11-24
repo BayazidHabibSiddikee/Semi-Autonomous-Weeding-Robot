@@ -59,7 +59,7 @@ auto_stop = threading.Event()
 auto_stop.set()
 autonomous_thread: threading.Thread | None = None
 _original_estop_safe = tools.is_estop_safe
-tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set()
+tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set() and bool(state["esp32_online"])
 
 
 def controller_frame_provider():
@@ -275,6 +275,10 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     if not state["esp32_online"]:
                         self.send_json(503, {"error": "ESP32 is not responding to PING or its E-stop input is open"})
+                        return
+                    camera_age = time.time() - state["last_camera_frame"] if state["last_camera_frame"] else 9999.0
+                    if camera_age > 2.0:
+                        self.send_json(503, {"error": "MaixSense has no fresh frame; check its USB-RNDIS link"})
                         return
                     auto_stop.clear()
                     controller.stats = MissionStats(state="DRIVE_ROW")
