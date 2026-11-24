@@ -147,18 +147,49 @@ class NormalMotorDriver:
                 self._serial.write(msg.encode("ascii"))
                 self._serial.flush()
 
-    def ping(self) -> bool:
-        """Return True only when the ESP32 firmware answers PING with a healthy E-stop input."""
+    def probe(self) -> tuple[bool, bool]:
+        """Return (firmware_responding, estop_loop_healthy) from the ESP32 heartbeat."""
         if self.backend != "serial" or self._serial is None:
-            return False
+            return False, False
         try:
             with self._serial_lock:
                 self._serial.reset_input_buffer()
                 self._serial.write(b"PING\n")
                 self._serial.flush()
                 reply = self._serial.readline().decode("ascii", errors="ignore").strip()
-            return reply.startswith("PONG ") and "ESTOP=0" in reply
+            responding = reply.startswith("PONG ")
+            return responding, responding and "ESTOP=0" in reply
         except Exception:
+            return False, False
+
+    def ping(self) -> bool:
+        """Return True only when ESP32 firmware responds and its E-stop loop is healthy."""
+        responding, estop_ok = self.probe()
+        return responding and estop_ok
+
+    def reconnect_serial(self) -> bool:
+        """Reopen the configured USB serial device after disconnect; never restore motion."""
+        if self.backend != "serial":
+            return False
+        try:
+            import serial  # type: ignore
+            with self._serial_lock:
+                old = self._serial
+                self._serial = None
+                if old is not None:
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                self._serial = serial.Serial(
+                    self.serial_port, self.serial_baud, timeout=0.2, write_timeout=0.2
+                )
+            self._sleep(1.5)
+            self._left_pct = self._right_pct = 0.0
+            return True
+        except Exception:
+            self._serial = None
+            self._left_pct = self._right_pct = 0.0
             return False
 
     def drive(self, left_pct: float, right_pct: float) -> None:
@@ -352,7 +383,10 @@ class NormalMotorDriver:
 
     def close(self) -> None:
         """Safely stop motors and release hardware resources."""
-        self.stop()
+        try:
+            self.stop()
+        except Exception:
+            pass
         if self._pwm_left is not None:
             try:
                 self._pwm_left.stop()
