@@ -7,25 +7,22 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_detection():
-    print("=== Testing Detection Pipeline ===")
-    from src.detection_pipeline import WeedDetector
+    print("=== Testing Detection Pipeline (YOLO/NCNN) ===")
+    from src.detection_pipeline import WeedDetector, is_weed_class
+    from src.main import resolve_model_path
     import cv2
+    import numpy as np
 
-    detector = WeedDetector(use_clip=True, use_dino=False)
-    cap = cv2.VideoCapture(0)
+    assert is_weed_class("weed_grass") is True
+    assert is_weed_class("Weed") is True
+    assert is_weed_class("crop_tomato") is False
+    assert is_weed_class("Maize") is False
 
-    if not cap.isOpened():
-        print("  Camera not available, using test image")
-        import numpy as np
-        frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-    else:
-        ret, frame = cap.read()
-        cap.release()
-
+    model_path, imgsz, conf_thresh = resolve_model_path()
+    detector = WeedDetector(yolo_path=model_path, use_clip=False, use_dino=False, imgsz=imgsz, conf_threshold=conf_thresh)
+    frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     detections = detector.detect(frame)
-    print(f"  Detections: {len(detections)}")
-    for d in detections:
-        print(f"    {d.class_name}: {d.confidence:.3f} weed={d.is_weed}")
+    print(f"  Model: {model_path} | Detections on noise: {len(detections)}")
     print("  Detection test PASSED\n")
 
 def test_calibration():

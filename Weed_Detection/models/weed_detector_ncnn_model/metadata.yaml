@@ -1,0 +1,27 @@
+description: Ultralytics best model trained on c:\Users\Shadow\OneDrive\Uni work\OU\T885 - Team Engineering\Vision\datasets\yolo_cropandweed\dataset.yaml
+author: Ultralytics
+date: "2026-11-24T23:33:45.854736+06:00"
+version: "8.4.218"
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: Maize
+  1: Sugar beet
+  2: Soy
+  3: Sunflower
+  4: Potato
+  5: Pea
+  6: Bean
+  7: Pumpkin
+  8: Weed
+args:
+  quantize: 16
+channels: 3
+end2end: false

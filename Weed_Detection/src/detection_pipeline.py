@@ -1,95 +1,115 @@
 """
-Combined detection pipeline: DINOv2 + CLIP + YOLO + EfficientNet.
-Runs all models together for robust weed detection.
+Primary single-stage YOLO detection pipeline (NCNN / ONNX / PyTorch) for Raspberry Pi 4.
+CLIP, DINOv2, and EfficientNet are optional offline research tools — disabled by default
+for real-time edge inference.
 """
-import torch
 import cv2
 import numpy as np
-from PIL import Image
 from dataclasses import dataclass
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+
+NON_WEED_CLASSES = {
+    "crop", "soil", "rock", "debris",
+    "maize", "sugar beet", "soy", "sunflower", "potato", "pea", "bean", "pumpkin",
+}
+
+
+def is_weed_class(class_name: str) -> bool:
+    """Explicit crop-exclusion + weed-target check across 2-class, 8-class, and 9-class schemas."""
+    name = (class_name or "").strip().lower()
+    if not name:
+        return False
+    if name.startswith("crop_") or name in NON_WEED_CLASSES:
+        return False
+    return name == "weed" or name.startswith("weed_") or "weed" in name
+
 
 @dataclass
 class WeedDetection:
-    bbox: tuple           # (x1, y1, x2, y2) in pixels
-    center: tuple         # (cx, cy) in pixels
-    class_name: str       # e.g. "weed_dandelion"
-    confidence: float     # 0.0 - 1.0
-    yolo_conf: float      # YOLO detection confidence
-    clip_class: str       # CLIP classification result
-    clip_conf: float      # CLIP confidence
-    dino_similarity: float  # DINOv2 feature similarity
-    is_weed: bool         # final verdict
-    gantry_xy: Optional[tuple] = None  # (X_mm, Y_mm) after calibration
+    bbox: Tuple[int, int, int, int]       # (x1, y1, x2, y2) in pixels
+    center: Tuple[int, int]               # (cx, cy) in pixels
+    class_name: str                       # e.g. "weed_dandelion" or "Weed"
+    confidence: float                     # 0.0 - 1.0
+    yolo_conf: float                      # YOLO detection confidence
+    is_weed: bool                         # final verdict
+    clip_class: str = "disabled"
+    clip_conf: float = 0.0
+    dino_similarity: float = 0.0
+    gantry_xy: Optional[Tuple[float, float]] = None
+
 
 class WeedDetector:
-    def __init__(self, yolo_path=None, efficientnet_path=None, use_clip=True, use_dino=True):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(
+        self,
+        yolo_path: Optional[str] = None,
+        efficientnet_path: Optional[str] = None,
+        use_clip: bool = False,
+        use_dino: bool = False,
+        imgsz: int = 640,
+        conf_threshold: float = 0.30,
+    ):
+        self.imgsz = imgsz
+        self.conf_threshold = conf_threshold
         self.use_clip = use_clip
         self.use_dino = use_dino
+        self.yolo_path = yolo_path
 
-        # Load YOLO
-        if yolo_path:
+        if yolo_path and Path(yolo_path).exists():
             from ultralytics import YOLO
-            print(f"Loading YOLO: {yolo_path}")
-            self.yolo = YOLO(yolo_path)
+            print(f"Loading YOLO detector: {yolo_path}")
+            self.yolo = YOLO(str(yolo_path), task="detect")
         else:
+            if yolo_path:
+                print(f"WARNING: YOLO model not found at {yolo_path}")
             self.yolo = None
 
-        # Load EfficientNet
-        if efficientnet_path:
-            from torchvision import models
-            checkpoint = torch.load(efficientnet_path, map_location=self.device)
-            self.ef_classes = checkpoint["classes"]
-            self.efficientnet = models.efficientnet_b0(pretrained=False)
-            self.efficientnet.classifier[1] = torch.nn.Linear(
-                self.efficientnet.classifier[1].in_features, len(self.ef_classes)
-            )
-            self.efficientnet.load_state_dict(checkpoint["model_state_dict"])
-            self.efficientnet = self.efficientnet.to(self.device).eval()
-            print(f"Loaded EfficientNet: {len(self.ef_classes)} classes")
-        else:
-            self.efficientnet = None
+        self.efficientnet = None
+        self.clip_model = None
+        self.dino_model = None
+        self.weed_database = {}
 
-        # Load CLIP
-        if use_clip:
-            import clip
-            self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device)
-            self.clip_model.eval()
-            self.clip_texts = [
-                "a photo of a tomato plant",
-                "a photo of a chili pepper plant",
-                "a photo of a flower plant",
-                "a photo of grass weed",
-                "a photo of dandelion weed",
-                "a photo of purslane weed",
-                "a photo of amaranth weed",
-                "bare soil",
-            ]
-            self.clip_names = [
-                "crop_tomato", "crop_chili", "crop_flower",
-                "weed_grass", "weed_dandelion", "weed_purslane",
-                "weed_amaranth", "soil"
-            ]
-            tokens = clip.tokenize(self.clip_texts).to(self.device)
-            with torch.no_grad():
-                self.clip_text_feats = self.clip_model.encode_text(tokens)
-                self.clip_text_feats = torch.nn.functional.normalize(self.clip_text_feats, dim=-1)
+        if efficientnet_path or use_clip or use_dino:
+            import torch
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if efficientnet_path:
+                from torchvision import models
+                checkpoint = torch.load(efficientnet_path, map_location=self.device)
+                self.ef_classes = checkpoint["classes"]
+                self.efficientnet = models.efficientnet_b0(weights=None)
+                self.efficientnet.classifier[1] = torch.nn.Linear(
+                    self.efficientnet.classifier[1].in_features, len(self.ef_classes)
+                )
+                self.efficientnet.load_state_dict(checkpoint["model_state_dict"])
+                self.efficientnet = self.efficientnet.to(self.device).eval()
 
-        # Load DINOv2
-        if use_dino:
-            from transformers import AutoImageProcessor, AutoModel
-            self.dino_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
-            self.dino_model = AutoModel.from_pretrained("facebook/dinov2-small").to(self.device).eval()
+            if use_clip:
+                import clip
+                self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device)
+                self.clip_model.eval()
+                self.clip_names = [
+                    "crop_tomato", "crop_chili", "crop_flower",
+                    "weed_grass", "weed_dandelion", "weed_purslane",
+                    "weed_amaranth", "soil",
+                ]
+                tokens = clip.tokenize([f"a photo of {n.replace('_', ' ')}" for n in self.clip_names]).to(self.device)
+                with torch.no_grad():
+                    self.clip_text_feats = torch.nn.functional.normalize(
+                        self.clip_model.encode_text(tokens), dim=-1
+                    )
 
-        # Weed database for DINOv2 similarity
-        self.weed_database = {}  # name -> feature vector
+            if use_dino:
+                from transformers import AutoImageProcessor, AutoModel
+                self.dino_processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
+                self.dino_model = AutoModel.from_pretrained("facebook/dinov2-small").to(self.device).eval()
 
-    def detect_yolo(self, frame):
-        """Run YOLO detection, return list of (bbox, class, conf)."""
+    def detect_yolo(self, frame: np.ndarray, conf_threshold: Optional[float] = None):
+        """Run primary YOLO (NCNN / ONNX / PyTorch) detection."""
         if self.yolo is None:
             return []
-        results = self.yolo(frame, verbose=False)
+        thresh = self.conf_threshold if conf_threshold is None else conf_threshold
+        results = self.yolo(frame, imgsz=self.imgsz, conf=thresh, verbose=False)
         detections = []
         for r in results:
             for box in r.boxes:
@@ -99,171 +119,61 @@ class WeedDetector:
                 detections.append(((x1, y1, x2, y2), cls_name, conf))
         return detections
 
-    def classify_clip(self, crop_image):
-        """Classify a cropped image with CLIP."""
-        if not self.use_clip:
-            return "unknown", 0.0
-        import clip
-        pil_img = Image.fromarray(cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB))
-        img_input = self.clip_preprocess(pil_img).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            img_feat = self.clip_model.encode_image(img_input)
-            img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
-            sims = (img_feat @ self.clip_text_feats.T).squeeze(0)
-            probs = sims.softmax(dim=0).cpu().numpy()
-        best_idx = int(probs.argmax())
-        return self.clip_names[best_idx], float(probs[best_idx])
-
-    def get_dino_feature(self, crop_image):
-        """Extract DINOv2 feature from cropped image."""
-        if not self.use_dino:
-            return None
-        pil_img = Image.fromarray(cv2.cvtColor(crop_image, cv2.COLOR_BGR2RGB))
-        inputs = self.dino_processor(images=pil_img, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.dino_model(**inputs)
-            feat = outputs.last_hidden_state[:, 0, :]
-            feat = torch.nn.functional.normalize(feat, dim=-1)
-        return feat.cpu().numpy().flatten()
-
-    def load_weed_database(self, npz_path):
-        """Load pre-extracted DINOv2 features for similarity matching."""
+    def load_weed_database(self, npz_path: str):
+        """Optional: load pre-extracted DINOv2 features for offline similarity analysis."""
         data = np.load(npz_path)
         for name in data.files:
             self.weed_database[name] = data[name]
-        print(f"Loaded {len(self.weed_database)} weed features")
+        print(f"Loaded {len(self.weed_database)} DINOv2 weed features")
 
-    def detect(self, frame, conf_threshold=0.3, use_voting=True):
+    def detect(self, frame: np.ndarray, conf_threshold: Optional[float] = None, use_voting: bool = False) -> List[WeedDetection]:
         """
-        Full detection pipeline on a frame.
-        Returns list of WeedDetection objects.
+        Single-stage real-time detection pipeline.
+        Decision is confidence-threshold + explicit crop-exclusion based on YOLO output.
         """
+        thresh = self.conf_threshold if conf_threshold is None else conf_threshold
         h, w = frame.shape[:2]
-        yolo_dets = self.detect_yolo(frame)
-        detections = []
+        yolo_dets = self.detect_yolo(frame, conf_threshold=thresh)
+        detections: List[WeedDetection] = []
 
         for bbox, yolo_class, yolo_conf in yolo_dets:
-            if yolo_conf < conf_threshold:
+            if yolo_conf < thresh:
                 continue
 
             x1, y1, x2, y2 = [int(v) for v in bbox]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
-            crop = frame[y1:y2, x1:x2]
-            if crop.size == 0:
+            if x2 <= x1 or y2 <= y1:
                 continue
 
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            is_weed = is_weed_class(yolo_class)
 
-            # CLIP classification
-            clip_class, clip_conf = self.classify_clip(crop)
-
-            # DINOv2 feature similarity
-            dino_feat = self.get_dino_feature(crop)
-            dino_sim = 0.0
-            if dino_feat is not None and self.weed_database:
-                best_sim = -1
-                for name, db_feat in self.weed_database.items():
-                    sim = float(np.dot(dino_feat, db_feat))
-                    if sim > best_sim:
-                        best_sim = sim
-                dino_sim = best_sim
-
-            # EfficientNet classification
-            ef_class = None
-            ef_conf = 0.0
-            if self.efficientnet is not None:
-                import torchvision.transforms as T
-                ef_transform = T.Compose([
-                    T.ToPILImage(),
-                    T.Resize((224, 224)),
-                    T.ToTensor(),
-                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
-                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                tensor = ef_transform(crop_rgb).unsqueeze(0).to(self.device)
-                with torch.no_grad():
-                    output = self.efficientnet(tensor)
-                    probs = torch.nn.functional.softmax(output, dim=1)
-                    ef_idx = int(probs.argmax())
-                    ef_class = self.ef_classes[ef_idx]
-                    ef_conf = float(probs[0, ef_idx])
-
-            # Voting / consensus
-            is_weed = self._vote_weed(yolo_class, clip_class, ef_class, dino_sim, use_voting)
-
-            # Ensemble confidence
-            conf_scores = [yolo_conf]
-            if clip_conf > 0: conf_scores.append(clip_conf)
-            if ef_conf > 0: conf_scores.append(ef_conf)
-            if dino_sim > 0: conf_scores.append(dino_sim)
-            ensemble_conf = float(np.mean(conf_scores))
-
-            # Select class name
-            class_name = clip_class if clip_class.startswith("weed_") else (ef_class if ef_class and ef_class.startswith("weed_") else yolo_class)
-
-            detection = WeedDetection(
-                bbox=(x1, y1, x2, y2),
-                center=(cx, cy),
-                class_name=class_name,
-                confidence=ensemble_conf,
-                yolo_conf=yolo_conf,
-                clip_class=clip_class,
-                clip_conf=clip_conf,
-                dino_similarity=dino_sim,
-                is_weed=is_weed,
+            detections.append(
+                WeedDetection(
+                    bbox=(x1, y1, x2, y2),
+                    center=(cx, cy),
+                    class_name=yolo_class,
+                    confidence=yolo_conf,
+                    yolo_conf=yolo_conf,
+                    is_weed=is_weed,
+                )
             )
-            detections.append(detection)
 
         return detections
 
-    def _vote_weed(self, yolo_class, clip_class, ef_class, dino_sim, use_voting):
-        """Consensus decision: is this a weed?"""
-        if not use_voting:
-            return yolo_class.startswith("weed_")
-
-        votes = 0
-        active_models = 0
-
-        if yolo_class:
-            active_models += 1
-            if yolo_class.startswith("weed_"):
-                votes += 1
-
-        if clip_class:
-            active_models += 1
-            if clip_class.startswith("weed_"):
-                votes += 1
-
-        if ef_class:
-            active_models += 1
-            if ef_class.startswith("weed_"):
-                votes += 1
-
-        if dino_sim > 0:
-            active_models += 1
-            if dino_sim >= 0.75:
-                votes += 1
-
-        if active_models == 0:
-            return False
-
-        # Majority rule (>50% of active models vote weed)
-        return (votes / active_models) >= 0.5
-
-    def annotate_frame(self, frame, detections):
+    def annotate_frame(self, frame: np.ndarray, detections: List[WeedDetection]) -> np.ndarray:
         """Draw detection results on frame."""
         annotated = frame.copy()
         for det in detections:
             x1, y1, x2, y2 = det.bbox
             if det.is_weed:
-                color = (0, 0, 255)  # red for weeds
+                color = (0, 0, 255)
                 label = f"WEED {det.class_name} {det.confidence:.2f}"
             else:
-                color = (0, 255, 0)  # green for crops
+                color = (0, 255, 0)
                 label = f"CROP {det.class_name} {det.confidence:.2f}"
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(annotated, label, (x1, y1 - 8),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(annotated, label, (x1, max(16, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         return annotated

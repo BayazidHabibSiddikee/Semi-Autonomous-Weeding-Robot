@@ -1,0 +1,21 @@
+# Standard YOLO Object-Detection Dataset Configuration
+# Structure:
+#   dataset/
+#     images/{train,val,test}/
+#     labels/{train,val,test}/   (YOLO normalized: class_id x_center y_center width height)
+
+path: dataset
+
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: crop_tomato
+  1: crop_chili
+  2: crop_flower
+  3: weed_grass
+  4: weed_dandelion
+  5: weed_purslane
+  6: weed_amaranth
+  7: weed_other

@@ -1,6 +1,6 @@
-# Model Training Configuration
+# Model Training & Raspberry Pi 4 Deployment Configuration
 
-# Classes
+# Classes (matching configs/weed_data.yaml)
 classes:
   - crop_tomato
   - crop_chili
@@ -13,36 +13,40 @@ classes:
 
 num_classes: 8
 
-# EfficientNet Config
+# Primary Real-Time Detector (YOLO26 -> NCNN on Pi 4)
+yolo:
+  primary_model: "yolo26s.pt"       # Primary candidate (best accuracy/speed balance)
+  fallback_model: "yolo26n.pt"      # Fallback if YOLO26s is too slow/hot on Pi 4
+  experiment_model: "yolo26m.pt"    # Optional PC-only high-capacity experiment
+  deployed_model: "models/weed_detector_ncnn_model"  # Exported NCNN directory for Pi 4
+  fallback_weights:
+    - "models/yolo_weeds.pt"
+    - "../weed_detection_bot/yolo_models/best.onnx"
+    - "../weed_detection_bot/yolo_models/best.pt"
+  input_size: 640
+  conf_threshold: 0.30
+  batch_size: -1                    # Auto-batch on GPU during training
+  epochs: 200
+  patience: 40
+  augment: true
+  export_format: "ncnn"
+  half: true
+
+# Optional Offline Research Tools (disabled in real-time Pi 4 deployment)
 efficientnet:
+  enabled: false
   backbone: "efficientnet_b0"
   input_size: 224
-  batch_size: 32
-  epochs: 50
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  pretrained: true
-  early_stopping_patience: 10
 
-# YOLOv8 Config
-yolo:
-  model: "yolov8n.pt"  # nano — fastest on Pi
-  input_size: 640
-  batch_size: 16
-  epochs: 100
-  learning_rate: 0.01
-  augment: true
-  export_format: "ncnn"  # for Raspberry Pi deployment
-
-# DINOv2 Config
 dinov2:
+  enabled: false
   model: "facebook/dinov2-small"
   input_size: 518
   feature_dim: 384
-  frozen: true  # don't train the backbone
+  frozen: true
 
-# CLIP Config
 clip:
+  enabled: false
   model: "ViT-B/32"
   input_size: 224
   text_prompts:
