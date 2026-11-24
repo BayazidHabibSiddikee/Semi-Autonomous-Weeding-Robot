@@ -1,4 +1,4 @@
-# Small rover: Raspberry Pi 4 + MaixSense-A075V + paired L298N
+# Small rover: Raspberry Pi 4 + MaixSense-A075V + ONE L298N dual H-bridge
 # SAFE DEFAULT: backend=sim and treatment dry_run=true. Do not arm treatment.
 
 maixsense:
