@@ -70,7 +70,10 @@ def autonomous_worker() -> None:
             with lock:
                 state["fault"] = str(exc)
                 state["mode"] = "manual"
-            motor.stop()
+            try:
+                motor.stop()
+            except Exception:
+                pass
             break
         time.sleep(0.05)
 
@@ -80,7 +83,13 @@ def watchdog() -> None:
         with lock:
             if state["mode"] == "manual" and motor.is_moving:
                 if time.monotonic() - state["last_command"] > 0.45:
-                    motor.stop()
+                    try:
+                        motor.stop()
+                    except Exception as exc:
+                        with lock:
+                            state["fault"] = f"ESP32 watchdog STOP failed: {exc}"
+                            state["esp32_serial_open"] = False
+                            state["mode"] = "manual"
 
 def sensor_worker() -> None:
     # Keep MaixSense telemetry fresh even while the operator is driving manually.
