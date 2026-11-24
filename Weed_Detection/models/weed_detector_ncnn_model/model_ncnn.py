@@ -8,8 +8,8 @@ def test_inference():
     out = []
 
     with ncnn.Net() as net:
-        net.load_param("../weed_detection_bot/yolo_models/best_ncnn_model/model.ncnn.param")
-        net.load_model("../weed_detection_bot/yolo_models/best_ncnn_model/model.ncnn.bin")
+        net.load_param("/kaggle/working/runs/yolo26n/weights/best_ncnn_model/model.ncnn.param")
+        net.load_model("/kaggle/working/runs/yolo26n/weights/best_ncnn_model/model.ncnn.bin")
 
         with net.create_extractor() as ex:
             ex.input("in0", ncnn.Mat(in0.squeeze(0).numpy()).clone())

@@ -1,6 +1,6 @@
-description: Ultralytics best model trained on c:\Users\Shadow\OneDrive\Uni work\OU\T885 - Team Engineering\Vision\datasets\yolo_cropandweed\dataset.yaml
+description: Ultralytics YOLO26n model trained on /kaggle/working/dataset/weed_data.yaml
 author: Ultralytics
-date: "2026-11-24T23:33:45.854736+06:00"
+date: "2026-11-24T19:41:29.505547+00:00"
 version: "8.4.218"
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
@@ -12,15 +12,8 @@ imgsz:
 - 640
 - 640
 names:
-  0: Maize
-  1: Sugar beet
-  2: Soy
-  3: Sunflower
-  4: Potato
-  5: Pea
-  6: Bean
-  7: Pumpkin
-  8: Weed
+  0: crop
+  1: weed
 args:
   quantize: 16
 channels: 3
