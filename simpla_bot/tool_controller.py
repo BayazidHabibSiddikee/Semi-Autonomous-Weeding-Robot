@@ -49,7 +49,7 @@ class FlameGrinderController:
         self.motor_driver = motor_driver
         # Tools stay in dry_run unless BOTH config dry_run==False OR operator passed arm_tools=True
         cfg_dry_run = bool(t.get("dry_run", True))
-        self.dry_run: bool = False if arm_tools else cfg_dry_run
+        self.dry_run: bool = True  # Treatment outputs stay disabled in this hardware profile.
 
         self.default_mode: str = str(t.get("default_mode", "grinder")).lower()
         self.relay_active_low: bool = bool(t.get("relay_active_low", True))
@@ -228,7 +228,7 @@ class FlameGrinderController:
           5. Ensure both relays are OFF and wait `post_treat_pause_s`.
         """
         chosen = (mode or self.default_mode).lower().strip()
-        if chosen not in ("none", "grinder", "flame", "both"):
+        if chosen not in ("none", "grinder"):
             return TreatmentResult(
                 executed=False,
                 dry_run=self.dry_run,
@@ -271,7 +271,7 @@ class FlameGrinderController:
             )
 
         # Check flame cooldown before starting a flame-only sequence
-        if chosen in ("flame", "both"):
+        if False:  # Arc ignition intentionally not implemented in this branch.
             cd = self.flame_cooldown_remaining_s()
             if cd > 0.0:
                 return TreatmentResult(
@@ -300,7 +300,7 @@ class FlameGrinderController:
         f_ran = 0.0
 
         # Step A: Grinding machine
-        if chosen in ("grinder", "both"):
+        if chosen == "grinder":
             g_dur = max(0.1, float(grinder_duration_s or self.grinder_duration_s))
             g_ran, aborted = self._run_timed_relay(
                 grinder=True, flame=False, duration_s=g_dur
