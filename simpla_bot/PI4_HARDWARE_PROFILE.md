@@ -12,19 +12,34 @@ This profile is for the actual small rover, not the older ROS/SLAM design.
   ground and establish a common signal reference with the Pi as required.
 - Keep arc/ignition and grinder power stages separate from Pi and servo control.
 
-## Existing L298N GPIO mapping (BCM numbering)
-| L298N | Pi BCM |
-|---|---:|
-| ENA | 12 |
-| IN1 | 5 |
-| IN2 | 6 |
-| ENB | 13 |
-| IN3 | 20 |
-| IN4 | 21 |
+## ESP32 motor controller (USB from Pi)
 
-Remove ENA/ENB jumpers only if using Pi PWM on those enable inputs. Verify
-jumper arrangement and logic compatibility before wiring. All four motors on
-a side receive the same direction and PWM; there is no independent wheel control.
+The Pi does not drive the L298N GPIO pins. The Pi sends serial commands over USB
+to the ESP32; the ESP32 generates the L298N direction/PWM signals.
+
+The example firmware `firmware/esp32_motor_controller.ino` uses these ESP32 GPIOs:
+
+| L298N / signal | ESP32 GPIO |
+|---|---:|
+| ENA | 27 |
+| IN1 | 25 |
+| IN2 | 26 |
+| ENB | 14 |
+| IN3 | 32 |
+| IN4 | 33 |
+| E-stop sense | 4 |
+
+These are example assignments, not universal board pins. Verify your exact ESP32
+board, pin restrictions, and wiring before connecting the driver. Channel A drives
+both left motors in parallel; channel B drives both right motors in parallel.
+
+Connect ESP32 USB to a Pi USB host port. The Pi serial protocol is newline-terminated
+at 115200 baud: `M <left_pct> <right_pct>`, `STOP`, and `PING`. Identify the
+device with `ls -l /dev/serial/by-id/` and set `motor_driver.serial_port` in
+`config.yaml`. The hub selects the serial backend; the CLI default remains simulation.
+
+The ESP32 E-stop sense input is only a supplementary status/interlock input. A
+physical normally-closed E-stop must independently disconnect actuator power.
 
 ## MG996R controller protocol
 The Pi adapter in hardware/bottle_servo.py sends newline-terminated commands:
