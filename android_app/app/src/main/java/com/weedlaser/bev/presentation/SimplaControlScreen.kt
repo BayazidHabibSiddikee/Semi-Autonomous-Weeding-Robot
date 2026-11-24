@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -26,6 +27,7 @@ import java.util.concurrent.TimeUnit
 @Composable
 fun SimplaControlScreen() {
     var host by remember { mutableStateOf("10.42.0.1") }
+    var token by remember { mutableStateOf("") }
     var mode by remember { mutableStateOf("manual") }
     var connected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(JSONObject()) }
@@ -35,7 +37,7 @@ fun SimplaControlScreen() {
     val jsonType = "application/json".toMediaType()
 
     suspend fun request(path: String, body: JSONObject? = null): JSONObject = withContext(Dispatchers.IO) {
-        val builder = Request.Builder().url("http://$host:8080$path")
+        val builder = Request.Builder().url("http://$host:8080$path").header("Authorization", "Bearer $token")
         val req = if (body == null) builder.get().build() else builder.post(body.toString().toRequestBody(jsonType)).build()
         http.newCall(req).execute().use { response ->
             val raw = response.body?.string().orEmpty()
@@ -43,9 +45,10 @@ fun SimplaControlScreen() {
             JSONObject(raw)
         }
     }
-    LaunchedEffect(host) {
+    LaunchedEffect(host, token) {
         while (true) {
-            runCatching { request("/api/status") }
+            if (token.isBlank()) { connected = false; error = "Enter the API token printed when the Pi hub starts." }
+            else runCatching { request("/api/status") }
                 .onSuccess { status = it; connected = true; mode = it.optString("mode", mode); error = null }
                 .onFailure { connected = false; error = it.message }
             delay(700)
@@ -72,20 +75,21 @@ fun SimplaControlScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(if (connected) "Pi connected · ESP32 ${if (status.optBoolean("esp32_serial_open")) "USB port open" else "USB port closed"}" else "Pi offline", color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Text(if (connected) "Pi connected · ESP32 ${if (status.optBoolean("esp32_online")) "healthy" else "not responding / E-stop open"}" else "Pi offline / token required", color = if (connected && status.optBoolean("esp32_online")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             AssistChip(onClick = { scope.launch { runCatching { request("/api/status") }.onSuccess { status=it; connected=true }.onFailure { error=it.message } } }, label = { Text("Refresh") })
         }
         OutlinedTextField(value = host, onValueChange = { host = it.trim() }, label = { Text("Pi hotspot IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = token, onValueChange = { token = it.trim() }, label = { Text("Pi API token") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { setMode("manual") }, enabled = connected && mode != "manual", modifier = Modifier.weight(1f)) { Text("MANUAL") }
-            Button(onClick = { setMode("autonomous") }, enabled = connected && mode != "autonomous", modifier = Modifier.weight(1f)) { Text("AUTONOMOUS") }
+            Button(onClick = { setMode("manual") }, enabled = connected && status.optBoolean("esp32_online") && mode != "manual", modifier = Modifier.weight(1f)) { Text("MANUAL") }
+            Button(onClick = { setMode("autonomous") }, enabled = connected && status.optBoolean("esp32_online") && status.optBoolean("camera_online") && mode != "autonomous", modifier = Modifier.weight(1f)) { Text("AUTONOMOUS") }
         }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Robot status", fontWeight = FontWeight.Bold)
                 Text("Mode: ${mode.uppercase()}  ·  Moving: ${status.optBoolean("moving")}")
-                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Stale / waiting"}  ·  ESP32 USB: ${if (status.optBoolean("esp32_serial_open")) "port open" else "port closed"}")
+                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Stale / waiting"}  ·  ESP32: ${if (status.optBoolean("esp32_online")) "heartbeat OK" else "not healthy"}")
                 val d = status.optJSONObject("distances_mm")
                 Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
                 Text("Corner: ${status.optString("corner", "--")}  ·  Weed: ${status.optBoolean("weed_detected")}")
@@ -97,13 +101,13 @@ fun SimplaControlScreen() {
         }
         Text("Manual drive · hold a direction", fontWeight = FontWeight.SemiBold)
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-            DriveHoldButton("▲", 28, 28, mode, connected, ::drive, ::stop)
+            DriveHoldButton("▲", 28, 28, mode, connected && status.optBoolean("esp32_online"), ::drive, ::stop)
             Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
-                DriveHoldButton("◀", -22, 22, mode, connected, ::drive, ::stop)
+                DriveHoldButton("◀", -22, 22, mode, connected && status.optBoolean("esp32_online"), ::drive, ::stop)
                 OutlinedButton(onClick = ::stop, modifier = Modifier.size(88.dp), shape = RoundedCornerShape(18.dp)) { Text("STOP", fontWeight = FontWeight.Bold) }
-                DriveHoldButton("▶", 22, -22, mode, connected, ::drive, ::stop)
+                DriveHoldButton("▶", 22, -22, mode, connected && status.optBoolean("esp32_online"), ::drive, ::stop)
             }
-            DriveHoldButton("▼", -28, -28, mode, connected, ::drive, ::stop)
+            DriveHoldButton("▼", -28, -28, mode, connected && status.optBoolean("esp32_online"), ::drive, ::stop)
         }
         Button(onClick = ::stop, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), modifier = Modifier.fillMaxWidth().height(52.dp)) {
             Icon(Icons.Default.Warning, contentDescription = null)
