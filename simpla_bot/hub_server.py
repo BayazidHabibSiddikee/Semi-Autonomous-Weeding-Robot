@@ -19,7 +19,7 @@ cfg["tools"]["dry_run"] = True
 cfg["tools"]["default_mode"] = "none"
 controller, motor, tools = create_live_controller(cfg, tool_mode="none", arm_tools=False)
 state: dict[str, Any] = {
-    "mode": "manual", "camera_online": False, "esp32_online": motor._serial is not None,
+    "mode": "manual", "camera_online": False, "esp32_serial_open": motor._serial is not None,
     "last_camera_frame": 0.0, "last_command": 0.0, "fault": None, "version": "pi4-usb-hub-1",
 }
 lock = threading.RLock()
@@ -135,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = dict(state)
             payload.update({
                 "mode": state["mode"],
-                "esp32_online": motor._serial is not None,
+                "esp32_serial_open": motor._serial is not None,
                 "moving": motor.is_moving,
                 "heading_deg": motor.heading_deg,
                 "distance_mm": motor.total_distance_mm,
