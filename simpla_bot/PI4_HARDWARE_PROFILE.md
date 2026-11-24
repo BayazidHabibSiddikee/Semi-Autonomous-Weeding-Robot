@@ -65,7 +65,7 @@ driver; do not attempt to solve an electrical overload with software PWM.
 ## Bring-up order
 1. Identify motor rated voltage, stall current, and battery voltage.
 2. Test MaixSense alone and record depth/RGB validity.
-3. Test one L298N channel with wheels lifted and current-limited motor supply.
+3. Test ESP32 USB serial first with motor power disconnected; then test one L298N channel with wheels lifted and a current-limited motor supply.
 4. Test the second channel; confirm both motors per side turn together.
 5. Test MG996R with its own supply and servo MCU, bottle removed.
 6. Verify a physical normally-closed emergency stop cuts actuator energy
