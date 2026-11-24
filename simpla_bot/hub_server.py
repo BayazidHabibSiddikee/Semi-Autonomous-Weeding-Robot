@@ -3,11 +3,13 @@
 from __future__ import annotations
 import json, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from simpla_bot.config_util import load_config
-from simpla_bot.maixsense_perception import MaixSenseClient
 from simpla_bot.simpla_bot_controller import create_live_controller
 
 HOST, PORT = "0.0.0.0", 8080
@@ -16,10 +18,9 @@ cfg.setdefault("motor_driver", {})["backend"] = "serial"
 cfg["tools"]["dry_run"] = True
 cfg["tools"]["default_mode"] = "none"
 controller, motor, tools = create_live_controller(cfg, tool_mode="none", arm_tools=False)
-camera = controller.frame_provider.__self__ if hasattr(controller.frame_provider, "__self__") else None
 state: dict[str, Any] = {
     "mode": "manual", "camera_online": False, "esp32_online": motor._serial is not None,
-    "last_camera_frame": 0.0, "last_command": 0.0, "fault": None,
+    "last_camera_frame": 0.0, "last_command": 0.0, "fault": None, "version": "pi4-usb-hub-1",
 }
 lock = threading.RLock()
 auto_stop = threading.Event()
@@ -68,7 +69,36 @@ def watchdog() -> None:
                 if time.monotonic() - state["last_command"] > 0.45:
                     motor.stop()
 
+def sensor_worker() -> None:
+    # Keep MaixSense telemetry fresh even while the operator is driving manually.
+    while True:
+        with lock:
+            manual = state["mode"] == "manual"
+        if manual:
+            try:
+                frame = controller.frame_provider()
+                if frame is not None:
+                    decision = controller.analyzer.analyze(frame)
+                    with lock:
+                        state["camera_online"] = True
+                        state["last_camera_frame"] = time.time()
+                        state["distances_mm"] = {
+                            "left": decision.left_mm, "center": decision.center_mm,
+                            "right": decision.right_mm
+                        }
+                        state["corner"] = decision.corner_type
+                        state["weed_detected"] = decision.weed is not None
+                else:
+                    with lock:
+                        state["camera_online"] = False
+            except Exception as exc:
+                with lock:
+                    state["camera_online"] = False
+                    state["camera_error"] = str(exc)
+        time.sleep(0.4)
+
 threading.Thread(target=watchdog, daemon=True).start()
+threading.Thread(target=sensor_worker, daemon=True).start()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_: Any) -> None:
@@ -102,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                 "heading_deg": motor.heading_deg,
                 "distance_mm": motor.total_distance_mm,
                 "tools_dry_run": True,
+                "last_camera_frame_age_s": (round(time.time() - state["last_camera_frame"], 2) if state["last_camera_frame"] else None),
             })
         self.send_json(200, payload)
     def do_POST(self) -> None:
