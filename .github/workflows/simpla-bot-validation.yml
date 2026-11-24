@@ -39,4 +39,4 @@ jobs:
           gradle-version: "8.7"
       - name: Compile Android debug Kotlin sources (does not package an APK)
         working-directory: android_app
-        run: gradle :app:compileDebugKotlin
+        run: ./gradlew :app:compileDebugKotlin
