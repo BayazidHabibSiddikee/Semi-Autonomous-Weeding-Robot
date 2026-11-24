@@ -5,7 +5,7 @@ Supports three clean backends with zero external framework dependencies:
   1. "sim"    - Safe bench simulator tracking virtual distance & heading.
   2. "gpio"   - Direct Raspberry Pi GPIO PWM + DIR for L298N or BTS7960 H-bridges.
   3. "serial" - Simple USB-serial ASCII commands to Arduino/ESP32 running
-                simpla_bot/firmware/simpla_motor_relay.ino.
+                simpla_bot/firmware/esp32_motor_controller.ino.
 
 All movement commands track whether the rover is currently moving (`is_moving`)
 so the flame/grinder controller can enforce a strict stationary safety interlock.
