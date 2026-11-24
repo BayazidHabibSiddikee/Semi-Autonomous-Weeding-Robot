@@ -5,8 +5,8 @@ maixsense:
   host: "192.168.233.1"
   port: 80
   timeout_s: 1.5
-  depth_width: 160
-  depth_height: 120
+  depth_width: 320
+  depth_height: 240
   min_valid_mm: 180
   max_valid_mm: 2400
   max_frame_age_s: 1.0
