@@ -4,102 +4,83 @@ tags:
 - agriculture
 - weed-detection
 - yolo
+- yolo26
 - yolov8
+- ncnn
 - onnx
+- raspberry-pi
 - robotics
 - ros2
 - depth-camera
 - autonomous-rover
 datasets:
-- agricultural-crops-and-weeds
+- vinayakshanawad/weedcrop-image-dataset
+- ravirajsinh45/crop-and-weed-detection-data-with-bounding-boxes
 metrics:
+- mAP50
+- mAP50-95
+- precision
+- recall
 - latency
 - fps
-- precision
 ---
 
-# Semi-Autonomous Weeding Robot Models & Edge Benchmark
+# Semi-Autonomous Weeding Robot Models & Edge Benchmarks
 
-Official model weights and edge-optimized runtimes for the **Semi-Autonomous 8-Direction Weeding Rover** equipped with the **Sipeed MaixSense-A075V 3D ToF Depth Camera** and **MG996R cylinder turret toolhead** (mechanical grinder & flame weeder).
+Official trained weights, NCNN/ONNX edge exports, and benchmarks for the **Semi-Autonomous 8-Direction Weeding Rover** (Raspberry Pi 4 + Sipeed MaixSense-A075V 3D ToF Depth Camera + ESP32 motor/turret controller).
 
-Project Repository: [GitHub - Semi-Autonomous-Weeding-Robot](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot)
-
----
-
-## Model Artifacts & Latency Comparison
-
-| File | Framework | Input Dim | Classes | Size | CPU Latency | Real-time FPS | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`best.onnx`** | ONNX Runtime | 256x320 | 9 Classes | 21.6 MB | **52.4 ms** | **19.1 FPS** | **Edge Deployment Ready** |
-| **`best.pt`** | PyTorch YOLOv8s | 640x640 | 9 Classes | 21.5 MB | 1209.3 ms | 0.8 FPS | Training / Export Only |
-| **`smartweeder_best.pt`** | PyTorch YOLOv8n | 640x640 | 2 Classes | 5.9 MB | 375.0 ms | 2.7 FPS | Baseline Reference |
-| **`DINOv2 (ViT-S/14)`** | PyTorch ViT | 518x518 | Feature Extractor | 88.2 MB | 202.6 ms/patch | 4.9 FPS | Legacy Pipeline |
+- **GitHub Repository (`design` branch)**: [BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/tree/design)
+- **Kaggle Training Kernel**: [bayazidhs/weed-detector-yolo26-pi4-ncnn-training](https://www.kaggle.com/code/bayazidhs/weed-detector-yolo26-pi4-ncnn-training)
 
 ---
 
-## Classes Supported
+## 1. Kaggle-Trained YOLO26 Models (`yolo26_kaggle_trained/`)
 
-### `best.onnx` & `best.pt` (9 Agricultural Classes)
-1. `0: Maize`
-2. `1: Sugar beet`
-3. `2: Soy`
-4. `3: Sunflower`
-5. `4: Potato`
-6. `5: Pea`
-7. `6: Bean`
-8. `7: Pumpkin`
-9. `8: Weed` *(Target for weed elimination)*
+Trained on a unified, deduplicated **4,020-image** bounding-box dataset (`train: 3,407` · `val: 365` · `test: 248`) with 2 classes:
+- `0: crop`
+- `1: weed`
 
-### `smartweeder_best.pt` (2 Classes)
-1. `0: Crop`
-2. `1: Weed`
+### Unseen Test Set Accuracy (`imgsz=640`)
 
----
+| Model | Precision | Recall | mAP50 | mAP50-95 | Crop mAP50 | Weed Recall | Weed mAP50 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`yolo26n`** *(Pi 4 provisional default)* | 0.7163 | 0.7829 | 0.8049 | **0.4790** | 0.8364 | **0.7459** | **0.7734** |
+| **`yolo26s`** *(higher precision)* | **0.7568** | **0.7958** | **0.8244** | 0.4705 | **0.8791** | 0.7384 | 0.7698 |
 
-## Why DINOv2 Was Replaced by the Unified ONNX Engine
+### Apples-to-Apples Runtime Benchmark (`640×640`, `conf=0.30`, same test images on x86_64 CPU)
 
-In early experimental pipeline designs (e.g. RIPRA), a 4-stage model cascade was proposed:
-YOLOv8 -> EfficientNet -> DINOv2 -> CLIP
+| Artifact | Runtime | Mean (ms) | Median (ms) | P95 (ms) | FPS | Avg Detections |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| `yolo26n_best.onnx` | ONNX Runtime | **84.5** | **76.8** | **114.9** | **11.83** | 5.73 |
+| `weed_detector_ncnn_model/` (`yolo26n`) | NCNN (FP16) | 255.6 | 245.5 | 296.7 | 3.91 | 5.73 |
+| `yolo26s_best.onnx` | ONNX Runtime | 229.1 | 220.0 | 273.9 | 4.37 | 6.80 |
+| `yolo26s_ncnn_model/` (`yolo26s`) | NCNN (FP16) | 593.5 | 643.5 | 702.2 | 1.69 | 6.27 |
 
-### Key Architectural Takeaways:
-1. **DINOv2 Latency Bottleneck**:
-   - DINOv2 (`facebook/dinov2-small`, ViT-S/14) requires 518x518 input resolution and takes **202.6 ms per single image patch** on CPU.
-   - If a frame has 5 weed candidates, running DINOv2 on each candidate takes 5 x 202.6 ms = **1,013 ms (over 1.0 second delay)**.
-2. **Missing Bounding Boxes**: DINOv2 is strictly a feature extractor (384-dimensional embedding vector); it cannot predict bounding boxes or pixel locations by itself.
-3. **The Unified Engine Solution**:
-   - By fusing YOLOv8 detection with direct 3D ToF pinhole ground projection and vectorized depth elevation slicing, our unified engine accomplishes **detection + 3D stem (X, Y, Z) localization + furrow steering + corner detection in 41-52 ms total**.
+> **Why `yolo26n` is the provisional Pi 4 default:** It achieves higher weed recall (`0.7459` vs `0.7384`) and `mAP50-95` (`0.4790` vs `0.4705`) than `yolo26s` while running ~2.3–2.7× faster. Both NCNN (ARM NEON) and ONNX should be benchmarked directly on the target Raspberry Pi 4.
 
 ---
 
-## Quickstart Inference (Python & ONNX Runtime)
+## 2. Legacy / Multi-Class Reference Weights (Root Directory)
+
+| File | Architecture | Input Dim | Classes |
+| :--- | :--- | :--- | :--- |
+| `best.onnx` | YOLOv8s ONNX | 256×320 | 9 Agricultural Classes (`Maize`, `Sugar beet`, `Soy`, `Sunflower`, `Potato`, `Pea`, `Bean`, `Pumpkin`, `Weed`) |
+| `best.pt` | PyTorch YOLOv8s | 640×640 | 9 Agricultural Classes |
+| `smartweeder_best.pt` | PyTorch YOLOv8n | 640×640 | 2 Classes (`crop`, `weed`) |
+
+---
+
+## 3. Quickstart Inference (`Weed_Detection`)
 
 ```python
-import cv2
-import numpy as np
-import onnxruntime as ort
+from ultralytics import YOLO
 
-# Load model
-session = ort.InferenceSession("best.onnx", providers=['CPUExecutionProvider'])
-input_name = session.get_inputs()[0].name
+# Load YOLO26n NCNN (or yolo26n_best.onnx)
+model = YOLO("yolo26_kaggle_trained/weed_detector_ncnn_model", task="detect")
+results = model("field_sample.jpg", imgsz=640, conf=0.30)
 
-# Preprocess image (256x320, RGB, normalized)
-img = cv2.imread("field_sample.jpg")
-blob = cv2.resize(img, (320, 256)).transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32) / 255.0
-
-# Run sub-55ms forward pass
-outputs = session.run(None, {input_name: blob})[0]
-print(f"Output shape: {outputs.shape}")
+for box in results[0].boxes:
+    cls_name = results[0].names[int(box.cls)]
+    conf = float(box.conf)
+    print(cls_name, conf, box.xyxy[0].tolist())
 ```
-
----
-
-## 3D Stem Localization with Depth
-
-Given the 3D ToF depth value `d` (in mm) at the bottom center `(u, v)` of the bounding box and camera pitch 30 deg downward tilt, height 200 mm:
-
-- X_ground = ((u - cx) * d) / fx
-- Y_forward = d * cos(pitch) - (((v - cy) * d) / fy) * sin(pitch)
-- Z_height = height - (d * sin(pitch) + (((v - cy) * d) / fy) * cos(pitch))
-
-This directly feeds the ESP32 turret yaw servo:
-- Turret_Yaw_deg = arctan(X_ground / Y_forward) [-35 deg to +35 deg]
