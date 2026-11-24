@@ -92,7 +92,7 @@ class SpatialDecision:
 
 def build_set_cfg_payload(
     trigger_mode: int = 1,
-    deep_mode: int = 1,
+    deep_mode: int = 0,
     deep_shift: int = 255,
     ir_mode: int = 0,
     status_mode: int = 2,
@@ -102,8 +102,8 @@ def build_set_cfg_payload(
     expose_time: int = 0,
 ) -> bytes:
     """
-    Build the 12-byte binary configuration packet for Sipeed MaixSense-A075V /set_cfg.
-    Defaults: continuous trigger, 16-bit depth map (mm), RGB JPEG enabled.
+    Build Sipeed's 12-byte /set_cfg structure.
+    deep_mode=0 selects 16-bit depth values in millimetres; rgb_mode=1 selects JPEG.
     """
     return struct.pack(
         "<BBBBBBBBi",
@@ -119,56 +119,82 @@ def build_set_cfg_payload(
     )
 
 
+def _status_bytes_per_pixel(status_mode: int) -> float:
+    # Sipeed status modes: 0=16-bit, 1=2-bit, 2=8-bit, 3=1-bit.
+    mapping = {0: 2.0, 1: 0.25, 2: 1.0, 3: 0.125}
+    if status_mode not in mapping:
+        raise ValueError(f"Unsupported MaixSense status_mode: {status_mode}")
+    return mapping[status_mode]
+
+
 def build_synthetic_getdeep_packet(
     depth_mm: Sequence[int],
-    width: int = 160,
-    height: int = 120,
+    width: int = 320,
+    height: int = 240,
     rgb_jpeg: bytes = b"",
     frame_id: int = 1,
     stamp_msec: int = 1000,
 ) -> bytes:
-    """Build a spec-compliant /getdeep binary packet (useful for tests & simulation)."""
+    """Build a packet using Sipeed's documented 36-byte header and payload layout."""
     if len(depth_mm) != width * height:
         raise ValueError(f"Expected {width * height} depth values, got {len(depth_mm)}")
-    depth_bytes = struct.pack(f"<{len(depth_mm)}H", *(max(0, min(65535, int(v))) for v in depth_mm))
+    depth_bytes = struct.pack(
+        f"<{len(depth_mm)}H",
+        *(max(0, min(65535, int(v))) for v in depth_mm),
+    )
+    # The default config is 16-bit depth + 16-bit IR + 8-bit status.
+    ir_bytes = bytes(width * height * 2)
+    status_bytes = bytes(width * height)
+    deep_payload = depth_bytes + ir_bytes + status_bytes
     frame_cfg = build_set_cfg_payload()
     header = struct.pack("<QQ", frame_id, stamp_msec) + frame_cfg + struct.pack(
-        "<iiii", len(depth_bytes), len(rgb_jpeg), 0, 0
+        "<ii", len(deep_payload), len(rgb_jpeg)
     )
-    return header + depth_bytes + rgb_jpeg
+    return header + deep_payload + rgb_jpeg
 
 
 def parse_getdeep_packet(
     raw: bytes,
-    default_width: int = 160,
-    default_height: int = 120,
+    default_width: int = 320,
+    default_height: int = 240,
 ) -> MaixSenseFrame:
     """
-    Decode a raw Sipeed MaixSense-A075V /getdeep response.
+    Decode the documented Sipeed MaixSense-A075V /getdeep packet.
 
-    Wire layout:
-      [0:16]   <QQ   frame_id, stamp_msec
-      [16:28]  12B   frame_config
-      [28:44]  <iiii deep_size, rgb_size, ir_size, status_size
-      [44:..]  depth_bytes (uint16 mm) + rgb_jpeg (FF D8 .. FF D9)
+    Layout: 16-byte frame ID/timestamp + 12-byte config + two int32 sizes
+    (36-byte header), then depth + IR + status (deep_size bytes), then RGB.
+    The depth/IR/status component sizes are derived from the 12-byte config.
     """
-    if len(raw) < 44:
-        raise ValueError(f"MaixSense packet too short: {len(raw)} bytes (need >= 44)")
-
-    frame_id, stamp_msec = struct.unpack_from("<QQ", raw, 0)
-    deep_size, rgb_size, _ir_size, _status_size = struct.unpack_from("<iiii", raw, 28)
-
-    depth_start = 44
-    depth_end = depth_start + max(0, deep_size)
-    if depth_end > len(raw):
+    header_size = 36
+    if len(raw) < header_size:
         raise ValueError(
-            f"Truncated depth payload: expected {depth_end} bytes, got {len(raw)}"
+            f"MaixSense packet too short: {len(raw)} bytes (need >= {header_size})"
         )
 
-    depth_bytes = raw[depth_start:depth_end]
-    pixel_count = len(depth_bytes) // 2
+    frame_id, stamp_msec = struct.unpack_from("<QQ", raw, 0)
+    config = struct.unpack_from("<BBBBBBBBi", raw, 16)
+    _trigger_mode, deep_mode, _deep_shift, ir_mode, status_mode = config[:5]
+    deep_size, rgb_size = struct.unpack_from("<ii", raw, 28)
+    if deep_size < 0 or rgb_size < 0:
+        raise ValueError("MaixSense packet contains negative payload size")
 
-    # Infer common MaixSense resolutions automatically from payload size
+    deep_start = header_size
+    deep_end = deep_start + deep_size
+    rgb_end = deep_end + rgb_size
+    if deep_end > len(raw) or rgb_end > len(raw):
+        raise ValueError(
+            f"Truncated MaixSense payload: expected {rgb_end} bytes, got {len(raw)}"
+        )
+
+    depth_bpp = 2 if deep_mode == 0 else 1
+    ir_bpp = 2 if ir_mode == 0 else 1
+    status_bpp = _status_bytes_per_pixel(status_mode)
+    total_bpp = depth_bpp + ir_bpp + status_bpp
+    pixel_count_float = deep_size / total_bpp
+    pixel_count = int(round(pixel_count_float))
+    if abs(pixel_count_float - pixel_count) > 1e-6:
+        raise ValueError("MaixSense deep_size is inconsistent with its frame config")
+
     if pixel_count == default_width * default_height:
         width, height = default_width, default_height
     elif pixel_count == 320 * 240:
@@ -177,25 +203,35 @@ def parse_getdeep_packet(
         width, height = 160, 120
     elif pixel_count == 100 * 100:
         width, height = 100, 100
-    elif pixel_count > 0:
+    else:
         side = int(math.isqrt(pixel_count))
         if side * side == pixel_count:
             width, height = side, side
+        elif default_width > 0 and pixel_count % default_width == 0:
+            width, height = default_width, pixel_count // default_width
         else:
-            width, height = default_width, max(1, pixel_count // max(1, default_width))
-    else:
-        width, height = default_width, default_height
+            raise ValueError(f"Cannot infer MaixSense frame dimensions from {pixel_count} pixels")
 
-    usable_pixels = width * height
-    depth_mm = list(struct.unpack_from(f"<{usable_pixels}H", depth_bytes, 0)) if usable_pixels else []
+    pixel_count = width * height
+    depth_size = pixel_count * depth_bpp
+    ir_size = pixel_count * ir_bpp
+    status_multiplier = {0: 16, 1: 2, 2: 8, 3: 1}[status_mode]
+    status_size = (pixel_count // 8) * status_multiplier
+    if depth_size + ir_size + status_size != deep_size:
+        raise ValueError("MaixSense payload sizes do not match config-derived depth/IR/status sizes")
+
+    depth_payload = raw[deep_start : deep_start + depth_size]
+    if deep_mode == 0:
+        depth_mm = list(struct.unpack(f"<{pixel_count}H", depth_payload))
+    else:
+        depth_mm = list(depth_payload)
 
     rgb_jpeg = b""
-    rgb_start = depth_end
-    if rgb_size > 0 and rgb_start + rgb_size <= len(raw):
-        rgb_chunk = raw[rgb_start : rgb_start + rgb_size]
-        soi = rgb_chunk.find(b"\xff\xd8")
-        eoi = rgb_chunk.rfind(b"\xff\xd9")
-        if soi != -1 and eoi != -1 and eoi > soi:
+    if rgb_size:
+        rgb_chunk = raw[deep_end:rgb_end]
+        soi = rgb_chunk.find(b"\\xff\\xd8")
+        eoi = rgb_chunk.rfind(b"\\xff\\xd9")
+        if soi != -1 and eoi > soi:
             rgb_jpeg = rgb_chunk[soi : eoi + 2]
         else:
             rgb_jpeg = rgb_chunk
