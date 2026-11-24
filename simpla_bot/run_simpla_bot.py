@@ -13,7 +13,7 @@ Examples:
   python3 -m simpla_bot.run_simpla_bot --mode live --tool grinder
 
   # 4. Live field operation with tools ARMED (physical E-Stop required!):
-  python3 -m simpla_bot.run_simpla_bot --mode live --tool none --arm-tools
+  python3 -m simpla_bot.run_simpla_bot --mode live --tool none
 
   # 5. Calibrate straight distance (drives 1000mm so you can measure with a tape):
   python3 -m simpla_bot.run_simpla_bot --calibrate-drive 1000
@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Live hardware mode
     ctrl, motor, tools = create_live_controller(
-        cfg, tool_mode=args.tool, arm_tools=args.arm_tools
+        cfg, tool_mode=args.tool, arm_tools=False
     )
     print(
         f"[Simpla Bot] LIVE MODE | backend={motor.backend} | "
