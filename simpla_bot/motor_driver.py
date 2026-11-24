@@ -154,7 +154,7 @@ class NormalMotorDriver:
         try:
             with self._serial_lock:
                 self._serial.reset_input_buffer()
-                self._serial.write(b"PING\\n")
+                self._serial.write(b"PING\n")
                 self._serial.flush()
                 reply = self._serial.readline().decode("ascii", errors="ignore").strip()
             return reply.startswith("PONG ") and "ESTOP=0" in reply
