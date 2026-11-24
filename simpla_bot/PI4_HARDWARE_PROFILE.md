@@ -4,7 +4,7 @@ This profile is for the actual small rover, not the older ROS/SLAM design.
 
 ## Hardware topology
 - Raspberry Pi 4: MaixSense perception, navigation, high-level decisions.
-- MaixSense-A075V: USB connection to Pi (verify USB-RNDIS and firmware).
+- MaixSense-A075V: USB-RNDIS connection to Pi (verify its network interface, address, and firmware). The hub uses one dedicated camera reader and shares fresh frames with telemetry and autonomy.
 - One L298N: channel A drives two left motors in parallel; channel B drives two
   right motors in parallel. This is skid/differential steering.
 - A separate Arduino/ESP32-class controller drives the MG996R signal.
@@ -33,10 +33,14 @@ These are example assignments, not universal board pins. Verify your exact ESP32
 board, pin restrictions, and wiring before connecting the driver. Channel A drives
 both left motors in parallel; channel B drives both right motors in parallel.
 
-Connect ESP32 USB to a Pi USB host port. The Pi serial protocol is newline-terminated
-at 115200 baud: `M <left_pct> <right_pct>`, `STOP`, and `PING`. Identify the
-device with `ls -l /dev/serial/by-id/` and set `motor_driver.serial_port` in
-`config.yaml`. The hub selects the serial backend; the CLI default remains simulation.
+Remove the L298N ENA and ENB jumper caps so the ESP32 can supply PWM to both
+enable inputs. Tie ESP32 GND, L298N logic GND, and motor-supply negative together.
+Do not use the L298N 5V output to power the ESP32. Connect ESP32 USB to a Pi USB
+host port. The Pi serial protocol is newline-terminated at 115200 baud:
+`M <left_pct> <right_pct>`, `STOP`, and `PING`. PING checks firmware and E-stop
+status but does not refresh the motor movement watchdog. Identify the device with
+`ls -l /dev/serial/by-id/` and set `SIMPLA_ESP32_PORT` to its stable path.
+The hub selects the serial backend; the CLI default remains simulation.
 
 The ESP32 E-stop sense input is only a supplementary status/interlock input. A
 physical normally-closed E-stop must independently disconnect actuator power.
