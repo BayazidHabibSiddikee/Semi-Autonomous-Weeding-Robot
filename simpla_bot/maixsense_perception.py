@@ -229,8 +229,8 @@ def parse_getdeep_packet(
     rgb_jpeg = b""
     if rgb_size:
         rgb_chunk = raw[deep_end:rgb_end]
-        soi = rgb_chunk.find(b"\\xff\\xd8")
-        eoi = rgb_chunk.rfind(b"\\xff\\xd9")
+        soi = rgb_chunk.find(b"\xff\xd8")
+        eoi = rgb_chunk.rfind(b"\xff\xd9")
         if soi != -1 and eoi > soi:
             rgb_jpeg = rgb_chunk[soi : eoi + 2]
         else:
