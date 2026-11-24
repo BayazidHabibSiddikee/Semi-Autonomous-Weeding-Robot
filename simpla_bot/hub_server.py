@@ -24,6 +24,7 @@ state: dict[str, Any] = {
 }
 lock = threading.RLock()
 auto_stop = threading.Event()
+autonomous_thread: threading.Thread | None = None
 _original_estop_safe = tools.is_estop_safe
 tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set()
 
@@ -150,18 +151,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "mode":"manual"})
                 return
             if self.path == "/api/mode":
+                global autonomous_thread
                 mode = str(data.get("mode", ""))
                 if mode not in ("manual", "autonomous"):
                     self.send_json(400, {"error":"mode must be manual or autonomous"}); return
                 stop_all()
                 if mode == "autonomous":
+                    # Let any previous autonomous step observe the stop flag and exit
+                    # before starting another worker against the shared controller.
+                    previous = autonomous_thread
+                    if previous is not None and previous.is_alive():
+                        previous.join(timeout=2.5)
+                    if previous is not None and previous.is_alive():
+                        self.send_json(503, {"error":"previous autonomous loop is still stopping"})
+                        return
                     auto_stop.clear()
                     controller.stats = MissionStats(state="DRIVE_ROW")
                     controller._last_valid_frame_ts = time.monotonic()
                     with lock:
                         state["fault"] = None
                         state["mode"] = "autonomous"
-                    threading.Thread(target=autonomous_worker, daemon=True).start()
+                    autonomous_thread = threading.Thread(target=autonomous_worker, daemon=True)
+                    autonomous_thread.start()
                 self.send_json(200, {"ok":True, "mode":mode})
                 return
             if self.path == "/api/drive":
