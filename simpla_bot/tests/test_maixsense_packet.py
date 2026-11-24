@@ -41,7 +41,7 @@ class MaixSensePacketTests(unittest.TestCase):
 
     def test_rejects_truncated_depth_payload(self):
         packet = build_synthetic_getdeep_packet([500] * (8 * 8), 8, 8)
-        with self.assertRaisesRegex(ValueError, "Truncated depth payload"):
+        with self.assertRaisesRegex(ValueError, "Truncated MaixSense payload"):
             parse_getdeep_packet(packet[:60], 8, 8)
 
 
