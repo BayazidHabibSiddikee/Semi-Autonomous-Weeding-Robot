@@ -20,6 +20,21 @@ class MaixSensePacketTests(unittest.TestCase):
         self.assertEqual(frame.depth_height, height)
         self.assertEqual(frame.depth_mm, values)
 
+    def test_rgb_jpeg_is_read_after_depth_ir_and_status(self):
+        width, height = 8, 8
+        jpeg = b"\xff\xd8test-jpeg\xff\xd9"
+        packet = build_synthetic_getdeep_packet(
+            [750] * (width * height), width, height, rgb_jpeg=jpeg
+        )
+        frame = parse_getdeep_packet(packet, width, height)
+        self.assertEqual(frame.rgb_jpeg, jpeg)
+
+    def test_default_configuration_uses_16_bit_depth(self):
+        from simpla_bot.maixsense_perception import build_set_cfg_payload
+        config = build_set_cfg_payload()
+        self.assertEqual(len(config), 12)
+        self.assertEqual(config[1], 0)
+
     def test_rejects_short_header(self):
         with self.assertRaisesRegex(ValueError, "packet too short"):
             parse_getdeep_packet(b"short")
