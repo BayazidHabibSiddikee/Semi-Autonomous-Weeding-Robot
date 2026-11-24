@@ -162,7 +162,7 @@ def parse_getdeep_packet(
     depth_end = depth_start + max(0, deep_size)
     if depth_end > len(raw):
         raise ValueError(
-            f"Truncated depth payload: expected {deep_end} bytes, got {len(raw)}"
+            f"Truncated depth payload: expected {depth_end} bytes, got {len(raw)}"
         )
 
     depth_bytes = raw[depth_start:depth_end]
