@@ -13,12 +13,20 @@ class MaixSensePacketTests(unittest.TestCase):
         packet = build_synthetic_getdeep_packet(
             values, width=width, height=height, frame_id=42, stamp_msec=1234
         )
+        self.assertEqual(len(packet), 36 + (width * height * 5))
         frame = parse_getdeep_packet(packet, width, height)
         self.assertEqual(frame.frame_id, 42)
         self.assertEqual(frame.stamp_msec, 1234)
         self.assertEqual(frame.depth_width, width)
         self.assertEqual(frame.depth_height, height)
         self.assertEqual(frame.depth_mm, values)
+
+    def test_a075v_default_depth_geometry(self):
+        width, height = 320, 240
+        packet = build_synthetic_getdeep_packet([900] * (width * height))
+        frame = parse_getdeep_packet(packet)
+        self.assertEqual((frame.depth_width, frame.depth_height), (320, 240))
+        self.assertEqual(len(frame.depth_mm), 320 * 240)
 
     def test_rgb_jpeg_is_read_after_depth_ir_and_status(self):
         width, height = 8, 8
