@@ -32,7 +32,7 @@ navigation:
   max_steer_adjust_pct: 10
 
 motor_driver:
-  backend: "sim"  # GPIO only after motor voltage/current checks.
+  backend: "serial"  # Pi sends motor commands to ESP32 over USB serial.
   driver_type: "l298n"
   wiring: "two_left_parallel_two_right_parallel"
   motors_per_channel: 2
