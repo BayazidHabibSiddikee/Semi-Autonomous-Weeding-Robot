@@ -24,11 +24,15 @@ state: dict[str, Any] = {
 }
 lock = threading.RLock()
 auto_stop = threading.Event()
+_original_estop_safe = tools.is_estop_safe
+tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set()
 
 def stop_all() -> None:
+    # Signal the autonomous loop before issuing STOP. Its movement helpers check
+    # tools.is_estop_safe every 50 ms, so the stop request interrupts long moves.
     auto_stop.set()
+    motor.stop()
     with lock:
-        motor.stop()
         state["mode"] = "manual"
 
 def autonomous_worker() -> None:
@@ -37,10 +41,12 @@ def autonomous_worker() -> None:
         with lock:
             if state["mode"] != "autonomous":
                 break
-            try:
-                stats = controller.step(step_dt_s=0.2)
-                decision = stats.last_decision
-                if decision is not None:
+        try:
+            # Do not hold the HTTP state lock here: STOP must remain responsive.
+            stats = controller.step(step_dt_s=0.2)
+            decision = stats.last_decision
+            if decision is not None:
+                with lock:
                     state["camera_online"] = True
                     state["last_camera_frame"] = time.time()
                     state["distances_mm"] = {
@@ -49,16 +55,18 @@ def autonomous_worker() -> None:
                     }
                     state["corner"] = decision.corner_type
                     state["weed_detected"] = decision.weed is not None
-                if stats.state in ("DONE", "ESTOP_HALT"):
+            if stats.state in ("DONE", "ESTOP_HALT"):
+                with lock:
                     state["fault"] = stats.halt_reason or stats.state
                     state["mode"] = "manual"
-                    motor.stop()
-                    break
-            except Exception as exc:
-                state["fault"] = str(exc)
-                state["mode"] = "manual"
                 motor.stop()
                 break
+        except Exception as exc:
+            with lock:
+                state["fault"] = str(exc)
+                state["mode"] = "manual"
+            motor.stop()
+            break
         time.sleep(0.05)
 
 def watchdog() -> None:
