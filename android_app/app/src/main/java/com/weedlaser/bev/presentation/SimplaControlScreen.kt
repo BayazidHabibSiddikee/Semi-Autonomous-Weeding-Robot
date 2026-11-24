@@ -90,6 +90,8 @@ fun SimplaControlScreen() {
                 Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
                 Text("Corner: ${status.optString("corner", "--")}  ·  Weed: ${status.optBoolean("weed_detected")}")
                 Text("Travel estimate: ${status.optDouble("distance_mm", 0.0).toInt()} mm")
+                Text("Hub: ${status.optString("version", "--")}  ·  Fault: ${status.optString("fault", "none")}")
+                Text("Camera frame age: ${status.opt("last_camera_frame_age_s") ?: "--"} s")
                 Text("Tools: disabled / dry-run", color = MaterialTheme.colorScheme.secondary)
             }
         }
