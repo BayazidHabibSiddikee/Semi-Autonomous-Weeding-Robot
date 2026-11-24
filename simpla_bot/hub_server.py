@@ -45,8 +45,9 @@ last_camera_monotonic = 0.0
 state: dict[str, Any] = {
     "mode": "manual",
     "camera_online": False,
-    "esp32_serial_open": motor._serial is not None,
+    "esp32_serial_open": bool(motor._serial is not None and getattr(motor._serial, "is_open", True)),
     "esp32_online": False,
+    "esp32_responding": False,
     "esp32_estop_ok": False,
     "last_camera_frame": 0.0,
     "last_command": 0.0,
@@ -118,12 +119,20 @@ def camera_worker() -> None:
 
 
 def heartbeat_worker() -> None:
+    last_reconnect = 0.0
     while True:
-        responding = motor.ping()
+        responding, estop_ok = motor.probe()
+        now = time.monotonic()
+        if not responding and now - last_reconnect >= 3.0:
+            last_reconnect = now
+            motor.reconnect_serial()
         with lock:
-            state["esp32_online"] = responding
-            state["esp32_estop_ok"] = responding
-            state["esp32_serial_open"] = motor._serial is not None
+            state["esp32_responding"] = responding
+            state["esp32_online"] = responding and estop_ok
+            state["esp32_estop_ok"] = estop_ok
+            state["esp32_serial_open"] = bool(
+                motor._serial is not None and getattr(motor._serial, "is_open", True)
+            )
         time.sleep(0.8)
 
 
