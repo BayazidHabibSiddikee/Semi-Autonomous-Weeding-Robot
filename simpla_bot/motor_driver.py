@@ -14,6 +14,7 @@ so the flame/grinder controller can enforce a strict stationary safety interlock
 from __future__ import annotations
 
 import time
+import threading
 from typing import Any, Callable, Dict, Optional
 
 
@@ -57,6 +58,7 @@ class NormalMotorDriver:
         self._pwm_left: Any = None
         self._pwm_right: Any = None
         self._serial: Any = None
+        self._serial_lock = threading.Lock()
         self._command_log: list[str] = []
 
         if self.backend == "gpio":
@@ -103,7 +105,7 @@ class NormalMotorDriver:
             raise RuntimeError(
                 "backend='serial' requires pyserial (`pip install pyserial`)."
             ) from exc
-        self._serial = serial.Serial(self.serial_port, self.serial_baud, timeout=0.5)
+        self._serial = serial.Serial(self.serial_port, self.serial_baud, timeout=0.2, write_timeout=0.2)
         self._sleep(1.5)  # Allow Arduino auto-reset
 
     # ------------------------------------------------------------------
@@ -138,9 +140,26 @@ class NormalMotorDriver:
         """Send an ASCII command line if using the serial Arduino/ESP32 backend."""
         msg = line.strip() + "\n"
         self._command_log.append(line.strip())
-        if self._serial is not None:
-            self._serial.write(msg.encode("ascii"))
-            self._serial.flush()
+        if self.backend == "serial":
+            if self._serial is None:
+                raise RuntimeError("ESP32 serial port is not open")
+            with self._serial_lock:
+                self._serial.write(msg.encode("ascii"))
+                self._serial.flush()
+
+    def ping(self) -> bool:
+        """Return True only when the ESP32 firmware answers PING with a healthy E-stop input."""
+        if self.backend != "serial" or self._serial is None:
+            return False
+        try:
+            with self._serial_lock:
+                self._serial.reset_input_buffer()
+                self._serial.write(b"PING\\n")
+                self._serial.flush()
+                reply = self._serial.readline().decode("ascii", errors="ignore").strip()
+            return reply.startswith("PONG ") and "ESTOP=0" in reply
+        except Exception:
+            return False
 
     def drive(self, left_pct: float, right_pct: float) -> None:
         """Command raw left/right wheel PWM speeds in [-100, +100]."""
@@ -160,7 +179,11 @@ class NormalMotorDriver:
                 hw_r, self.right_in3_pin, self.right_in4_pin, self._pwm_right
             )
         elif self.backend == "serial":
-            self.send_serial_line(f"M {int(round(hw_l))} {int(round(hw_r))}")
+            try:
+                self.send_serial_line(f"M {int(round(hw_l))} {int(round(hw_r))}")
+            except Exception:
+                self._left_pct = self._right_pct = 0.0
+                raise
         else:
             self._command_log.append(f"DRIVE L={l_cmd:.1f}% R={r_cmd:.1f}%")
 
