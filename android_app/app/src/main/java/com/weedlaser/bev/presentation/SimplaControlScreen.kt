@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
 
 @Composable
 fun SimplaControlScreen() {
-    var host by remember { mutableStateOf("192.168.4.1") }
+    var host by remember { mutableStateOf("10.42.0.1") }
     var mode by remember { mutableStateOf("manual") }
     var connected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(JSONObject()) }
@@ -39,7 +39,7 @@ fun SimplaControlScreen() {
         val req = if (body == null) builder.get().build() else builder.post(body.toString().toRequestBody(jsonType)).build()
         http.newCall(req).execute().use { response ->
             val raw = response.body?.string().orEmpty()
-            if (!response.isSuccessful) error("HTTP ${response.code}: $raw")
+            if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}: $raw")
             JSONObject(raw)
         }
     }
