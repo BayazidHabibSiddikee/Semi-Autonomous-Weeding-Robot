@@ -85,7 +85,7 @@ fun SimplaControlScreen() {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Robot status", fontWeight = FontWeight.Bold)
                 Text("Mode: ${mode.uppercase()}  ·  Moving: ${status.optBoolean("moving")}")
-                Text("Camera: ${if (status.optBoolean("camera_online")) "Online" else "Waiting"}  ·  ESP32: ${if (status.optBoolean("esp32_online")) "serial open" else "serial closed"}")
+                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Stale / waiting"}  ·  ESP32 USB: ${if (status.optBoolean("esp32_serial_open")) "port open" else "port closed"}")
                 val d = status.optJSONObject("distances_mm")
                 Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
                 Text("Corner: ${status.optString("corner", "--")}  ·  Weed: ${status.optBoolean("weed_detected")}")
