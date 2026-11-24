@@ -115,7 +115,7 @@ On Raspberry Pi OS with NetworkManager, connect Pi Ethernet to the router for in
 sudo nmcli device wifi hotspot ifname wlan0 ssid SimplaBot password 'CHANGE-THIS-PASSWORD'
 ```
 
-The hotspot gateway is normally `192.168.4.1`; open the Android app's **Control** tab and connect to that IP. If NetworkManager chooses another subnet, use the actual Pi hotspot IP shown by `ip -4 addr show wlan0`.
+NetworkManager's default shared hotspot address is commonly `10.42.0.1`; open the Android app's **Control** tab and use the actual Pi hotspot IP shown by `ip -4 addr show wlan0`. The app defaults to `10.42.0.1` but lets you edit it.
 
 ### Operating modes
 
