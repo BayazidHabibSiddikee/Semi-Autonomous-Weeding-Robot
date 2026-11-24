@@ -169,3 +169,18 @@ NetworkManager's default shared hotspot address is commonly `10.42.0.1`; open th
 The app status panel shows Pi/ESP32 heartbeat, camera freshness, depth-zone readings, corner/weed flags, and estimated travel. The Android APK is not included or built by this branch; build it locally from `android_app/` after checking out this branch. This telemetry is not a certified safety system.
 
 **Commissioning limits:** motor output is software-limited to 35% in this initial firmware, but this does not make an electrically overloaded L298N safe. Confirm each motor's rated voltage and stall current, the combined current per L298N channel, wiring, and cooling before connecting motor power. Use a physical normally-closed E-stop that independently removes actuator power. Treatment outputs remain disabled/dry-run; no unattended operation is supported. The autonomous controller is experimental and must be supervised.
+
+
+## Build the Android app locally (not built by this branch)
+
+From the repository root, on a machine with JDK 17:
+
+```bash
+cd android_app
+chmod +x gradlew
+./gradlew assembleDebug
+```
+
+The debug APK will be at `android_app/app/build/outputs/apk/debug/app-debug.apk`.
+To run only the Kotlin compile check without packaging an APK, use
+`./gradlew :app:compileDebugKotlin`.
