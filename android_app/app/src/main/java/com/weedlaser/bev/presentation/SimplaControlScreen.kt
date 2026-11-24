@@ -2,6 +2,8 @@ package com.weedlaser.bev.presentation
 
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
@@ -71,7 +73,7 @@ fun SimplaControlScreen() {
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -96,6 +98,9 @@ fun SimplaControlScreen() {
                 Text("Travel estimate: ${status.optDouble("distance_mm", 0.0).toInt()} mm")
                 Text("Hub: ${status.optString("version", "--")}  ·  Fault: ${status.optString("fault", "none")}")
                 Text("Camera frame age: ${status.opt("last_camera_frame_age_s") ?: "--"} s")
+                if (status.optString("camera_error").isNotBlank() && status.optString("camera_error") != "null") {
+                    Text("Camera detail: ${status.optString("camera_error")}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 Text("Tools: disabled / dry-run", color = MaterialTheme.colorScheme.secondary)
             }
         }
