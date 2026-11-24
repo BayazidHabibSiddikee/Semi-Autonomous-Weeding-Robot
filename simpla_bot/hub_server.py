@@ -49,6 +49,7 @@ state: dict[str, Any] = {
     "esp32_online": False,
     "esp32_responding": False,
     "esp32_estop_ok": False,
+    "esp32_error": getattr(motor, "_serial_error", None),
     "last_camera_frame": 0.0,
     "last_command": 0.0,
     "fault": None,
@@ -152,6 +153,7 @@ def heartbeat_worker() -> None:
             state["esp32_responding"] = responding
             state["esp32_online"] = responding and estop_ok
             state["esp32_estop_ok"] = estop_ok
+            state["esp32_error"] = getattr(motor, "_serial_error", None)
             state["esp32_serial_open"] = bool(
                 motor._serial is not None and getattr(motor._serial, "is_open", True)
             )
@@ -363,5 +365,8 @@ if __name__ == "__main__":
         ReusableThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     finally:
         stop_all()
-        tools.emergency_cutoff()
+        try:
+            tools.emergency_cutoff()
+        except Exception:
+            pass
         motor.close()
