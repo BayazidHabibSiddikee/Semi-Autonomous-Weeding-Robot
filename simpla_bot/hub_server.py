@@ -59,6 +59,28 @@ lock = threading.RLock()
 auto_stop = threading.Event()
 auto_stop.set()
 autonomous_thread: threading.Thread | None = None
+motion_lock = threading.RLock()
+_original_motor_drive = motor.drive
+_original_motor_stop = motor.stop
+
+
+def guarded_motor_drive(left: float, right: float) -> None:
+    # A STOP request takes this same lock. Once STOP acquires it, the autonomous
+    # worker cannot issue a later drive command after the stop has completed.
+    with motion_lock:
+        if threading.current_thread() is autonomous_thread and auto_stop.is_set():
+            _original_motor_stop()
+            return
+        _original_motor_drive(left, right)
+
+
+def serialized_motor_stop() -> None:
+    with motion_lock:
+        _original_motor_stop()
+
+
+motor.drive = guarded_motor_drive
+motor.stop = serialized_motor_stop
 _original_estop_safe = tools.is_estop_safe
 tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set() and bool(state["esp32_online"])
 
