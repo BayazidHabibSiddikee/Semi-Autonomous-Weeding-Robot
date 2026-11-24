@@ -175,8 +175,8 @@ class FlameGrinderController:
             off_lv = GPIO.HIGH if self.relay_active_low else GPIO.LOW
             GPIO.output(self.grinder_pin, off_lv)
             GPIO.output(self.flame_pin, off_lv)
-        elif self.backend == "serial":
-            self.motor_driver.send_serial_line("R 0 0")
+        # ESP32 firmware only controls the two L298N motor channels. It has no
+        # relay or ignition protocol; treatment remains disabled in this profile.
         self.motor_driver.stop()
         self._event_log.append("EMERGENCY_CUTOFF")
 
