@@ -1,0 +1,60 @@
+{
+  "benchmark_environment": {
+    "hardware": "Edge x86_64 CPU (simulating Raspberry Pi 5 / Jetson Nano target)",
+    "frameworks": [
+      "PyTorch 2.15",
+      "ONNX Runtime 1.20",
+      "Transformers 4.40"
+    ],
+    "date": "2026-11-24"
+  },
+  "models": [
+    {
+      "name": "best.onnx",
+      "format": "ONNX Runtime",
+      "input_resolution": "256x320",
+      "file_size_mb": 42.56,
+      "classes": 9,
+      "latency_ms_mean": 52.44,
+      "latency_ms_p95": 66.95,
+      "fps": 19.1,
+      "detection_type": "Direct Bounding Box + 9-Class Classification",
+      "edge_ready": true
+    },
+    {
+      "name": "best.pt",
+      "format": "PyTorch YOLOv8s",
+      "input_resolution": "640x640",
+      "file_size_mb": 21.55,
+      "classes": 9,
+      "latency_ms_mean": 1209.28,
+      "latency_ms_p95": 1757.08,
+      "fps": 0.83,
+      "detection_type": "Direct Bounding Box + 9-Class Classification",
+      "edge_ready": false
+    },
+    {
+      "name": "smartweeder_best.pt",
+      "format": "PyTorch YOLOv8n",
+      "input_resolution": "640x640",
+      "file_size_mb": 21.49,
+      "classes": 2,
+      "latency_ms_mean": 375.0,
+      "latency_ms_p95": 836.38,
+      "fps": 2.67,
+      "detection_type": "Binary (Crop vs Weed)",
+      "edge_ready": false
+    },
+    {
+      "name": "facebook/dinov2-small (Legacy Proposal)",
+      "format": "Vision Transformer (ViT-S/14)",
+      "input_resolution": "518x518",
+      "file_size_mb": 88.2,
+      "classes": "Embedding extractor only (384-dim)",
+      "latency_ms_mean": 202.59,
+      "fps": 4.93,
+      "detection_type": "Patch Feature Similarity (Requires separate detection step)",
+      "edge_ready": false
+    }
+  ]
+}
