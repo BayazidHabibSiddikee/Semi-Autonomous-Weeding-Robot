@@ -11,3 +11,4 @@ weed_detection_bot/videos/*.avi
 bad_chilli_clips/
 models/cad/*.FCBak
 .ros_share/
+*.onnx
