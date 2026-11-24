@@ -72,7 +72,7 @@ fun SimplaControlScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(if (connected) "Pi connected · ESP32 ${if (status.optBoolean("esp32_online")) "connected" else "offline"}" else "Pi offline", color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Text(if (connected) "Pi connected · ESP32 ${if (status.optBoolean("esp32_serial_open")) "USB port open" else "USB port closed"}" else "Pi offline", color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             AssistChip(onClick = { scope.launch { runCatching { request("/api/status") }.onSuccess { status=it; connected=true }.onFailure { error=it.message } } }, label = { Text("Refresh") })
         }
@@ -85,7 +85,7 @@ fun SimplaControlScreen() {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Robot status", fontWeight = FontWeight.Bold)
                 Text("Mode: ${mode.uppercase()}  ·  Moving: ${status.optBoolean("moving")}")
-                Text("Camera: ${if (status.optBoolean("camera_online")) "Online" else "Waiting"}  ·  ESP32: ${if (status.optBoolean("esp32_online")) "USB connected" else "Disconnected"}")
+                Text("Camera: ${if (status.optBoolean("camera_online")) "Online" else "Waiting"}  ·  ESP32: ${if (status.optBoolean("esp32_online")) "serial open" else "serial closed"}")
                 val d = status.optJSONObject("distances_mm")
                 Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
                 Text("Corner: ${status.optString("corner", "--")}  ·  Weed: ${status.optBoolean("weed_detected")}")
