@@ -3,8 +3,8 @@ MaixSense-A075V Spatial Perception Module for Simpla Bot.
 
 Handles:
   1. Official Sipeed MaixSense-A075V HTTP protocol over USB-RNDIS (192.168.233.1):
-       - POST /set_cfg  (12-byte <BBBBBBBBi payload)
-       - GET  /getdeep  (44-byte header + 16-bit depth map in mm + RGB JPEG)
+       - POST /set_cfg (12-byte config; 16-bit depth and JPEG RGB enabled)
+       - GET /getdeep (36-byte header + depth/IR/status payload + RGB JPEG)
   2. Pure-Python 16-bit ToF depth analysis (zero numpy/OpenCV required on host):
        - Exact distance to front wall / obstacle ("how much to go" in mm)
        - 90-degree LEFT / RIGHT corner detection, DEAD_END, and ROW_END_HEADLAND
