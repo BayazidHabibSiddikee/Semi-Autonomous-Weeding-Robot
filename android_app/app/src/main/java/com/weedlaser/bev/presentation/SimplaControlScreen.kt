@@ -101,6 +101,9 @@ fun SimplaControlScreen() {
                 if (status.optString("camera_error").isNotBlank() && status.optString("camera_error") != "null") {
                     Text("Camera detail: ${status.optString("camera_error")}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
+                if (status.optString("esp32_error").isNotBlank() && status.optString("esp32_error") != "null") {
+                    Text("ESP32 detail: ${status.optString("esp32_error")}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 Text("Tools: disabled / dry-run", color = MaterialTheme.colorScheme.secondary)
             }
         }
