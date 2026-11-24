@@ -259,8 +259,8 @@ class MaixSenseClient:
         self.host = str(ms.get("host", "192.168.233.1"))
         self.port = int(ms.get("port", 80))
         self.timeout_s = float(ms.get("timeout_s", 1.5))
-        self.depth_width = int(ms.get("depth_width", 160))
-        self.depth_height = int(ms.get("depth_height", 120))
+        self.depth_width = int(ms.get("depth_width", 320))
+        self.depth_height = int(ms.get("depth_height", 240))
         self.base_url = f"http://{self.host}:{self.port}"
         self.configured = False
 
