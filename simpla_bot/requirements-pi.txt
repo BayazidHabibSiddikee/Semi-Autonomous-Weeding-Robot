@@ -1,0 +1,6 @@
+# Raspberry Pi 4 runtime dependencies for the Simpla Bot hub
+pyserial>=3.5
+Pillow>=10.0
+
+# Optional: use PyYAML for config parsing (stdlib fallback also exists)
+PyYAML>=6.0
