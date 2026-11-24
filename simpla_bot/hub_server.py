@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from simpla_bot.config_util import load_config
-from simpla_bot.simpla_bot_controller import create_live_controller
+from simpla_bot.simpla_bot_controller import MissionStats, create_live_controller
 
 HOST, PORT = "0.0.0.0", 8080
 cfg = load_config()
@@ -36,7 +36,6 @@ def stop_all() -> None:
         state["mode"] = "manual"
 
 def autonomous_worker() -> None:
-    auto_stop.clear()
     while not auto_stop.is_set():
         with lock:
             if state["mode"] != "autonomous":
@@ -156,6 +155,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(400, {"error":"mode must be manual or autonomous"}); return
                 stop_all()
                 if mode == "autonomous":
+                    auto_stop.clear()
+                    controller.stats = MissionStats(state="DRIVE_ROW")
+                    controller._last_valid_frame_ts = time.monotonic()
                     with lock:
                         state["fault"] = None
                         state["mode"] = "autonomous"
