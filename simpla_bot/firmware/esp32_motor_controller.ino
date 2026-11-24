@@ -26,14 +26,14 @@ void stopMotors() {
 }
 void command(String line) {
   line.trim(); if (!line.length()) return;
-  lastCommand=millis();
-  if (line=="STOP") { stopMotors(); Serial.println("OK STOP"); return; }
+  if (line=="STOP") { lastCommand=millis(); stopMotors(); Serial.println("OK STOP"); return; }
   if (line=="PING") { Serial.println(digitalRead(ESTOP)==HIGH ? "PONG ESTOP=1" : "PONG ESTOP=0"); return; }
   if (line.startsWith("M ")) {
     int split=line.indexOf(' ',2); if (split<0) { Serial.println("ERR FORMAT"); return; }
     int l=constrain(line.substring(2,split).toInt(),-35,35);
     int r=constrain(line.substring(split+1).toInt(),-35,35);
     if (digitalRead(ESTOP)==HIGH) { stopMotors(); Serial.println("ERR ESTOP"); return; }
+    lastCommand=millis(); // Only drive/STOP commands refresh the motor watchdog; PING must not.
     leftNow=l; rightNow=r;
     channel(ENA,IN1,IN2,l); channel(ENB,IN3,IN4,r);
     Serial.println("OK"); return;
