@@ -272,6 +272,7 @@ class NormalMotorDriver:
                     self.stop()
                     return direction * elapsed * mm_per_sec
                 dt = min(slice_s, total_time - elapsed)
+                self.drive(direction * abs(speed_pct), direction * abs(speed_pct))
                 self._sleep(dt)
                 elapsed += dt
         finally:
@@ -317,6 +318,7 @@ class NormalMotorDriver:
                     self._heading_deg = (self._heading_deg + turned) % 360.0
                     return round(turned, 1)
                 dt = min(slice_s, total_time - elapsed)
+                self.drive(l_cmd, r_cmd)
                 self._sleep(dt)
                 elapsed += dt
         finally:
