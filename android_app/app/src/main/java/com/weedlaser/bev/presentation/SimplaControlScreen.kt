@@ -77,7 +77,7 @@ fun SimplaControlScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(if (connected) "Pi connected · ESP32 ${if (status.optBoolean("esp32_online")) "healthy" else "not responding / E-stop open"}" else "Pi offline / token required", color = if (connected && status.optBoolean("esp32_online")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Text(if (connected) "Pi connected · ESP32 ${if (!status.optBoolean("esp32_responding")) "no heartbeat" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}" else "Pi offline / token required", color = if (connected && status.optBoolean("esp32_online")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             AssistChip(onClick = { scope.launch { runCatching { request("/api/status") }.onSuccess { status=it; connected=true }.onFailure { error=it.message } } }, label = { Text("Refresh") })
         }
@@ -91,7 +91,7 @@ fun SimplaControlScreen() {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Robot status", fontWeight = FontWeight.Bold)
                 Text("Mode: ${mode.uppercase()}  ·  Moving: ${status.optBoolean("moving")}")
-                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Stale / waiting"}  ·  ESP32: ${if (status.optBoolean("esp32_online")) "heartbeat OK" else "not healthy"}")
+                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Stale / waiting"}  ·  ESP32: ${if (!status.optBoolean("esp32_responding")) "offline" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}")
                 val d = status.optJSONObject("distances_mm")
                 Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
                 Text("Corner: ${status.optString("corner", "--")}  ·  Weed: ${status.optBoolean("weed_detected")}")
