@@ -4,7 +4,7 @@ Command-Line Runner for Simpla Bot (branch: simpla_bot).
 
 Examples:
   # 1. Safe bench simulation (runs anywhere, no hardware needed):
-  python3 -m simpla_bot.run_simpla_bot --mode sim --tool both
+  python3 -m simpla_bot.run_simpla_bot --mode sim --tool none
 
   # 2. Verify Sipeed MaixSense-A075V connection & live distance/corner readout:
   python3 -m simpla_bot.run_simpla_bot --check-maixsense
@@ -13,7 +13,7 @@ Examples:
   python3 -m simpla_bot.run_simpla_bot --mode live --tool grinder
 
   # 4. Live field operation with tools ARMED (physical E-Stop required!):
-  python3 -m simpla_bot.run_simpla_bot --mode live --tool both --arm-tools
+  python3 -m simpla_bot.run_simpla_bot --mode live --tool none --arm-tools
 
   # 5. Calibrate straight distance (drives 1000mm so you can measure with a tape):
   python3 -m simpla_bot.run_simpla_bot --calibrate-drive 1000
@@ -76,7 +76,7 @@ def cmd_check_maixsense(cfg: dict, samples: int = 5) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Simpla Bot — MaixSense-A075V + Normal Motor Driver + Flame/Grinder"
+        description="Simpla Bot — Pi 4, MaixSense-A075V, paired L298N motors"
     )
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument(
@@ -87,14 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--tool",
-        choices=("none", "grinder", "flame", "both"),
+        choices=("none", "grinder"),
         default=None,
         help="Treatment tool mode (default comes from config.yaml)",
-    )
-    parser.add_argument(
-        "--arm-tools",
-        action="store_true",
-        help="Arm real flame/grinder relays (overrides dry_run=true). Use only with E-stop wired!",
     )
     parser.add_argument(
         "--check-maixsense",
@@ -154,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         tools = FlameGrinderController(
             cfg,
             motor,
-            arm_tools=args.arm_tools,
+            arm_tools=False,
             sleep_fn=lambda _s: None,
         )
         ctrl = SimplaBotController(
