@@ -12,20 +12,20 @@ This branch deliberately narrows the project to hardware bring-up and supervised
 
 ## Important electrical unknown
 
-Motor voltage and stall current are not known yet. The config therefore defaults to `backend: sim`. Do not switch to GPIO/live motor operation until you have identified the motor rated voltage, stall current, battery voltage, and verified that the L298N can handle the combined current of two parallel motors on each channel. Parallel wiring doubles the current demand of each channel; an L298N may be unsuitable.
+Motor voltage and stall current are not known yet. The config therefore defaults to `backend: sim`. Do not connect motor power until you have identified the motor rated voltage, stall current, battery voltage, and verified that the single L298N can handle the combined current of two parallel motors on each channel. Parallel wiring doubles the current demand of each channel; an L298N may be unsuitable.
 
 ## Motor mapping
 
 There is exactly ONE L298N module. Its two H-bridge channels map one logical left side and one logical right side:
 
-| L298N terminal | Raspberry Pi BCM |
+| L298N terminal | ESP32 GPIO (firmware defaults) |
 |---|---:|
-| ENA | 12 |
-| IN1 | 5 |
-| IN2 | 6 |
-| ENB | 13 |
-| IN3 | 20 |
-| IN4 | 21 |
+| ENA | 27 |
+| IN1 | 25 |
+| IN2 | 26 |
+| ENB | 14 |
+| IN3 | 32 |
+| IN4 | 33 |
 
 Channel A drives both left motors in parallel. Channel B drives both right motors in parallel. Both motors on each side always receive the same direction and PWM. There is no independent wheel control. Remove the ENA and ENB jumper caps if the ESP32 is driving those enable pins with PWM. Tie ESP32 GND, L298N logic GND, and the motor-supply negative together. Keep motor supply wiring separate from Pi/ESP32 logic power. Never connect the L298N 5V output to the ESP32 5V/3V3 rail.
 
