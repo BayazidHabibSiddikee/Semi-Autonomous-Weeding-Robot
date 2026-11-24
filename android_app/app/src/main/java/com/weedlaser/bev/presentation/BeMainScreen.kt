@@ -66,14 +66,14 @@ import java.io.File
 import java.io.FileOutputStream
 
 enum class AppTab {
-    CAPTURE, LIVE, PROJECT, ABOUT
+    CAPTURE, LIVE, CONTROL, PROJECT, ABOUT
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
     var selectedLanguage by rememberSaveable { mutableStateOf(AppLanguage.BN) }
-    var currentTab by rememberSaveable { mutableStateOf(AppTab.CAPTURE) }
+    var currentTab by rememberSaveable { mutableStateOf(AppTab.CONTROL) }
 
     CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
         WeedLaserTheme {
@@ -119,16 +119,10 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
                 bottomBar = {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                         NavigationBarItem(
-                            selected = currentTab == AppTab.CAPTURE,
-                            onClick = { currentTab = AppTab.CAPTURE },
-                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Launch") },
-                            label = { Text(Strings.navLaunch(selectedLanguage), fontSize = 11.sp) }
-                        )
-                        NavigationBarItem(
-                            selected = currentTab == AppTab.LIVE,
-                            onClick = { currentTab = AppTab.LIVE },
-                            icon = { Icon(Icons.Default.LocationOn, contentDescription = "Live Rover") },
-                            label = { Text(Strings.navLive(selectedLanguage), fontSize = 11.sp) }
+                            selected = currentTab == AppTab.CONTROL,
+                            onClick = { currentTab = AppTab.CONTROL },
+                            icon = { Icon(Icons.Default.Build, contentDescription = "Simpla Bot Control") },
+                            label = { Text("Control", fontSize = 11.sp) }
                         )
                         NavigationBarItem(
                             selected = currentTab == AppTab.PROJECT,
@@ -157,6 +151,7 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
                             onNavigateToLive = { currentTab = AppTab.LIVE },
                         )
                         AppTab.LIVE -> LiveRoverMonitorScreen(viewModel = viewModel)
+                        AppTab.CONTROL -> SimplaControlScreen()
                         AppTab.PROJECT -> ProjectDetailsScreen()
                         AppTab.ABOUT -> AboutDeveloperScreen()
                     }
