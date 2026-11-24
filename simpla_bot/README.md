@@ -84,3 +84,45 @@ python3 -m simpla_bot.run_simpla_bot --check-maixsense
 - Green-pixel clustering is not reliable crop/weed classification.
 - The row-following state machine is experimental and must not be trusted for unattended operation.
 - Servo MCU firmware is not included yet; the Pi-side serial protocol is documented in the adapter.
+
+## Pi 4 phone hub (manual + autonomous)
+
+The Pi is the network and autonomy hub. The Android app connects to the Pi's Wi-Fi access point; the Pi connects to the ESP32 by USB serial. The ESP32 owns the L298N motor pins. MaixSense stays connected to the Pi through its USB-RNDIS link.
+
+### Start the hub
+
+1. Flash `simpla_bot/firmware/esp32_motor_controller.ino` to the ESP32. The sketch's example GPIO mapping must be checked against your ESP32 board and wiring.
+2. Connect ESP32 USB to the Pi. Check the port with `ls -l /dev/serial/by-id/`; update `motor_driver.serial_port` in `config.yaml` if needed.
+3. Keep the robot lifted and motor power disconnected for the first serial test. Install the camera/runtime dependencies and pyserial.
+4. From the repository root run:
+
+```bash
+python3 -m pip install pyserial
+python3 -m simpla_bot.hub_server
+```
+
+The control API listens on port 8080:
+- `GET /api/status`
+- `POST /api/mode` with `{"mode":"manual"}` or `{"mode":"autonomous"}`
+- `POST /api/drive` with `{"left":20,"right":20}` (manual mode only; app sends repeated hold commands)
+- `POST /api/stop`
+
+### Pi Wi-Fi and Ethernet
+
+On Raspberry Pi OS with NetworkManager, connect Pi Ethernet to the router for internet, then create the robot hotspot:
+
+```bash
+sudo nmcli device wifi hotspot ifname wlan0 ssid SimplaBot password 'CHANGE-THIS-PASSWORD'
+```
+
+The hotspot gateway is normally `192.168.4.1`; open the Android app's **Control** tab and connect to that IP. If NetworkManager chooses another subnet, use the actual Pi hotspot IP shown by `ip -4 addr show wlan0`.
+
+### Operating modes
+
+- **Manual:** hold a direction in the app. Repeated commands refresh the ESP32 watchdog; releasing the control sends STOP. The Pi also stops if the command stream expires.
+- **Autonomous:** the Pi runs the existing experimental MaixSense row-navigation loop and sends motor commands to the ESP32 over USB.
+- Switching mode first stops the motor output. Phone loss stops manual movement; the ESP32 serial watchdog stops motor output if Pi-to-ESP32 commands stop.
+
+The app status panel shows Pi/ESP32 connectivity, camera state, depth-zone readings, corner/weed flags, and estimated travel. This is telemetry, not a certified safety system.
+
+**Commissioning limits:** motor output is software-limited to 35% in this initial firmware, but this does not make an electrically overloaded L298N safe. Confirm each motor's rated voltage and stall current, the combined current per L298N channel, wiring, and cooling before connecting motor power. Use a physical normally-closed E-stop that independently removes actuator power. Treatment outputs remain disabled/dry-run; no unattended operation is supported. The autonomous controller is experimental and must be supervised.
