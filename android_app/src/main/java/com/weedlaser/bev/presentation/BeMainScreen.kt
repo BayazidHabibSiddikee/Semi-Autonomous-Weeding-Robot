@@ -74,7 +74,7 @@ enum class AppTab {
 @Composable
 fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
     var selectedLanguage by rememberSaveable { mutableStateOf(AppLanguage.BN) }
-    var currentTab by rememberSaveable { mutableStateOf(AppTab.CAPTURE) }
+    var currentTab by rememberSaveable { mutableStateOf(AppTab.CONTROL) }
 
     CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
         WeedLaserTheme {
@@ -119,18 +119,6 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
                 },
                 bottomBar = {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                        NavigationBarItem(
-                            selected = currentTab == AppTab.CAPTURE,
-                            onClick = { currentTab = AppTab.CAPTURE },
-                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Launch") },
-                            label = { Text(Strings.navLaunch(selectedLanguage), fontSize = 11.sp) }
-                        )
-                        NavigationBarItem(
-                            selected = currentTab == AppTab.LIVE,
-                            onClick = { currentTab = AppTab.LIVE },
-                            icon = { Icon(Icons.Default.LocationOn, contentDescription = "Live Rover") },
-                            label = { Text(Strings.navLive(selectedLanguage), fontSize = 11.sp) }
-                        )
                         NavigationBarItem(
                             selected = currentTab == AppTab.CONTROL,
                             onClick = { currentTab = AppTab.CONTROL },
