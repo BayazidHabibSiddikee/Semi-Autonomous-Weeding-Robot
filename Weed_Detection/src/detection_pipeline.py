@@ -143,6 +143,9 @@ class WeedDetector:
         detections = []
 
         for bbox, yolo_class, yolo_conf in yolo_dets:
+            if yolo_conf < conf_threshold:
+                continue
+
             x1, y1, x2, y2 = [int(v) for v in bbox]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
@@ -155,7 +158,7 @@ class WeedDetector:
             # CLIP classification
             clip_class, clip_conf = self.classify_clip(crop)
 
-            # DINOv2 feature
+            # DINOv2 feature similarity
             dino_feat = self.get_dino_feature(crop)
             dino_sim = 0.0
             if dino_feat is not None and self.weed_database:
@@ -167,7 +170,8 @@ class WeedDetector:
                 dino_sim = best_sim
 
             # EfficientNet classification
-            ef_class = yolo_class
+            ef_class = None
+            ef_conf = 0.0
             if self.efficientnet is not None:
                 import torchvision.transforms as T
                 ef_transform = T.Compose([
@@ -186,13 +190,23 @@ class WeedDetector:
                     ef_conf = float(probs[0, ef_idx])
 
             # Voting / consensus
-            is_weed = self._vote_weed(yolo_class, clip_class, ef_class, yolo_conf, clip_conf)
+            is_weed = self._vote_weed(yolo_class, clip_class, ef_class, dino_sim, use_voting)
+
+            # Ensemble confidence
+            conf_scores = [yolo_conf]
+            if clip_conf > 0: conf_scores.append(clip_conf)
+            if ef_conf > 0: conf_scores.append(ef_conf)
+            if dino_sim > 0: conf_scores.append(dino_sim)
+            ensemble_conf = float(np.mean(conf_scores))
+
+            # Select class name
+            class_name = clip_class if clip_class.startswith("weed_") else (ef_class if ef_class and ef_class.startswith("weed_") else yolo_class)
 
             detection = WeedDetection(
                 bbox=(x1, y1, x2, y2),
                 center=(cx, cy),
-                class_name=clip_class if clip_class.startswith("weed_") else yolo_class,
-                confidence=max(yolo_conf, clip_conf),
+                class_name=class_name,
+                confidence=ensemble_conf,
                 yolo_conf=yolo_conf,
                 clip_class=clip_class,
                 clip_conf=clip_conf,
@@ -203,16 +217,39 @@ class WeedDetector:
 
         return detections
 
-    def _vote_weed(self, yolo_class, clip_class, ef_class, yolo_conf, clip_conf):
+    def _vote_weed(self, yolo_class, clip_class, ef_class, dino_sim, use_voting):
         """Consensus decision: is this a weed?"""
+        if not use_voting:
+            return yolo_class.startswith("weed_")
+
         votes = 0
-        if yolo_class.startswith("weed_"):
-            votes += 1
-        if clip_class.startswith("weed_"):
-            votes += 1
-        if ef_class.startswith("weed_"):
-            votes += 1
-        return votes >= 2  # majority vote
+        active_models = 0
+
+        if yolo_class:
+            active_models += 1
+            if yolo_class.startswith("weed_"):
+                votes += 1
+
+        if clip_class:
+            active_models += 1
+            if clip_class.startswith("weed_"):
+                votes += 1
+
+        if ef_class:
+            active_models += 1
+            if ef_class.startswith("weed_"):
+                votes += 1
+
+        if dino_sim > 0:
+            active_models += 1
+            if dino_sim >= 0.75:
+                votes += 1
+
+        if active_models == 0:
+            return False
+
+        # Majority rule (>50% of active models vote weed)
+        return (votes / active_models) >= 0.5
 
     def annotate_frame(self, frame, detections):
         """Draw detection results on frame."""

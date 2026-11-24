@@ -1,0 +1,52 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 50  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+diff_drive_controller:
+  ros__parameters:
+    # Reconciles 4 physical URDF wheels with 2-channel left/right ESP32 drive
+    left_wheel_names: ["front_left_wheel_joint", "rear_left_wheel_joint"]
+    right_wheel_names: ["front_right_wheel_joint", "rear_right_wheel_joint"]
+
+    wheel_separation: 0.174
+    wheel_radius: 0.035
+
+    # Skid-steer empirical multiplier for soil/field traction
+    wheel_separation_multiplier: 1.18
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    publish_rate: 50.0
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+
+    # Covariances tuned for field slip — fused with BNO055 IMU in robot_localization EKF
+    pose_covariance_diagonal: [0.005, 0.005, 0.01, 0.01, 0.01, 0.04]
+    twist_covariance_diagonal: [0.002, 0.002, 0.01, 0.01, 0.01, 0.03]
+
+    open_loop: false
+    # Let robot_localization publish odom -> base_footprint TF
+    enable_odom_tf: false
+
+    cmd_vel_timeout: 0.25
+    use_stamped_vel: false
+
+    linear.x.has_velocity_limits: true
+    linear.x.has_acceleration_limits: true
+    linear.x.max_velocity: 0.30
+    linear.x.min_velocity: -0.15
+    linear.x.max_acceleration: 0.40
+    linear.x.min_acceleration: -0.60
+
+    angular.z.has_velocity_limits: true
+    angular.z.has_acceleration_limits: true
+    angular.z.max_velocity: 1.0
+    angular.z.min_velocity: -1.0
+    angular.z.max_acceleration: 1.5
+    angular.z.min_acceleration: -1.5

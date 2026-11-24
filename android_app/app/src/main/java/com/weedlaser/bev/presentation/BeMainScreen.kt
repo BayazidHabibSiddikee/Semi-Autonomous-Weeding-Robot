@@ -1,7 +1,5 @@
 package com.weedlaser.bev.presentation
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
@@ -9,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,15 +16,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -36,11 +36,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -55,10 +55,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.weedlaser.bev.domain.model.Field
-import com.weedlaser.bev.domain.model.FieldCorners
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,73 +67,63 @@ import java.io.File
 import java.io.FileOutputStream
 
 enum class AppTab {
-    PLANNER, PROJECT, ABOUT
+    CAPTURE, LIVE, CONTROL, PROJECT, ABOUT
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
     var selectedLanguage by rememberSaveable { mutableStateOf(AppLanguage.BN) }
-    var currentTab by rememberSaveable { mutableStateOf(AppTab.PLANNER) }
+    var currentTab by rememberSaveable { mutableStateOf(AppTab.CONTROL) }
 
     CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
         WeedLaserTheme {
             Scaffold(
                 topBar = {
-                    TopAppBar(
-                        title = {
-                            Column {
+                    Column {
+                        TopAppBar(
+                            title = {
                                 Text(
                                     text = Strings.appTitle(selectedLanguage),
                                     style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 )
-                                Text(
-                                    text = "Semi-Autonomous Weeding Robot",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        },
-                        actions = {
-                            // EN / BN Language Switcher
-                            Row(
-                                modifier = Modifier.padding(end = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                FilterChip(
-                                    selected = selectedLanguage == AppLanguage.BN,
-                                    onClick = { selectedLanguage = AppLanguage.BN },
-                                    label = { Text("বাং", fontWeight = FontWeight.Bold) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                            },
+                            actions = {
+                                TextButton(
+                                    onClick = {
+                                        selectedLanguage = if (selectedLanguage == AppLanguage.BN) {
+                                            AppLanguage.EN
+                                        } else {
+                                            AppLanguage.BN
+                                        }
+                                    },
+                                    modifier = Modifier.padding(end = 4.dp),
+                                ) {
+                                    Text(
+                                        text = if (selectedLanguage == AppLanguage.BN) "English" else "বাংলা",
+                                        fontWeight = FontWeight.SemiBold,
                                     )
-                                )
-                                FilterChip(
-                                    selected = selectedLanguage == AppLanguage.EN,
-                                    onClick = { selectedLanguage = AppLanguage.EN },
-                                    label = { Text("EN", fontWeight = FontWeight.Bold) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                )
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                            ),
                         )
-                    )
+                        androidx.compose.material3.HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    }
                 },
                 bottomBar = {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                         NavigationBarItem(
-                            selected = currentTab == AppTab.PLANNER,
-                            onClick = { currentTab = AppTab.PLANNER },
-                            icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Planner") },
-                            label = { Text(Strings.navPlanner(selectedLanguage), fontSize = 11.sp) }
+                            selected = currentTab == AppTab.CONTROL,
+                            onClick = { currentTab = AppTab.CONTROL },
+                            icon = { Icon(Icons.Default.Build, contentDescription = "Simpla Bot Control") },
+                            label = { Text("Control", fontSize = 11.sp) }
                         )
                         NavigationBarItem(
                             selected = currentTab == AppTab.PROJECT,
@@ -157,7 +147,12 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
                     color = MaterialTheme.colorScheme.surface
                 ) {
                     when (currentTab) {
-                        AppTab.PLANNER -> BeMainScreen(viewModel = viewModel)
+                        AppTab.CAPTURE -> BeMainScreen(
+                            viewModel = viewModel,
+                            onNavigateToLive = { currentTab = AppTab.LIVE },
+                        )
+                        AppTab.LIVE -> LiveRoverMonitorScreen(viewModel = viewModel)
+                        AppTab.CONTROL -> SimplaControlScreen()
                         AppTab.PROJECT -> ProjectDetailsScreen()
                         AppTab.ABOUT -> AboutDeveloperScreen()
                     }
@@ -168,286 +163,333 @@ fun MainAppContainer(viewModel: BeViewModel = koinViewModel()) {
 }
 
 /**
- * BEV Planner screen: photo + corners, field config, generate, send / export.
+ * Zero-corner Capture & Launch screen backed by BeViewModel so state survives tab switches and rotation:
+ *   1. Connect / bind to Pi Wi-Fi hotspot (optional UDP :8081 auto-discovery & Bearer token).
+ *   2. Snap 1 photo -> Pi auto-warps to 2D Top-Down BEV (/image + /bev_image) & detects real furrows.
+ *   3. Tap Start (and optional End) directly on the warped BEV map.
+ *   4. Launch mission (strictly gated on Pi BEV upload + confidence >= 45% + Start pin).
  */
 @Composable
-fun BeMainScreen(viewModel: BeViewModel = koinViewModel()) {
+fun BeMainScreen(
+    viewModel: BeViewModel = koinViewModel(),
+    onNavigateToLive: () -> Unit = {},
+) {
     val lang = LocalAppLanguage.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
-    var imagePath by rememberSaveable { mutableStateOf<String?>(null) }
-    var corners by remember { mutableStateOf<FieldCorners?>(null) }
-    var field by remember {
-        mutableStateOf(Field(widthM = 6.0, lengthM = 8.0, totalRows = 10, rowSpacingM = 0.6))
-    }
-    var piIp by rememberSaveable { mutableStateOf("192.168.4.1") }
-    var isDraggingCorner by remember { mutableStateOf(false) }
-    var step by rememberSaveable { mutableStateOf(0) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
             scope.launch {
-                val copiedPath = withContext(Dispatchers.IO) {
-                    copyUriToInternalFile(context, uri)
-                }
-                if (copiedPath != null) {
-                    imagePath = copiedPath
-                    corners = null // reset corners for new photo
-                }
+                val copiedPath = withContext(Dispatchers.IO) { copyUriToInternalFile(context, uri) }
+                if (copiedPath != null) viewModel.onNewFieldPhoto(copiedPath)
             }
         }
     }
 
-    val photoReady = imagePath != null
-    val cornersReady = corners?.isValid() == true
-    val resultsVisible = viewModel.outcome !is BevOutcome.Idle
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success: Boolean ->
+        val uri = pendingCameraUri
+        if (success && uri != null) {
+            scope.launch {
+                val copiedPath = withContext(Dispatchers.IO) { copyUriToInternalFile(context, uri) }
+                if (copiedPath != null) viewModel.onNewFieldPhoto(copiedPath)
+            }
+        }
+    }
+
+    fun launchCameraCapture() {
+        runCatching {
+            val photoFile = File(context.cacheDir, "camera_capture_${System.currentTimeMillis()}.jpg")
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            pendingCameraUri = uri
+            takePictureLauncher.launch(uri)
+        }.onFailure { err ->
+            Toast.makeText(context, "Camera unavailable: ${err.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted: Boolean ->
+        if (granted) launchCameraCapture()
+        else Toast.makeText(context, "Camera permission is required", Toast.LENGTH_SHORT).show()
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // ---- status checklist: always visible so you always know where you are
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusChip("1 Photo", photoReady, Modifier.weight(1f))
-            StatusChip("2 Corners", cornersReady, Modifier.weight(1f))
-            StatusChip(
-                "Pi " + (viewModel.piInfo?.host?.let { "✓" } ?: "?"),
-                viewModel.piInfo != null,
-                Modifier.weight(1f),
+        // Pi Wi-Fi Hotspot Endpoint + Bind & Discover tools
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = viewModel.piIp,
+                onValueChange = viewModel::updatePiIp,
+                label = { Text(Strings.piIpLabel(lang)) },
+                singleLine = true,
+                modifier = Modifier.weight(0.68f),
+            )
+            OutlinedTextField(
+                value = viewModel.piPortText,
+                onValueChange = viewModel::updatePiPortText,
+                label = { Text(Strings.piPortLabel(lang)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(0.32f),
             )
         }
 
-        // ---- step tabs
-        TabRow(
-            selectedTabIndex = step,
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        OutlinedTextField(
+            value = viewModel.apiToken,
+            onValueChange = viewModel::updateApiToken,
+            label = { Text(Strings.apiTokenLabel(lang)) },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            listOf("① Photo", "② Settings", "③ Mission").forEachIndexed { i, title ->
-                Tab(
-                    selected = step == i,
-                    onClick = { step = i },
-                    text = { Text(title, style = MaterialTheme.typography.labelLarge) },
+            OutlinedButton(
+                onClick = viewModel::bindPiWifiHotspot,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(Strings.bindWifiButton(lang, viewModel.wifiBound), maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = viewModel::discoverPiOnLan,
+                enabled = !viewModel.isDiscovering,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(Strings.discoverPiButton(lang), maxLines = 1)
+            }
+        }
+
+        if (viewModel.discoveredDevices.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                viewModel.discoveredDevices.forEach { dev ->
+                    TextButton(onClick = { viewModel.selectDiscoveredDevice(dev) }) {
+                        Text("${dev.name} (${dev.ipAddress}:${dev.port})")
+                    }
+                }
+            }
+        }
+
+        // Step 1 & 2: Snap photo -> Warped 2D Top-Down BEV -> Tap Start & End points
+        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Text(
+                    text = Strings.step1Header(lang),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                StartEndPointCard(
+                    bevImagePath = viewModel.bevImagePath,
+                    isPiBev = viewModel.isPiBevReady,
+                    isUploading = viewModel.isUploading,
+                    furrowsNx = viewModel.furrowsNx,
+                    startPoint = viewModel.startPoint,
+                    endPoint = viewModel.endPoint,
+                    onTakePhotoClick = {
+                        val hasPerm = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            android.Manifest.permission.CAMERA
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (hasPerm) launchCameraCapture()
+                        else cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                    },
+                    onPickPhotoClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onStartPointChanged = viewModel::updateStartPoint,
+                    onEndPointChanged = viewModel::updateEndPoint,
+                )
+
+                if (viewModel.sourcePhotoPath != null && !viewModel.isPiBevReady && !viewModel.isUploading) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = viewModel::uploadCurrentPhotoToPi,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(Strings.reuploadToPi(lang))
+                    }
+                }
+            }
+        }
+
+        // Safe Navigation-Only default + Actuator Relay Modes
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "nav_only" to Strings.relayNavOnly(lang),
+                    "grinder" to Strings.relayGrinder(lang),
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.relayMode == mode,
+                        onClick = { viewModel.updateRelayMode(mode) },
+                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "flame" to Strings.relayFlame(lang),
+                    "both" to Strings.relayDual(lang),
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.relayMode == mode,
+                        onClick = { viewModel.updateRelayMode(mode) },
+                        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (viewModel.relayMode != "nav_only") {
+                Text(
+                    text = Strings.treatmentInterlockHint(lang),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
         }
 
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .weight(1f, fill = false),
+        // Explicit Operator Confirmation before launching physical motion
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            when (step) {
-                0 -> Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(
-                            rememberScrollState(), enabled = !isDraggingCorner,
-                        ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-                        Column(Modifier.padding(12.dp)) {
-                            Text(Strings.step1Title(lang), style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.height(8.dp))
-                            CornerSelectionCard(
-                                imagePath = imagePath,
-                                corners = corners,
-                                onPickPhotoClick = {
-                                    photoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                onCornersChanged = { corners = it },
-                                onDraggingChanged = { isDraggingCorner = it },
-                            )
-                        }
-                    }
-                    WizardNav(
-                        nextEnabled = cornersReady,
-                        onNext = { step = 1 },
-                    )
-                }
+            Checkbox(
+                checked = viewModel.operatorConfirmed,
+                onCheckedChange = viewModel::updateOperatorConfirmed,
+            )
+            Text(
+                text = Strings.operatorConfirmLabel(lang),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+        }
 
-                1 -> Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-                        Column(Modifier.padding(12.dp)) {
-                            Text(Strings.step2Title(lang), style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.height(8.dp))
-                            FieldConfigInputs(field) { field = it }
-                        }
-                    }
-                    WizardNav(
-                        backEnabled = true,
-                        nextEnabled = true,
-                        onBack = { step = 0 },
-                        onNext = { step = 2 },
-                    )
-                }
-
-                else -> Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Button(
-                        onClick = {
-                            val img = imagePath ?: return@Button
-                            val c = corners ?: return@Button
-                            if (!c.isValid()) return@Button
-                            viewModel.processAndGenerate(img, c, field)
-                        },
-                        enabled = imagePath != null && corners != null && !viewModel.isProcessing,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            Strings.generateMission(lang, viewModel.isProcessing),
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                    }
-
-                    OutlinedButton(
-                        onClick = { viewModel.discoverPi() },
-                        enabled = !viewModel.isDiscovering,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            if (viewModel.isDiscovering) "Searching…"
-                            else viewModel.piInfo?.let { "Pi: ${it.name} (${it.host})" } ?: "Find Pi"
-                        )
-                    }
-
-                    when (val o = viewModel.outcome) {
-                        is BevOutcome.Success ->
-                            BeSuccessPanel(
-                                o = o,
-                                piIp = viewModel.piInfo?.host ?: piIp,
-                                status = viewModel.missionStatus,
-                                piResult = viewModel.piResult,
-                                piBaseUrl = viewModel.piInfo?.baseUrl,
-                                isUploading = viewModel.isUploading,
-                                simStatus = viewModel.simStatus,
-                                onSendImage = {
-                                    val img = imagePath
-                                    val c = corners
-                                    if (img != null && c != null) {
-                                        viewModel.sendImageToPi(img, c, field)
-                                    }
-                                },
-                                onSend = { viewModel.sendAndTrack(o.mission, viewModel.piInfo?.host ?: piIp) },
-                                onCopyJson = {
-                                    val jsonStr = viewModel.missionToJson(o.mission)
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Mission JSON", jsonStr))
-                                    Toast.makeText(context, Strings.jsonCopied(lang), Toast.LENGTH_SHORT).show()
-                                }
-                            )
-                        is BevOutcome.Error -> BeErrorPanel(
-                            o.message,
-                            viewModel.pendingUpload != null,
-                            viewModel::reset,
-                            viewModel::sendPendingToPi,
-                        )
-                        BevOutcome.Idle -> BeIdleHint()
-                    }
-
-                    WizardNav(
-                        backEnabled = true,
-                        nextEnabled = false,
-                        onBack = { step = 1 },
-                    )
-                }
+        // Error card (never hidden or swallowed)
+        viewModel.errorMessage?.let { err ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = err,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp),
+                )
             }
         }
-    }
-}
 
-/** Small colored chip showing a completed step. */
-@Composable
-private fun StatusChip(label: String, ready: Boolean, modifier: Modifier = Modifier) {
-    Surface(
-        shape = RoundedCornerShape(20),
-        color = if (ready) MaterialTheme.colorScheme.primaryContainer
-        else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = modifier,
-    ) {
-        Text(
-            if (ready) "✓ $label" else label,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-        )
-    }
-}
+        // Step 3: Strictly gated Launch button (only navigates to Live tab on real Pi success)
+        Button(
+            onClick = { viewModel.launchMission(onSuccessNavigateToLive = onNavigateToLive) },
+            enabled = viewModel.canStartMission,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+        ) {
+            Text(
+                text = Strings.launchMissionButton(lang, viewModel.isStartingMission),
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
 
-/** Back / Next navigation row for the wizard steps. */
-@Composable
-private fun WizardNav(
-    backEnabled: Boolean = false,
-    nextEnabled: Boolean,
-    onBack: (() -> Unit)? = null,
-    onNext: (() -> Unit)? = null,
-) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        OutlinedButton(
-            onClick = { onBack?.invoke() },
-            enabled = backEnabled && onBack != null,
-            modifier = Modifier.weight(1f),
-        ) { Text("← Back") }
-        if (onNext != null) {
-            Button(
-                onClick = onNext,
-                enabled = nextEnabled,
-                modifier = Modifier.weight(1f),
-            ) { Text("Next →") }
+        if (!viewModel.canStartMission) {
+            Text(
+                text = Strings.launchDisabledHint(lang),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        viewModel.statusMessage?.let { msg ->
+            Text(
+                text = msg,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }
 
 private fun copyUriToInternalFile(context: Context, uri: Uri): String? {
     return try {
-        // Read image bounds first
-        val boundsOptions = android.graphics.BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
+        val rotationDegrees = context.contentResolver.openInputStream(uri)?.use { stream ->
+            val exif = androidx.exifinterface.media.ExifInterface(stream)
+            when (exif.getAttributeInt(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+            )) {
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+        } ?: 0f
+
+        val boundsOptions = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { stream ->
             android.graphics.BitmapFactory.decodeStream(stream, null, boundsOptions)
         }
-
         val origW = boundsOptions.outWidth
         val origH = boundsOptions.outHeight
         if (origW <= 0 || origH <= 0) return null
 
-        // Calculate sample size to limit dimensions to max 2048x2048 (safeguards high-megapixel phone cameras)
         val maxDim = 2048
         var sampleSize = 1
-        while ((origW / sampleSize) > maxDim || (origH / sampleSize) > maxDim) {
-            sampleSize *= 2
-        }
+        while ((origW / sampleSize) > maxDim || (origH / sampleSize) > maxDim) sampleSize *= 2
 
         val decodeOptions = android.graphics.BitmapFactory.Options().apply {
             inSampleSize = sampleSize
             inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
         }
-
-        val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+        val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
             android.graphics.BitmapFactory.decodeStream(stream, null, decodeOptions)
         } ?: return null
 
+        val upright = if (rotationDegrees != 0f) {
+            val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees) }
+            android.graphics.Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                .also { if (it != decoded) decoded.recycle() }
+        } else {
+            decoded
+        }
+
         val target = File(context.filesDir, "field_input_${System.currentTimeMillis()}.jpg")
         FileOutputStream(target).use { out ->
-            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+            upright.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
         }
-        bitmap.recycle()
+        upright.recycle()
         target.absolutePath
     } catch (e: Throwable) {
         android.util.Log.e("BeMainScreen", "Error saving photo: ${e.message}", e)

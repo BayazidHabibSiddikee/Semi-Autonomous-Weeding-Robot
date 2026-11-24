@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rover_navigation</name>
+  <version>0.1.0</version>
+  <description>Nav2 parameters, mission planner, and field mission action coordinators.</description>
+  <maintainer email="rover@example.com">Weeding Rover Team</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_collision_monitor</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

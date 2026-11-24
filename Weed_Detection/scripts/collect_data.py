@@ -14,7 +14,7 @@ def collect(output_dir, class_name, camera_id=0, interval=0):
     os.makedirs(save_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(camera_id)
-    if not not cap.isOpened():
+    if not cap.isOpened():
         print("Cannot open camera")
         return
 

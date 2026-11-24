@@ -1,0 +1,78 @@
+# Small rover: Raspberry Pi 4 + MaixSense-A075V + ONE L298N dual H-bridge
+# SAFE DEFAULT: backend=sim and treatment dry_run=true. Do not arm treatment.
+
+maixsense:
+  host: "192.168.233.1"
+  port: 80
+  timeout_s: 1.5
+  depth_width: 320
+  depth_height: 240
+  min_valid_mm: 180
+  max_valid_mm: 2400
+  max_frame_age_s: 1.0
+  camera_height_mm: 420.0
+  camera_pitch_deg: 28.0
+  tool_offset_forward_mm: -120.0
+
+navigation:
+  cruise_speed_pct: 25
+  approach_speed_pct: 15
+  turn_speed_pct: 20
+  obstacle_stop_mm: 450
+  corner_stop_mm: 600
+  corner_open_side_mm: 1050
+  side_asymmetry_mm: 280
+  headland_open_mm: 1850
+  max_row_length_mm: 15000
+  max_turns: 4
+  weed_align_tolerance_mm: 45
+  weed_min_cluster_px: 18
+  weed_exg_threshold: 38
+  centering_kp: 0.04
+  max_steer_adjust_pct: 10
+
+motor_driver:
+  backend: "sim"  # Safe CLI default; hub_server selects USB serial for live control.
+  driver_type: "l298n"
+  wiring: "two_left_parallel_two_right_parallel"
+  motors_per_channel: 2
+  serial_port: "/dev/ttyUSB0"
+  serial_baud: 115200
+  pwm_freq_hz: 1000
+  # Reference ESP32 firmware GPIOs (not Raspberry Pi BCM pins).
+  left_ena_pin: 27
+  left_in1_pin: 25
+  left_in2_pin: 26
+  right_enb_pin: 14
+  right_in3_pin: 32
+  right_in4_pin: 33
+  speed_mm_per_sec_at_100pct: 300.0  # Placeholder; calibrate.
+  turn_90_deg_sec_at_50pct: 1.8      # Placeholder; calibrate.
+  invert_left: false
+  invert_right: false
+  motor_voltage_v: null
+  motor_stall_current_a: null
+
+bottle_servo:
+  enabled: true
+  controller: "serial_mcu"
+  serial_port: "/dev/ttyACM0"  # Replace after checking /dev/serial/by-id/.
+  serial_baud: 115200
+  min_angle_deg: 20
+  max_angle_deg: 160
+  initial_angle_deg: 90
+
+tools:
+  dry_run: true
+  default_mode: "none"
+  relay_active_low: true
+  grinder_relay_pin: 17
+  flame_relay_pin: 27
+  estop_pin: 22  # Pi GPIO E-stop is not used by serial backend; ESP32 uses GPIO4.
+  estop_active_high: true
+  settle_before_fire_s: 0.45
+  grinder_duration_s: 2.0
+  flame_duration_s: 1.2
+  max_flame_burn_s: 2.5
+  flame_cooldown_s: 3.0
+  post_treat_pause_s: 0.4

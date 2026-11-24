@@ -77,16 +77,18 @@ suspend fun loadChassisMesh(context: Context): ChassisMeshData? = withContext(Di
         // To render a crisp, fast wireframe/solid hybrid, extract unique edges or sample triangles
         // A step of 2 or 3 gives high visual clarity without GPU overdraw
         val edgeList = mutableListOf<Int>()
-        for (i in 0 until numIndices step 3) {
+        for (i in 0 until numIndices - 2 step 3) {
             val i0 = rawIndices[i]
             val i1 = rawIndices[i + 1]
             val i2 = rawIndices[i + 2]
-            edgeList.add(i0)
-            edgeList.add(i1)
-            edgeList.add(i1)
-            edgeList.add(i2)
-            edgeList.add(i2)
-            edgeList.add(i0)
+            if (i0 in 0 until numVertices && i1 in 0 until numVertices && i2 in 0 until numVertices) {
+                edgeList.add(i0)
+                edgeList.add(i1)
+                edgeList.add(i1)
+                edgeList.add(i2)
+                edgeList.add(i2)
+                edgeList.add(i0)
+            }
         }
 
         ChassisMeshData(vertices, edgeList.toIntArray(), numIndices / 3)
@@ -236,9 +238,10 @@ fun Chassis3DViewerCard() {
                         val edgeColorFront = Color(0xFF00E5FF)
                         val edgeColorBack = Color(0xFF00796B)
 
-                        for (e in 0 until edges.size step 2) {
+                        for (e in 0 until edges.size - 1 step 2) {
                             val v1 = edges[e]
                             val v2 = edges[e + 1]
+                            if (v1 !in 0 until numV || v2 !in 0 until numV) continue
 
                             val avgZ = (projZ[v1] + projZ[v2]) / 2f
                             // Depth-based intensity

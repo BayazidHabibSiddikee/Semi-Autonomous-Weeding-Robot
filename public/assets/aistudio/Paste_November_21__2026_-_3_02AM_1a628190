@@ -1,0 +1,309 @@
+# **Repository audit — initial findings**
+
+I reviewed the `main` branch across the rover, weed-detection pipeline, Android planner, firmware, configuration, CAD exports, and documentation.
+
+Not ready for hardware deployment
+
+The biggest concern is that the project currently has **multiple systems that do not agree on how the physical robot is wired or controlled**. There are also software defects that can cause incorrect movement, unreliable laser targeting, and unsafe behavior.
+
+## **1. Critical hardware and safety problems**
+
+| Severity | Finding                                                                                                                                                                                                                | File                                                                                                                                                                                                                                                                                                                              |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Critical | The configured laser pin is GPIO 25, which the firmware assigns to the left motor's PWM. The firmware itself assigns the laser to GPIO 4.                                                                              | [rover_config.yaml](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/rover_config.yaml?utm_source=chatgpt.com), [rover_firmware.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/esp32_firmware/rover_firmware.py?utm_source=chatgpt.com) |
+| Critical | The configuration specifies a VL53L0X ToF sensor, but the firmware reads an HC-SR04 echo pulse. Its echo pin is GPIO 5, while the configuration says GPIO 22. There is no VL53L0X I²C implementation in this firmware. | [rover_firmware.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/esp32_firmware/rover_firmware.py?utm_source=chatgpt.com)                                                                                                                                                           |
+| Critical | The ESP32 laser protocol and the Raspberry Pi laser controller are separate implementations. The rover uses `LaserController` on Pi GPIO 18, while the firmware expects ESP32 GPIO 4. The configuration says GPIO 25.  | [rover_main.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/src/rover_main.py?utm_source=chatgpt.com), [laser_control.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/laser_control.py?utm_source=chatgpt.com)              |
+| Critical | The safety check can return `True` when GPIO support is unavailable and the application is not in simulation mode. That is a fail-open condition.                                                                      | [laser_control.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/laser_control.py?utm_source=chatgpt.com)                                                                                                                                                                    |
+| Critical | The emergency-stop callback only changes a software flag. It does not independently cut laser power immediately. The laser firing function can remain inside its timed sleep.                                          | [laser_control.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/laser_control.py?utm_source=chatgpt.com)                                                                                                                                                                    |
+
+**Do not enable the physical laser until the pin mapping, hardware interlock, and emergency power cutoff are corrected and independently tested.** The repository describes a high-power 450 nm laser, so a software-only stop mechanism is not an adequate safety design.
+
+## **2. Rover control and navigation problems**
+
+**Two serial connections are opened to the same ESP32 port.** `rover_main.py` creates and connects an `ESP32Bridge`, then separately creates and connects `RoverMotors`. Both open `/dev/ttyUSB0`. Because both objects read from the same serial stream, one can consume the response intended for the other. Motor, servo, and sensor commands can consequently become unreliable.
+
+**Sensor failure does not stop the rover.** In `state_machine.py`, forward movement is blocked only when the distance is positive and below the obstacle threshold. A failed reading of `-1` bypasses the obstacle check and the rover drives forward anyway. A failed safety-critical sensor should cause a stop or fault state, not continued movement.
+
+**The production state machine does not implement row traversal.** `row_navigator.py` contains row-changing logic, but `rover_main.py` does not instantiate it and `state_machine.py` does not use its row-end threshold. The obstacle state therefore does not provide the documented serpentine crop-row coverage.
+
+**Laser aiming is not calibrated to the field coordinates.** The state machine calculates `x_cm` and `y_cm` from the calibration matrix, but it does not use those values to position the laser. It instead maps image pixels proportionally to servo angles. That is not a substitute for calibrated camera-to-laser geometry, especially when the camera and laser have different positions.
+
+Relevant files: [rover_main.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/src/rover_main.py?utm_source=chatgpt.com), [state_machine.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/src/state_machine.py?utm_source=chatgpt.com), [row_navigator.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/src/row_navigator.py?utm_source=chatgpt.com), [servo_gimbal.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/src/servo_gimbal.py?utm_source=chatgpt.com).
+
+## **3. ESP32 firmware defects**
+
+Beyond the pin conflicts already listed, there are problems inside the firmware itself.
+
+**A. Servo import may prevent the firmware from starting.**
+
+The firmware imports `Servo` using:
+
+```
+from machine import Servo
+```
+
+The standard MicroPython ESP32 API documents `machine.PWM` for servo-style PWM control, not `machine.Servo`. The documented `Servo` class belongs to the Pyboard's `pyb` module. Unless the project supplies a custom `machine.Servo` implementation, this import will fail on a standard ESP32 MicroPython installation.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://docs.micropython.org\&sz=32)
+
+MicroPython latest documentation+2
+
+
+
+**B. Motor PWM scaling is inconsistent.**
+
+The configuration describes motor speed as a value from 0–255, but the firmware passes that value to MicroPython's `PWM.duty()`, whose documented ESP32 range is 0–1023. A command of 200 therefore represents roughly 19.6% duty, not the approximately 78.4% expected from a 0–255 scale.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://docs.micropython.org\&sz=32)
+
+MicroPython latest documentation
+
+
+
+**C. Command validation is inadequate.**
+
+The firmware's command handler assumes commands contain all expected fields. Malformed or incomplete serial commands can cause indexing or conversion errors and terminate the main command-processing loop. There is also no robust validation of movement duration, speed, or servo commands.
+
+File: [rover_firmware.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Navigation/esp32_firmware/rover_firmware.py?utm_source=chatgpt.com)
+
+## **4. AI and weed-detection problems**
+
+Major functionality gap
+
+The AI pipeline is not currently reproducible from the repository alone.
+
+**A. Required model files and data are missing.**
+
+The code expects files such as:
+
+- `models/yolo_weeds.pt`
+- `models/efficientnet_weeds.pt`
+- `models/dino_features.npz`
+- `models/calibration.npz`
+
+The repository does not contain these weed-detection weights, calibration data, or a populated training dataset. The setup script creates empty folders; it does not create trained models.
+
+There is also a path problem: `rover_main.py` loads the models using paths relative to the current working directory rather than resolving them consistently from the repository location. Training a model under `Weed_Detection/models` does not automatically make it available at `models/...` when launching the rover from the repository root.
+
+**B. CLIP has a class-indexing bug.**
+
+[clip_classifier.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/clip_classifier.py?utm_source=chatgpt.com#L18-L56) defines nine text prompts but only eight class names. When the ninth prompt is returned among the top predictions, the code tries to access a nonexistent class name and can raise `IndexError`.
+
+**C. The image collector has an inverted camera check.**
+
+In [collect_data.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/scripts/collect_data.py?utm_source=chatgpt.com#L17), the condition is:
+
+```
+if not not cap.isOpened():
+```
+
+This is equivalent to checking whether the camera *is* open, but the code reports an error and exits in that case. The collector therefore exits when the camera works and continues when it does not.
+
+**D. YOLO training data is structured incorrectly.**
+
+[setup.sh](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/scripts/setup.sh?utm_source=chatgpt.com#L36-L48) creates class folders such as:
+
+```
+data/train/weed_grass/
+data/train/crop_tomato/
+data/val/weed_grass/
+data/val/crop_tomato/
+```
+
+That layout is suitable for image-level classification, but YOLO object detection requires bounding-box annotations in its expected image/label structure. The collector saves complete camera frames without generating object bounding boxes or YOLO label files.
+
+Consequently, the current collection process cannot produce the dataset required by `train_yolo.py`.
+
+**E. DINO feature extraction does not find images.**
+
+[dino_features.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/dino_features.py?utm_source=chatgpt.com#L59) uses:
+
+```
+data_path.rglob("*.{jpg,jpeg,png,webp}")
+```
+
+Python's `pathlib` glob does not support brace expansion in that pattern. The extraction loop will not find the intended image files, leaving the feature database empty.
+
+**F. Model voting is not genuine independent voting.**
+
+In [detection_pipeline.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/detection_pipeline.py?utm_source=chatgpt.com#L136-L215):
+
+- When EfficientNet is not loaded, its class is assigned the YOLO class.
+- The voting function then counts YOLO twice.
+- `conf_threshold` and `use_voting` are not actually applied.
+- DINO similarity is calculated but does not contribute to the final weed decision.
+- EfficientNet confidence is calculated but not incorporated into the final decision.
+
+This can produce misleading confidence and classification results.
+
+**G. Detection-only mode cannot detect anything.**
+
+The old `main.py --detect-only` mode creates a `WeedDetector` without supplying a YOLO model. The detection method then returns an empty list because there is no detector to run. The application may open the camera and display frames, but it will not produce actual detections.
+
+File: [main.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/main.py?utm_source=chatgpt.com)
+
+## **5. Older gantry-based system problems**
+
+The repository contains a second, older architecture based on an X-Y gantry rather than the current wheeled rover. That implementation has its own defects.
+
+**A. Gantry movement completion is calculated incorrectly.**
+
+In [gantry_control.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/gantry_control.py?utm_source=chatgpt.com#L58-L63), the code updates the current position before calculating the distance:
+
+```
+self.current_x = x_mmself.current_y = y_mmdist = math.sqrt(    (x_mm - self.current_x)**2 +    (y_mm - self.current_y)**2)
+```
+
+The resulting distance is always zero. The controller therefore waits only about 0.1 seconds instead of estimating the required movement time. It can proceed to laser firing before the gantry reaches the target. It should calculate the distance before updating the position and, preferably, wait for an actual motion-complete response such as G-code `M400`.
+
+**B. Laser duration protection is incorrectly implemented.**
+
+In [laser_control.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/laser_control.py?utm_source=chatgpt.com#L37-L58), the alleged maximum-continuous-fire check measures idle time since the previous firing. It does not impose a maximum firing duration. `duration_ms` is not bounded, so a long requested firing duration can exceed the documented limit.
+
+**C. Calibration error handling is incomplete.**
+
+In [calibration.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/Weed_Detection/src/calibration.py?utm_source=chatgpt.com#L171-L172), the ArUco error message evaluates a NumPy array as a Boolean:
+
+```
+len(ids) if ids else 0
+```
+
+When one to three markers are detected, this can raise an ambiguous-truth-value exception instead of the intended, useful “need at least four markers” error.
+
+**D. Mission statistics can be false.**
+
+The old pipeline increments `weeds_cut` by the number of detected weeds, regardless of whether the laser actually fired successfully. Its displayed statistics can therefore report successful weeding when it only detected weeds.
+
+## **6. Android mission-planner problems**
+
+The Android application has a useful overall structure, but its current implementation is not fully connected to the robot.
+
+**A. The HTTP mission sender is blocked by Android's network policy.**
+
+The app targets API 34 in [build.gradle.kts](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/build.gradle.kts?utm_source=chatgpt.com#L14). Its manifest does not opt into cleartext traffic, while [TcpMissionCommunicationRepository.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/data/remote/TcpMissionCommunicationRepository.kt?utm_source=chatgpt.com#L38) sends requests to an `http://` URL.
+
+Android disables cleartext traffic by default for apps targeting API 28 or higher. The mission request can therefore fail with a cleartext-not-permitted error.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://developer.android.com\&sz=32)
+
+developer.android.com+2
+
+
+
+**B. There is no matching Raspberry Pi HTTP receiver in this repository.**
+
+The Android client sends a POST request to `/mission` on port 8080. I found no corresponding Pi-side HTTP server or mission receiver in the repository. The navigation system communicates with the ESP32 over serial instead.
+
+The client also has a placeholder `discoverDevices()` implementation that always returns an empty list.
+
+This means the mission-generation side and robot-execution side have not been integrated end to end.
+
+**C. The row detector invents rows when it finds none.**
+
+[RowDetector.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/core/opencv/RowDetector.kt?utm_source=chatgpt.com#L96-L189) generates evenly spaced row centers when it cannot find enough real row peaks. Its confidence calculation also clamps the score to a minimum of 0.6.
+
+[BeViewModel.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/presentation/BeViewModel.kt?utm_source=chatgpt.com#L82-L89) does not reject a low-confidence result before generating a mission.
+
+This creates a serious validation gap: an image with little or no detectable crop-row evidence can still generate a complete mission.
+
+**D. Field-corner validation is insufficient.**
+
+[Field.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/domain/model/Field.kt?utm_source=chatgpt.com#L81-L88) checks for four distinct points and a minimum polygon area. It does not adequately verify that the corners form a convex, non-self-intersecting quadrilateral in the correct order or lie within the source image.
+
+Incorrectly selected corners can produce an invalid perspective transform.
+
+**E. Row-end attention window is hard-coded.**
+
+[Mission.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/domain/model/Mission.kt?utm_source=chatgpt.com#L44-L45) defaults to a fixed 7.0–8.5 m window, regardless of the actual field length. That can be unsuitable for fields with different row lengths.
+
+**F. Some Android data and camera functions are placeholders.**
+
+[RepositoryImpls.kt](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/app/src/main/java/com/weedlaser/bev/data/RepositoryImpls.kt?utm_source=chatgpt.com#L26-L30) uses an in-memory field repository, so field settings are not persistent across application restarts.
+
+The camera repository's capture method is explicitly unsupported, its preview methods do not start a preview, and its camera enumeration returns an empty list. The current UI uses a photo picker, but the repository abstraction remains unfinished.
+
+**G. The Gradle wrapper is not a real Gradle wrapper.**
+
+[android_app/gradlew](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/android_app/gradlew?utm_source=chatgpt.com#L11-L15) only tries to execute a system-installed Gradle binary. It does not use the configured Gradle distribution as a normal wrapper would. The repository also lacks the standard wrapper JAR.
+
+A clean machine without a globally installed Gradle installation cannot build the app using the expected `./gradlew` workflow.
+
+## **7. CAD and ROS problems**
+
+CAD export issue
+
+The following committed STEP files are only about 1.6 KB each and contain a shape representation with an axis placement, but no actual solid geometry:
+
+- [weed_robot_chassis.step](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/weed_robot_chassis.step?utm_source=chatgpt.com)
+- [chassis_base.step](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/meshes/chassis_base.step?utm_source=chatgpt.com)
+- [wheel.step](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/meshes/wheel.step?utm_source=chatgpt.com)
+
+These are not usable mechanical solid exports. The corresponding STL files exist, but the STEP deliverables need to be regenerated and checked in FreeCAD or another CAD viewer.
+
+There are two additional CAD/ROS issues:
+
+- [generate_chassis_model.py](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/generate_chassis_model.py?utm_source=chatgpt.com) saves the model to a hard-coded `/home/sword/Documents/weed-laser-robot/` location. This is not portable.
+- The URDF/Xacro references a ROS package named `weed_laser_robot`, but the repository does not contain a complete ROS package structure with `package.xml`, `CMakeLists.txt`, and installation/launch configuration. The robot description also lacks the camera, laser, servo-gimbal, and distance-sensor frames needed for a complete robot model.
+
+Files: [URDF](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/urdf/weed_laser_robot.urdf?utm_source=chatgpt.com), [Xacro](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/blob/main/urdf/weed_laser_robot.urdf.xacro?utm_source=chatgpt.com).
+
+## **8. Repository organization and testing gaps**
+
+There are also project-level problems that make development and maintenance harder:
+
+| Finding                                                                                  | Why it matters                                                                                                                                              |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two different robot architectures coexist: the older gantry and the newer wheeled rover. | The documentation, hardware assumptions, laser control, and execution entry points are not consistently aligned.                                            |
+| The `Project-RIPRA` submodule is unrelated to agricultural weeding.                      | Its README describes atmospheric turbulence and Shack-Hartmann wavefront reconstruction. It appears to be an unrelated project included in this repository. |
+| No trained weed models or real detection dataset are committed.                          | A clean checkout cannot run the advertised AI pipeline without additional external assets and training.                                                     |
+| No root-level GitHub Actions workflow was found.                                         | There is no automatic CI validation of the main project's changes.                                                                                          |
+| Navigation and firmware have no meaningful automated test suite.                         | Core movement, sensor failure handling, serial communication, and physical safety are not covered.                                                          |
+| The weed test script is primarily a smoke test.                                          | It uses random images when a camera is unavailable and does not validate real detection accuracy.                                                           |
+
+The unrelated submodule can be inspected here: [Project-RIPRA](https://github.com/PxA-Labs/Project-RIPRA?utm_source=chatgpt.com).
+
+The main repository's [Issues](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/issues?utm_source=chatgpt.com) and [Pull Requests](https://github.com/BayazidHabibSiddikee/Semi-Autonomous-Weeding-Robot/pulls?utm_source=chatgpt.com) do not currently provide an existing bug backlog.
+
+## **9. Recommended repair order**
+
+I would not start by polishing the UI or adding more AI models. The project needs to be stabilized in this order:
+
+**Phase 1 — Make the hardware safe**
+
+P0
+
+Resolve all GPIO conflicts, implement the actual ToF sensor, establish one laser-control path, add a hardware E-stop and fail-closed interlock, and validate the firmware.
+
+**Phase 2 — Make the rover predictable**
+
+P0
+
+Use one shared serial bridge, add encoder-based odometry, fix sensor-failure handling, integrate row navigation into the state machine, and calibrate camera-to-laser geometry.
+
+**Phase 3 — Make weed detection reproducible**
+
+P1
+
+Correct the CLIP labels, data collector, DINO extraction, YOLO annotations, voting logic, model paths, and calibration validation. Establish a real labeled dataset and benchmark detection accuracy.
+
+**Phase 4 — Integrate the Android planner**
+
+P1
+
+Implement a Pi-side mission receiver, define a versioned mission protocol with acknowledgements, correct Android networking, reject invalid field geometry, and prevent low-confidence row detections from generating executable missions.
+
+**Phase 5 — Finish engineering deliverables**
+
+P2
+
+Regenerate valid STEP exports, package the URDF correctly, remove or justify the unrelated submodule, provide reproducible dependency/build instructions, and add automated tests and CI.
+
+## **Overall assessment**
+
+The repository has a good set of ideas and several useful starting components: the rover state machine, simulation environment, AI model wrappers, Android BEV planner, and CAD generator. But these pieces do not yet form one coherent, validated robot.
+
+**My assessment is that this is a prototype/in-progress repository, not a deployment-ready semi-autonomous weeding robot.** The most important blockers are the laser safety chain, inconsistent ESP32 hardware mapping, incomplete navigation integration, and missing AI assets.
+
+This was a static review of the GitHub source and repository contents. I did not execute an Android build, train the models, flash the ESP32, or test the physical robot; those results remain unverified.
+
+The next useful step is a **file-by-file repair plan**, starting with the ESP32 firmware, pin configuration, serial bridge, and laser safety system.

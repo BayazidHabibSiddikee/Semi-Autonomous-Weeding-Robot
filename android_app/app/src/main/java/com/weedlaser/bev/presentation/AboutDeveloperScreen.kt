@@ -162,8 +162,16 @@ fun AboutDeveloperScreen() {
 
                 Button(
                     onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(githubUrl))
-                        context.startActivity(intent)
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(githubUrl))
+                            context.startActivity(intent)
+                        }.onFailure {
+                            android.widget.Toast.makeText(
+                                context,
+                                githubUrl,
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {

@@ -1,0 +1,42 @@
+name: Simpla Bot validation
+
+on:
+  push:
+    branches:
+      - "simpla_bot/**"
+  pull_request:
+    paths:
+      - "simpla_bot/**"
+      - "android_app/**"
+      - ".github/workflows/simpla-bot-validation.yml"
+  workflow_dispatch:
+
+jobs:
+  pi-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Pi runtime and test dependencies
+        run: python -m pip install -r simpla_bot/requirements-pi.txt
+      - name: Compile Python modules
+        run: python -m compileall -q simpla_bot
+      - name: Run MaixSense packet tests
+        run: python -m unittest discover -s simpla_bot/tests -v
+
+  android-kotlin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Compile Android debug Kotlin sources (does not package an APK)
+        working-directory: android_app
+        run: sh ./gradlew :app:compileDebugKotlin

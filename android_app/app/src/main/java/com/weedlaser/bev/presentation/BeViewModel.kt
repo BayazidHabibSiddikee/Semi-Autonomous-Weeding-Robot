@@ -1,331 +1,464 @@
 package com.weedlaser.bev.presentation
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.weedlaser.bev.domain.model.Field
-import com.weedlaser.bev.domain.model.FieldCorners
-import com.weedlaser.bev.domain.model.HomographyCalibration
-import com.weedlaser.bev.domain.model.Mission
-import com.weedlaser.bev.domain.model.MissionStatus
-import com.weedlaser.bev.domain.model.PiImageResponse
-import com.weedlaser.bev.domain.model.RowDetectionResult
-import com.weedlaser.bev.data.remote.PiNetworkClient
-import com.weedlaser.bev.domain.usecase.DetectRowsUseCase
-import com.weedlaser.bev.domain.usecase.GenerateBEVUseCase
-import com.weedlaser.bev.domain.usecase.GenerateMissionUseCase
-import com.weedlaser.bev.domain.usecase.SaveFieldUseCase
-import com.weedlaser.bev.domain.usecase.SendMissionUseCase
+import com.weedlaser.bev.core.opencv.AutoFieldBoundaryDetector
+import com.weedlaser.bev.core.opencv.OpenCVProcessor
+import com.weedlaser.bev.core.opencv.RowDetector
+import com.weedlaser.bev.data.remote.CutPlanTelemetry
+import com.weedlaser.bev.data.remote.DiscoveredPiDevice
+import com.weedlaser.bev.data.remote.NormalizedPoint
+import com.weedlaser.bev.data.remote.PiLiveClient
+import com.weedlaser.bev.data.remote.WifiNetworkBinder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
+import kotlinx.coroutines.withContext
+import org.opencv.core.Point
+import java.io.File
 
 /**
- * Result of the full BEV → Mission pipeline.
- */
-sealed interface BevOutcome {
-    data class Success(
-
-        val bevPath: String,
-        val calibration: HomographyCalibration,
-        val rows: RowDetectionResult,
-        val mission: Mission,
-    ) : BevOutcome
-
-    data class Error(val message: String) : BevOutcome
-    object Idle : BevOutcome
-}
-
-/** Photo request kept around when on-device generation fails. */
-data class PendingUpload(
-    val imagePath: String,
-    val corners: FieldCorners,
-    val field: Field,
-)
-
-/**
- * ViewModel driving the full pipeline:
- * capture → corner selection → BEV → row detection → mission → send.
+ * Single source of truth for the Zero-Corner Launch & Live Rover Monitor flows.
+ * State survives tab switches (Launch <-> Live <-> Project <-> About) and screen rotations.
  */
 class BeViewModel(
-    private val generateBEV: GenerateBEVUseCase,
-    private val detectRows: DetectRowsUseCase,
-    private val generateMission: GenerateMissionUseCase,
-    private val saveField: SaveFieldUseCase,
-    private val sendMission: SendMissionUseCase,
-    private val piClient: PiNetworkClient = PiNetworkClient(),
-    private val json: Json = Json { ignoreUnknownKeys = true },
+    val piClient: PiLiveClient,
+    private val wifiBinder: WifiNetworkBinder,
+    private val openCVProcessor: OpenCVProcessor,
+    private val rowDetector: RowDetector,
+    private val bevOutputDir: File,
 ) : ViewModel() {
 
-    var outcome by mutableStateOf<BevOutcome>(BevOutcome.Idle)
+    // Pi hotspot endpoint & optional Bearer security token (held in memory only)
+    var piIp by mutableStateOf("192.168.4.1")
         private set
-
-    var isProcessing by mutableStateOf(false)
+    var piPortText by mutableStateOf("8000")
         private set
-
-    var field by mutableStateOf(Field())
+    var apiToken by mutableStateOf("")
         private set
-
-    /** Pi found over UDP broadcast (hotspot or Wi-Fi). */
-    var piInfo by mutableStateOf<PiNetworkClient.PiInfo?>(null)
+    var wifiBound by mutableStateOf(false)
         private set
-
-    /** Live mission status polled from the Pi. */
-    var missionStatus by mutableStateOf(MissionStatus())
+    var discoveredDevices by mutableStateOf<List<DiscoveredPiDevice>>(emptyList())
         private set
-
     var isDiscovering by mutableStateOf(false)
         private set
 
-    /** Plan the Pi computed from the uploaded photo. */
-    var piResult by mutableStateOf<PiImageResponse?>(null)
+    // Captured photo & warped 2D top-down BEV state
+    var sourcePhotoPath by mutableStateOf<String?>(null)
+        private set
+    var bevImagePath by mutableStateOf<String?>(null)
+        private set
+    var isPiBevReady by mutableStateOf(false)
+        private set
+    var furrowsNx by mutableStateOf<List<Float>>(emptyList())
+        private set
+    var detectionConfidence by mutableStateOf(0f)
         private set
 
-    /** True while the photo is being uploaded and analysed on the Pi. */
+    // User-tapped BEV coordinates (start null — never silently pre-filled!)
+    var startPoint by mutableStateOf<NormalizedPoint?>(null)
+        private set
+    var endPoint by mutableStateOf<NormalizedPoint?>(null)
+        private set
+    var relayMode by mutableStateOf("nav_only")
+        private set
+    var operatorConfirmed by mutableStateOf(false)
+        private set
+
+    // Status & error banners
     var isUploading by mutableStateOf(false)
         private set
-
-    /**
-     * Photo request kept when on-device generation fails, so the user can
-     * still push it to the Pi (which runs its own analyser).
-     */
-    var pendingUpload by mutableStateOf<PendingUpload?>(null)
+    var isStartingMission by mutableStateOf(false)
+        private set
+    var statusMessage by mutableStateOf<String?>(null)
+        private set
+    var errorMessage by mutableStateOf<String?>(null)
         private set
 
-    private var statusJob: Job? = null
+    // Live Rover Monitor state
+    var telemetry by mutableStateOf(CutPlanTelemetry())
+        private set
+    var streamConnected by mutableStateOf(false)
+        private set
+    var liveError by mutableStateOf<String?>(null)
+        private set
+    var eStopBusy by mutableStateOf(false)
+        private set
+    var eStopError by mutableStateOf<String?>(null)
+        private set
+    var streamReconnectNonce by mutableIntStateOf(0)
+        private set
+
+    private var livePollJob: Job? = null
+    private var heartbeatJob: Job? = null
+
+    val effectivePort: Int
+        get() = piPortText.toIntOrNull()?.takeIf { it in 1..65535 } ?: 8000
 
     /**
-     * Run the full pipeline: BEV → row detect → mission.
-     * Does NOT send to Pi — that's a separate explicit step.
+     * Launch is strictly gated:
+     *   - Photo uploaded to Pi AND Pi returned warped BEV image
+     *   - Pi segmentation confidence >= MIN_CONFIDENCE (0.45) AND at least 1 real furrow detected
+     *   - Operator explicitly tapped a Start point on the warped BEV map
      */
-    fun processAndGenerate(
-        imagePath: String,
-        corners: FieldCorners,
-        field: Field,
-    ) {
-        if (isProcessing) return
-        viewModelScope.launch {
-            isProcessing = true
-            outcome = BevOutcome.Idle
-            var step = "image/BGV setup"
-            // Keep the request even if local generation fails: the Pi can
-            // analyse the photo on its own, so the user can always send.
-            pendingUpload = PendingUpload(imagePath, corners, field)
-            try {
-                this@BeViewModel.field = field
-                saveField(field)
+    val canStartMission: Boolean
+        get() = isPiBevReady &&
+            bevImagePath != null &&
+            detectionConfidence >= MIN_CONFIDENCE &&
+            furrowsNx.isNotEmpty() &&
+            startPoint != null &&
+            operatorConfirmed &&
+            !isUploading &&
+            !isStartingMission
 
-                val targetW = 800
-                val targetH = if (field.widthM > 0 && field.lengthM > 0) {
-                    ((targetW * field.lengthM / field.widthM).toInt()).coerceIn(400, 1600)
-                } else 600
+    fun updatePiIp(ip: String) {
+        val trimmed = ip.trim()
+        if (trimmed != piIp) {
+            piIp = trimmed
+            // Endpoint changed: require fresh upload to new Pi host
+            isPiBevReady = false
+            operatorConfirmed = false
+        }
+    }
 
-                step = "BEV warp"
-                val bev = generateBEV(imagePath, corners, targetW, targetH).getOrThrow()
+    fun updatePiPortText(raw: String) {
+        // Allow user to clear or type digits freely without snapping back to 8000
+        val digitsOnly = raw.filter { it.isDigit() }.take(5)
+        if (digitsOnly != piPortText) {
+            piPortText = digitsOnly
+            isPiBevReady = false
+            operatorConfirmed = false
+        }
+    }
 
-                step = "crop-row detection"
-                val rows = detectRows(bev.bevImagePath, field.totalRows)
-                    .getOrThrow()
+    fun updateApiToken(token: String) {
+        apiToken = token
+    }
 
-                step = "boustrophedon path planning"
-                val calibr = bev.calibration.copy(
-                    fieldWidthM = field.widthM,
-                    fieldLengthM = field.lengthM,
-                )
-                val mission = generateMission(field, rows, calibr).getOrThrow()
-                step = "done"
-
-                outcome = BevOutcome.Success(
-                    bevPath = bev.bevImagePath,
-                    calibration = calibr,
-                    rows = rows,
-                    mission = mission,
-                )
-                pendingUpload = null
-            } catch (e: Exception) {
-                android.util.Log.e("BeViewModel", "generate failed at [$step]", e)
-                outcome = BevOutcome.Error(
-                    "$step failed: ${e.message ?: e.javaClass.simpleName} " +
-                        "(field ${field.widthM}×${field.lengthM} m, ${field.totalRows} rows)"
-                )
-            } finally {
-                isProcessing = false
+    fun updateRelayMode(mode: String) {
+        if (mode in listOf("nav_only", "grinder", "flame", "both")) {
+            if (mode != relayMode) {
+                relayMode = mode
+                // Changing to/from treatment mode requires re-confirming physical readiness
+                operatorConfirmed = false
             }
         }
     }
 
-    /** Serialize the mission to a JSON string (for debugging / sending). */
-    fun missionToJson(mission: Mission): String =
-        json.encodeToString(Mission.serializer(), mission)
-
-    /**
-     * Send the kept-around photo even when on-device generation failed:
-     * the Pi has its own analyser and is the authority for what the rover
-     * should drive.
-     */
-    fun sendPendingToPi() {
-        val pending = pendingUpload ?: return
-        sendImageToPi(pending.imagePath, pending.corners, pending.field)
+    fun updateOperatorConfirmed(confirmed: Boolean) {
+        operatorConfirmed = confirmed
+        if (confirmed) errorMessage = null
     }
 
-    /** Explicit send step — call after generation. */
-    fun sendToPi(mission: Mission, ip: String, port: Int = 8080) {
+    fun updateStartPoint(pt: NormalizedPoint) {
+        startPoint = pt
+        errorMessage = null
+    }
+
+    fun updateEndPoint(pt: NormalizedPoint?) {
+        endPoint = pt
+    }
+
+    fun selectDiscoveredDevice(dev: DiscoveredPiDevice) {
+        piIp = dev.ipAddress
+        piPortText = dev.port.toString()
+        isPiBevReady = false
+        statusMessage = "Selected ${dev.name} (${dev.ipAddress}:${dev.port})"
+        errorMessage = null
+    }
+
+    fun bindPiWifiHotspot() {
         viewModelScope.launch {
-            sendMission(mission, ip, port)
-                .onSuccess { /* stay in Success */ }
-                .onFailure { outcome = BevOutcome.Error("Send failed: ${it.message}") }
+            errorMessage = null
+            statusMessage = "Binding process to Pi Wi-Fi hotspot..."
+            wifiBinder.bindToWifiHotspot()
+                .onSuccess { ok ->
+                    wifiBound = ok
+                    statusMessage = if (ok) {
+                        "Bound to Wi-Fi hotspot — HTTP traffic routes directly to Pi."
+                    } else {
+                        "Wi-Fi binding returned false. Verify phone is connected to Pi Wi-Fi."
+                    }
+                }
+                .onFailure { err ->
+                    wifiBound = false
+                    errorMessage = err.message ?: "Failed to bind Wi-Fi hotspot"
+                }
         }
     }
 
-    /**
-     * Broadcast a discovery probe so the app finds the Pi automatically.
-     * Works when the phone runs the hotspot and the Pi joined it.
-     */
-    fun discoverPi() {
+    fun discoverPiOnLan() {
         if (isDiscovering) return
         viewModelScope.launch {
             isDiscovering = true
-            val info = piClient.discover()
-            piInfo = info
+            errorMessage = null
+            statusMessage = "Scanning UDP :8081 & Pi hotspot for Weed Rover..."
+            piClient.discoverPiServers()
+                .onSuccess { list ->
+                    discoveredDevices = list
+                    if (list.isNotEmpty()) {
+                        val first = list.first()
+                        piIp = first.ipAddress
+                        piPortText = first.port.toString()
+                        statusMessage = "Found ${list.size} Pi server(s): ${first.name} (${first.ipAddress}:${first.port})"
+                    } else {
+                        errorMessage = "No Pi server found. Connect to Pi Wi-Fi hotspot or enter IP manually."
+                    }
+                }
+                .onFailure { err ->
+                    errorMessage = "Discovery failed: ${err.message}"
+                }
             isDiscovering = false
-            if (info == null) {
-                outcome = BevOutcome.Error(
-                    "No rover Pi found. Make sure the Pi is on the same network " +
-                        "(phone hotspot) and the mission server is running."
+        }
+    }
+
+    /**
+     * Ingest a newly captured/picked field photo:
+     *   1. Upload to Pi POST /image.
+     *   2. Download Pi's exact warped 2D Top-Down BEV JPEG via GET /bev_image so the user
+     *      taps Start/End in true BEV coordinates (never perspective photo coordinates).
+     *   3. If Pi is unreachable, run local ExG boundary + OpenCVProcessor BEV warp as an
+     *      honest offline preview (NEVER fabricates fake furrows and keeps isPiBevReady = false).
+     */
+    fun onNewFieldPhoto(path: String) {
+        sourcePhotoPath = path
+        bevImagePath = null
+        isPiBevReady = false
+        furrowsNx = emptyList()
+        detectionConfidence = 0f
+        startPoint = null
+        endPoint = null
+        operatorConfirmed = false
+        errorMessage = null
+        uploadCurrentPhotoToPi()
+    }
+
+    fun uploadCurrentPhotoToPi() {
+        val path = sourcePhotoPath ?: return
+        if (isUploading) return
+        viewModelScope.launch {
+            isUploading = true
+            isPiBevReady = false
+            errorMessage = null
+            statusMessage = "Uploading photo to Pi ($piIp:$effectivePort/image)..."
+
+            val uploadResult = piClient.uploadFieldPhoto(
+                ip = piIp,
+                port = effectivePort,
+                imageFile = File(path),
+                bearerToken = apiToken.ifBlank { null },
+            )
+
+            uploadResult.onSuccess { resp ->
+                furrowsNx = resp.furrowsNx
+                detectionConfidence = resp.confidence
+                startPoint = null
+                endPoint = null
+
+                // Download the Pi's exact warped BEV JPEG so taps match Pi's BEV coordinate space
+                val localBevFile = File(bevOutputDir, "pi_bev_${System.currentTimeMillis()}.jpg")
+                val bevDownload = piClient.downloadBevImage(
+                    ip = piIp,
+                    port = effectivePort,
+                    bevUrlPath = resp.bevUrl,
+                    destFile = localBevFile,
+                    bearerToken = apiToken.ifBlank { null },
                 )
+
+                bevDownload.onSuccess { savedBev ->
+                    bevImagePath = savedBev
+                    val pct = (resp.confidence * 100).toInt()
+                    if (resp.ready && resp.confidence >= MIN_CONFIDENCE && resp.furrowsNx.isNotEmpty()) {
+                        isPiBevReady = true
+                        statusMessage = "Pi BEV ready: ${resp.furrowsNx.size} furrows ($pct% confidence). Tap Start & End on the top-down map."
+                    } else {
+                        isPiBevReady = false
+                        errorMessage = "Low row-detection confidence ($pct%, ${resp.furrowsNx.size} furrows). Recapture a clearer photo of crop rows before launching."
+                    }
+                }.onFailure { err ->
+                    isPiBevReady = false
+                    errorMessage = "Photo uploaded, but failed to fetch Pi BEV map (/bev_image): ${err.message}"
+                }
+            }.onFailure { err ->
+                // Pi is offline or rejected auth/upload -> produce an honest local BEV preview using
+                // AutoFieldBoundaryDetector + OpenCVProcessor + RowDetector, but NEVER fake furrows or allow launch.
+                isPiBevReady = false
+                errorMessage = "Pi upload failed (${err.message}). Showing local offline BEV preview — connect Pi & upload before launching."
+                buildOfflineLocalBevPreview(path)
+            }
+
+            isUploading = false
+        }
+    }
+
+    private suspend fun buildOfflineLocalBevPreview(sourcePath: String) = withContext(Dispatchers.Default) {
+        val boundary = AutoFieldBoundaryDetector.detectFromImageFile(sourcePath).getOrNull() ?: return@withContext
+        val corners = boundary.corners
+        val srcPts = listOf(
+            Point(corners.topLeft.x.toDouble(), corners.topLeft.y.toDouble()),
+            Point(corners.topRight.x.toDouble(), corners.topRight.y.toDouble()),
+            Point(corners.bottomRight.x.toDouble(), corners.bottomRight.y.toDouble()),
+            Point(corners.bottomLeft.x.toDouble(), corners.bottomLeft.y.toDouble()),
+        )
+        val previewOut = File(bevOutputDir, "local_preview_bev_${System.currentTimeMillis()}.jpg")
+        val warpRes = openCVProcessor.warpToBEV(
+            inputPath = sourcePath,
+            outputPath = previewOut.absolutePath,
+            srcCorners = srcPts,
+            outputW = 640,
+            outputH = 480,
+        )
+        if (warpRes.isSuccess) {
+            val rowRes = rowDetector.detect(
+                bevPath = previewOut.absolutePath,
+                expectedCount = null,
+                useNativeOpenCV = openCVProcessor.isNativeAvailable(),
+            ).getOrNull()
+
+            val localFurrows = if (rowRes != null && rowRes.rowCentersX.size >= 2 && rowRes.bevWidth > 0) {
+                val ridgesNx = rowRes.rowCentersX.map { (it / rowRes.bevWidth.toFloat()).coerceIn(0.05f, 0.95f) }.sorted()
+                (0 until ridgesNx.size - 1).map { i -> (ridgesNx[i] + ridgesNx[i + 1]) / 2f }
+            } else {
+                emptyList()
+            }
+
+            withContext(Dispatchers.Main) {
+                bevImagePath = previewOut.absolutePath
+                furrowsNx = localFurrows
+                detectionConfidence = rowRes?.confidence ?: 0f
             }
         }
     }
 
     /**
-     * Send the field photo + the 4 selected corners to the Pi.
-     *
-     * The Pi warps the image to BEV, detects the crop rows and builds the
-     * coverage mission, then starts executing it. The phone only shows the
-     * result and the live progress.
+     * Strictly gated mission launch:
+     *   - Never silently re-uploads and ignores errors.
+     *   - Never navigates to Live tab when /start_mission fails.
      */
-    fun sendImageToPi(
-        imagePath: String,
-        corners: FieldCorners,
-        field: Field,
-        ip: String? = null,
-    ) {
-        if (isUploading) return
-        val target = ip ?: piInfo?.host
-        if (target == null) {
-            outcome = BevOutcome.Error("No Pi known yet - tap Find Pi first.")
+    fun launchMission(onSuccessNavigateToLive: () -> Unit) {
+        val sp = startPoint
+        if (!canStartMission || sp == null) {
+            errorMessage = "Upload field photo to Pi (>=45% confidence), tap a Start point, and confirm safety readiness first."
             return
         }
         viewModelScope.launch {
-            isUploading = true
-            outcome = BevOutcome.Idle
-            try {
-                val bytes = java.io.File(imagePath).readBytes()
-                val response = piClient.uploadPhoto(
-                    baseUrl = "http://$target:${piInfo?.port ?: 8080}",
-                    imageBytes = bytes,
-                    corners = corners.toList(),
-                    fieldWidthM = field.widthM,
-                    fieldLengthM = field.lengthM,
-                    expectedRows = field.totalRows,
-                    speedMps = field.speedMps,
-                    laserRangeM = field.laserRangeM,
-                    weedThreshold = field.weedThreshold,
-                    headlandMarginM = field.headlandMarginM,
-                    maxWeeds = field.maxWeeds,
-                    renderer = field.renderer,
-                ).getOrThrow()
+            isStartingMission = true
+            errorMessage = null
+            statusMessage = "Sending Start/End BEV coordinates to Pi ($piIp:$effectivePort)..."
 
-                piResult = response
-                if (response.accepted) {
-                    piInfo = PiNetworkClient.PiInfo(piInfo?.name ?: "rover-pi", target, piInfo?.port ?: 8080)
-                    startStatusPolling(piInfo!!.baseUrl)
-                    startSimStatusPolling(piInfo!!.baseUrl)
-                    pendingUpload = null
-                } else {
-                    outcome = BevOutcome.Error(response.error ?: "The Pi rejected the image")
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("BeViewModel", "upload failed", e)
-                outcome = BevOutcome.Error("Upload failed: ${e.message}")
-            } finally {
-                isUploading = false
+            piClient.startMission(
+                ip = piIp,
+                port = effectivePort,
+                start = sp,
+                end = endPoint,
+                relayMode = relayMode,
+                navOnly = (relayMode == "nav_only"),
+                operatorConfirmed = operatorConfirmed,
+                bearerToken = apiToken.ifBlank { null },
+            ).onSuccess {
+                statusMessage = "Mission running on Pi — switching to Live Monitor."
+                eStopError = null
+                startHeartbeatLoop()
+                onSuccessNavigateToLive()
+            }.onFailure { err ->
+                // Stay on Launch tab so operator sees the real error!
+                errorMessage = "Failed to start mission on Pi: ${err.message}"
+                statusMessage = null
+            }
+
+            isStartingMission = false
+        }
+    }
+
+    fun startLiveMonitoring() {
+        if (livePollJob?.isActive == true) return
+        livePollJob = viewModelScope.launch {
+            var wasConnected = false
+            while (isActive) {
+                piClient.fetchCutPlan(piIp, effectivePort, apiToken.ifBlank { null })
+                    .onSuccess { data ->
+                        telemetry = data
+                        if (!wasConnected) {
+                            // Auto-reconnect MJPEG streams when Pi comes online
+                            streamReconnectNonce++
+                        }
+                        wasConnected = true
+                        streamConnected = true
+                        liveError = null
+                        if (data.running && heartbeatJob?.isActive != true) {
+                            startHeartbeatLoop()
+                        }
+                    }
+                    .onFailure { err ->
+                        wasConnected = false
+                        streamConnected = false
+                        liveError = err.message ?: "offline"
+                    }
+                delay(400L)
             }
         }
     }
 
-    /**
-     * Send the mission and start polling the Pi for progress.
-     */
-    fun sendAndTrack(mission: Mission, ip: String, port: Int = 8080) {
+    fun stopLiveMonitoring() {
+        livePollJob?.cancel()
+        livePollJob = null
+    }
+
+    private fun startHeartbeatLoop() {
+        heartbeatJob?.cancel()
+        heartbeatJob = viewModelScope.launch {
+            while (isActive) {
+                if (telemetry.running || isStartingMission) {
+                    piClient.sendHeartbeat(piIp, effectivePort, apiToken.ifBlank { null })
+                }
+                delay(1500L)
+            }
+        }
+    }
+
+    fun triggerStreamReconnect() {
+        streamReconnectNonce++
+    }
+
+    fun triggerEmergencyStop() {
+        if (eStopBusy) return
         viewModelScope.launch {
-            sendMission(mission, ip, port)
+            eStopBusy = true
+            eStopError = null
+            piClient.emergencyStop(piIp, effectivePort, apiToken.ifBlank { null })
                 .onSuccess {
-                    piInfo = PiNetworkClient.PiInfo("rover-pi", ip, port)
-                    startStatusPolling(piInfo!!.baseUrl)
+                    eStopError = null
+                    heartbeatJob?.cancel()
+                    telemetry = telemetry.copy(
+                        running = false,
+                        eStopped = true,
+                        state = "E_STOP",
+                        relay1Grinder = false,
+                        relay2Flame = false,
+                    )
                 }
-                .onFailure { outcome = BevOutcome.Error("Send failed: ${it.message}") }
+                .onFailure { err ->
+                    // Surface E-STOP failure loudly so operator knows to retry or pull hardware switch
+                    eStopError = "E-STOP NOT CONFIRMED: ${err.message ?: "Pi unreachable"}. Retry or press rover hardware E-STOP!"
+                }
+            eStopBusy = false
         }
     }
 
-    /** Live 3D digital-twin render status (the Pi starts it after every upload). */
-    var simStatus by mutableStateOf<com.weedlaser.bev.domain.model.Sim3dStatus?>(null)
-        private set
-    private var simJob: kotlinx.coroutines.Job? = null
-
-    /** Poll `GET /sim3d` every 2 s until the render finishes. */
-    private fun startSimStatusPolling(baseUrl: String) {
-        simJob?.cancel()
-        simStatus = null
-        simJob = viewModelScope.launch {
-            while (isActive) {
-                piClient.fetchSimStatus(baseUrl)
-                    .onSuccess { st ->
-                        simStatus = st
-                        if (st.state == "done" || st.state == "error") {
-                            return@launch
-                        }
-                    }
-                delay(2000)
-            }
-        }
+    override fun onCleared() {
+        livePollJob?.cancel()
+        heartbeatJob?.cancel()
+        wifiBinder.releaseBinding()
+        super.onCleared()
     }
 
-    /** Poll `GET /status` once a second until the mission finishes. */
-    private fun startStatusPolling(baseUrl: String) {
-        statusJob?.cancel()
-        statusJob = viewModelScope.launch {
-            while (isActive) {
-                piClient.fetchStatus(baseUrl)
-                    .onSuccess { status ->
-                        missionStatus = status
-                        if (status.finished) {
-                            // a finished mission is the normal end of the
-                            // flow - the Success panel already renders the
-                            // DONE line. Only real errors open the error view.
-                            if (status.error != null) {
-                                outcome = BevOutcome.Error(status.error)
-                            } else {
-                                statusJob?.cancel()
-                            }
-                            return@launch
-                        }
-                    }
-                delay(1000)
-            }
-        }
-    }
-
-    fun reset() {
-        outcome = BevOutcome.Idle
-        isProcessing = false
-        statusJob?.cancel()
-        simJob?.cancel()
-        missionStatus = MissionStatus()
-        simStatus = null
+    companion object {
+        const val MIN_CONFIDENCE = 0.45f
     }
 }

@@ -40,10 +40,7 @@ data class Mission(
     val version: Int = 1,
     val field: Field,
     val path: List<PathSegment>,
-    val attentionWindow: AttentionWindow = AttentionWindow(
-        startM = 7.0,
-        endM = 8.5
-    ),
+    val attentionWindow: AttentionWindow = AttentionWindow.forRowLength(field.lengthM),
     val generatedAt: Long = System.currentTimeMillis(),
 ) {
     /**
@@ -85,6 +82,13 @@ data class AttentionWindow(
     val endM: Double,     // Distance from row start to stop looking (should be > row length)
 ) {
     fun contains(distanceM: Double): Boolean = distanceM >= startM && distanceM <= endM
+
+    companion object {
+        fun forRowLength(lengthM: Double): AttentionWindow = AttentionWindow(
+            startM = (lengthM - 1.0).coerceAtLeast(0.0),
+            endM = lengthM + 0.5,
+        )
+    }
 }
 
 /**
@@ -95,83 +99,11 @@ data class RowDetectionResult(
     val rowCount: Int,
     val rowCentersX: List<Float>,  // X positions in BEV pixel coordinates
     val rowSpacingPx: Float,       // Average spacing in pixels
-    val confidence: Float,         // 0.0 to 1.0
+    val confidence: Float,         // 0.0 to 1.0 (honest, unclamped floor)
     val bevWidth: Int,
     val bevHeight: Int,
-    // Corners of the detected crop field inside the BEV image (empty if not found).
-    // Order: top-left, top-right, bottom-right, bottom-left.
-    val fieldCorners: List<FieldPoint> = emptyList(),
-    // Fraction of the BEV image covered by vegetation (0..1)
-    val vegetationRatio: Float = 0f,
-    // Threshold actually used on the Excess Green Index (Otsu or fallback)
-    val exgThreshold: Int = 0,
+    val detectedRowCount: Int = rowCount,
 )
-
-/**
- * Live status of the Pi's 3D digital-twin render job (`GET /sim3d`).
- */
-@Serializable
-data class Sim3dStatus(
-    val state: String = "idle",
-    val frames: Int = 0,
-    val weeds: Int = 0,
-    val killed: Int = 0,
-    val lanes: Int = 0,
-    val framesDone: Int = 0,
-    val videoUrl: String? = null,
-    val error: String? = null,
-)
-
-/**
- * Response of the Pi's `/image` endpoint: the Pi ran the CV on the uploaded
- * photo and returns the plan it computed.
- */
-@Serializable
-data class PiImageResponse(
-    val accepted: Boolean = false,
-    val rows: Int = 0,
-    val waypoints: Int = 0,
-    val distanceM: Double = 0.0,
-    val analysis: PiAnalysis? = null,
-    val bevUrl: String = "",
-    val overlayUrl: String = "",
-    val simStatusUrl: String? = null,
-    val error: String? = null,
-)
-
-/**
- * What the Pi found in the uploaded photo.
- */
-@Serializable
-data class PiAnalysis(
-    val rowsM: List<Double> = emptyList(),
-    val rowPixels: List<Int> = emptyList(),
-    val vegetationRatio: Double = 0.0,
-    val exgThreshold: Int = 0,
-    val bevWidth: Int = 0,
-    val bevHeight: Int = 0,
-    val warnings: List<String> = emptyList(),
-)
-
-/**
- * Live status of the running mission, polled from the Pi (`GET /status`).
- */
-@Serializable
-data class MissionStatus(
-    val state: String = "IDLE",
-    val rowsDone: Int = 0,
-    val rowsTotal: Int = 0,
-    val weedsFound: Int = 0,
-    val weedsKilled: Int = 0,
-    val weedsRemaining: Int = 0,
-    val distanceM: Double = 0.0,
-    val message: String = "",
-    val finished: Boolean = false,
-    val error: String? = null,
-) {
-    val progress: Float
-        get() = if (rowsTotal > 0) rowsDone.toFloat() / rowsTotal else 0f
-}
 
 /**
  * Homography calibration data

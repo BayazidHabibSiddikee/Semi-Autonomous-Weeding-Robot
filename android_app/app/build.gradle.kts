@@ -12,8 +12,8 @@ android {
         applicationId = "com.weedlaser.bev"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -46,8 +46,8 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
         freeCompilerArgs = listOf(
-            "-Xopt-in=kotlin.RequiresOptIn",
-            "-Xopt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+            "-opt-in=kotlin.RequiresOptIn",
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
         )
     }
 
@@ -60,7 +60,7 @@ android {
         kotlinCompilerExtensionVersion = "1.5.11"
     }
 
-    packagingOptions {
+    packaging {
         resources {
             excludes += "/META-INF/*.kotlin_module"
         }
@@ -75,6 +75,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
@@ -88,6 +89,7 @@ dependencies {
     // CameraX
     implementation("androidx.camera:camera-core:1.3.3")
     implementation("androidx.camera:camera-camera2:1.3.3")
+    implementation("androidx.camera:camera-lifecycle:1.3.3")
     implementation("androidx.camera:camera-view:1.3.3")
     implementation("androidx.camera:camera-video:1.3.3")
     implementation("androidx.camera:camera-extensions:1.3.3")
@@ -108,8 +110,13 @@ dependencies {
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.6.0")
 
-    // OpenCV Android SDK (bundled AAR)
-    implementation(files("libs/opencv.aar"))
+    // OpenCV Android SDK: prefer local AAR if bundled, otherwise pull official Maven Central artifact
+    val localOpenCvAar = file("libs/opencv.aar")
+    if (localOpenCvAar.exists()) {
+        implementation(files(localOpenCvAar))
+    } else {
+        implementation("org.opencv:opencv:4.10.0")
+    }
 
 
     // Testing

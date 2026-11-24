@@ -22,7 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -116,18 +116,22 @@ fun ProjectDetailsScreen() {
                                     val mc = MediaController(ctx)
                                     mc.setAnchorView(this)
                                     setMediaController(mc)
-                                    val uri = Uri.parse("android.resource://${ctx.packageName}/${currentVideoRes!!}")
-                                    setVideoURI(uri)
                                     setOnPreparedListener { mp ->
                                         mp.isLooping = true
                                         start()
                                     }
+                                    val resId = currentVideoRes!!
+                                    tag = resId
+                                    setVideoURI(Uri.parse("android.resource://${ctx.packageName}/$resId"))
                                 }
                             },
                             update = { view ->
-                                val uri = Uri.parse("android.resource://${context.packageName}/${currentVideoRes!!}")
-                                view.setVideoURI(uri)
-                                view.start()
+                                val resId = currentVideoRes ?: return@AndroidView
+                                if (view.tag != resId) {
+                                    view.tag = resId
+                                    view.setVideoURI(Uri.parse("android.resource://${context.packageName}/$resId"))
+                                    view.start()
+                                }
                             },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -167,26 +171,36 @@ fun ProjectDetailsScreen() {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Button(
-                        onClick = { currentVideoRes = R.raw.field_sim_mission },
-                        modifier = Modifier.weight(1f),
-                        colors = if (currentVideoRes == R.raw.field_sim_mission)
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        else
-                            ButtonDefaults.outlinedButtonColors()
-                    ) {
-                        Text(if (isBn) "১. ফিল্ড মিশন সিম" else "1. Field Sim Mission", fontSize = 12.sp)
+                    if (currentVideoRes == R.raw.field_sim_mission) {
+                        Button(
+                            onClick = { currentVideoRes = R.raw.field_sim_mission },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (isBn) "১. ফিল্ড মিশন সিম" else "1. Field Sim Mission", fontSize = 12.sp)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { currentVideoRes = R.raw.field_sim_mission },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (isBn) "১. ফিল্ড মিশন সিম" else "1. Field Sim Mission", fontSize = 12.sp)
+                        }
                     }
 
-                    Button(
-                        onClick = { currentVideoRes = R.raw.rover_weeding_anim },
-                        modifier = Modifier.weight(1f),
-                        colors = if (currentVideoRes == R.raw.rover_weeding_anim)
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        else
-                            ButtonDefaults.outlinedButtonColors()
-                    ) {
-                        Text(if (isBn) "২. ৩ডি অ্যানিমেশন" else "2. 3D Blender Anim", fontSize = 12.sp)
+                    if (currentVideoRes == R.raw.rover_weeding_anim) {
+                        Button(
+                            onClick = { currentVideoRes = R.raw.rover_weeding_anim },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (isBn) "২. ৩ডি অ্যানিমেশন" else "2. 3D Blender Anim", fontSize = 12.sp)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { currentVideoRes = R.raw.rover_weeding_anim },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(if (isBn) "২. ৩ডি অ্যানিমেশন" else "2. 3D Blender Anim", fontSize = 12.sp)
+                        }
                     }
                 }
 
@@ -221,7 +235,7 @@ fun ProjectDetailsScreen() {
                     style = MaterialTheme.typography.bodyMedium
                 )
 
-                Divider()
+                HorizontalDivider()
 
                 Text(
                     text = if (isBn)

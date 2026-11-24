@@ -94,4 +94,59 @@ class BoustrophedonGeneratorTest {
         assertEquals(400f, roundTripPx.x, 0.01f)
         assertEquals(300f, roundTripPx.y, 0.01f)
     }
+
+    @Test
+    fun testFieldCornersValidationPureJvm() {
+        val valid = FieldCorners(
+            topLeft = ImagePoint(100f, 100f),
+            topRight = ImagePoint(700f, 120f),
+            bottomRight = ImagePoint(750f, 550f),
+            bottomLeft = ImagePoint(80f, 540f),
+        )
+        assertTrue(valid.isValid())
+
+        // Self-intersecting bow-tie quadrilateral must be rejected
+        val bowtie = FieldCorners(
+            topLeft = ImagePoint(100f, 100f),
+            topRight = ImagePoint(700f, 550f),
+            bottomRight = ImagePoint(700f, 100f),
+            bottomLeft = ImagePoint(100f, 550f),
+        )
+        assertEquals(false, bowtie.isValid())
+
+        // Counter-clockwise order must be rejected
+        val counterClockwise = FieldCorners(
+            topLeft = ImagePoint(100f, 100f),
+            topRight = ImagePoint(80f, 540f),
+            bottomRight = ImagePoint(750f, 550f),
+            bottomLeft = ImagePoint(700f, 120f),
+        )
+        assertEquals(false, counterClockwise.isValid())
+
+        // Out-of-bounds corners must fail isValidForImage
+        assertTrue(valid.isValidForImage(800f, 600f))
+        assertEquals(false, valid.isValidForImage(600f, 500f))
+    }
+
+    @Test
+    fun testDynamicAttentionWindowMatchesFieldLength() {
+        val field = Field(widthM = 4.0, lengthM = 12.0, totalRows = 5, rowSpacingM = 0.8)
+        val calibration = HomographyCalibration(
+            sourceCorners = FieldCorners(
+                ImagePoint(0f, 0f),
+                ImagePoint(800f, 0f),
+                ImagePoint(800f, 600f),
+                ImagePoint(0f, 600f),
+            ),
+            destWidth = 800,
+            destHeight = 600,
+            matrix = List(9) { 0f },
+            fieldWidthM = 4.0,
+            fieldLengthM = 12.0,
+        )
+        val rows = RowDetectionResult(5, listOf(80f, 240f, 400f, 560f, 720f), 160f, 0.9f, 800, 600)
+        val mission = generator.generate(field, rows, calibration)
+        assertEquals(11.0, mission.attentionWindow.startM, 0.001)
+        assertEquals(12.5, mission.attentionWindow.endM, 0.001)
+    }
 }

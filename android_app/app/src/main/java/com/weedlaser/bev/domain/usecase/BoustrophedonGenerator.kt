@@ -1,5 +1,6 @@
 package com.weedlaser.bev.domain.usecase
 
+import com.weedlaser.bev.domain.model.AttentionWindow
 import com.weedlaser.bev.domain.model.Field
 import com.weedlaser.bev.domain.model.FieldPoint
 import com.weedlaser.bev.domain.model.HomographyCalibration
@@ -32,14 +33,7 @@ class BoustrophedonGenerator {
         calibration: HomographyCalibration,
         rowLengthOverrideM: Double? = null,
     ): Mission {
-        // Headland margin keeps the rover clear of the field edges: the first
-        // and last part of every row are not driven. An explicit override is
-        // treated as the exact driving distance and stays as-is.
-        val inset = field.headlandMarginM.coerceAtLeast(0.0)
-        val rowLengthM = rowLengthOverrideM
-            ?: (field.lengthM - 2.0 * inset).coerceAtLeast(0.5)
-        val xEntry = inset
-        val xExit = (field.lengthM - inset).coerceAtLeast(inset)
+        val rowLengthM = rowLengthOverrideM ?: field.lengthM
 
         // Convert detected row centers (BEV pixels) to field Y meters
         val rowYs = rows.rowCentersX.map { px ->
@@ -55,18 +49,17 @@ class BoustrophedonGenerator {
 
         val segments = buildList {
             var seq = 1
-            var startRow: Int? = null
             var prevTurn: TurnDirection? = null
 
             effectiveRowYs.forEachIndexed { index, rowY ->
                 val isLastRow = index == effectiveRowYs.size - 1
 
                 // Start point of this row
-                val startLateral = if (index % 2 == 0) xEntry else xExit
+                val startLateral = if (index % 2 == 0) 0.0 else rowLengthM
                 val startPoint = FieldPoint(startLateral, rowY)
 
                 // End point of this row
-                val endLateral = if (index % 2 == 0) xExit else xEntry
+                val endLateral = if (index % 2 == 0) rowLengthM else 0.0
                 val endPoint = FieldPoint(endLateral, rowY)
 
                 // Decide turn direction
@@ -83,6 +76,8 @@ class BoustrophedonGenerator {
                         endPoint = endPoint,
                     )
                 )
+
+                prevTurn = nextTurn
 
                 // Turn to next row if not last
                 if (!isLastRow) {
@@ -103,9 +98,15 @@ class BoustrophedonGenerator {
             }
         }
 
+        val attentionWindow = AttentionWindow(
+            startM = (rowLengthM - 1.0).coerceAtLeast(0.0),
+            endM = rowLengthM + 0.5,
+        )
+
         return Mission(
             field = field,
             path = segments,
+            attentionWindow = attentionWindow,
         )
     }
 

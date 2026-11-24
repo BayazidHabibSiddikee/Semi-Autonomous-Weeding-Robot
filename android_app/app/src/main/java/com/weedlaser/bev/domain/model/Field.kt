@@ -12,12 +12,6 @@ data class Field(
     val totalRows: Int = 10,            // Number of crop rows
     val rowSpacingM: Double = 0.6,      // Distance between row centers in meters
     val originCorner: OriginCorner = OriginCorner.TOP_LEFT,  // Reference corner for coordinate system
-    val speedMps: Double = 0.5,         // Rover driving speed in the simulated run
-    val laserRangeM: Double = 0.30,     // How far the laser can zap a weed
-    val weedThreshold: Double = 50.0,   // 0..100 - how small a weed is still targeted
-    val headlandMarginM: Double = 0.2,  // Distance kept from the field edges
-    val maxWeeds: Double = 60.0,        // Cap on weeds modelled in the sim
-    val renderer: String = "freecad",   // freecad = fast CAD sim, blender = photoreal
 ) {
     /**
      * Calculate row spacing from field width and row count
@@ -82,25 +76,53 @@ data class FieldCorners(
     fun toArray(): Array<ImagePoint> = toList().toTypedArray()
     
     /**
-     * Validate corners form a reasonable quadrilateral
+     * Validate corners form a reasonable convex, clockwise, non-self-intersecting quadrilateral.
+     * Pure Kotlin so it runs safely in both JVM unit tests and Android runtime.
      */
     fun isValid(): Boolean {
         val points = toList()
-        // Check no duplicate points
         if (points.distinct().size != 4) return false
-        // Check roughly convex (no self-intersection)
-        // Simple check: area should be positive
-        val area = polygonArea(points.map { it.toPointF() })
-        return area > 1000 // Minimum 1000 px^2
+        val signedArea = signedPolygonArea(points)
+        // In image coordinates (Y downward), clockwise TL->TR->BR->BL has positive signed area
+        if (signedArea <= 1000f) return false
+        return isConvexClockwise(points)
     }
-    
-    private fun polygonArea(points: List<android.graphics.PointF>): Float {
+
+    /**
+     * Validate corners against the actual source image dimensions:
+     * all 4 corners must lie within [0..imageWidth] x [0..imageHeight],
+     * be ordered clockwise without self-intersection, and cover at least 2% of the image.
+     */
+    fun isValidForImage(imageWidth: Float, imageHeight: Float): Boolean {
+        if (imageWidth <= 0f || imageHeight <= 0f) return false
+        val points = toList()
+        if (points.any { it.x < 0f || it.y < 0f || it.x > imageWidth || it.y > imageHeight }) {
+            return false
+        }
+        if (!isValid()) return false
+        val minArea = (imageWidth * imageHeight) * 0.02f
+        return signedPolygonArea(points) >= minArea
+    }
+
+    private fun signedPolygonArea(points: List<ImagePoint>): Float {
         var area = 0f
         for (i in points.indices) {
             val j = (i + 1) % points.size
             area += points[i].x * points[j].y
             area -= points[j].x * points[i].y
         }
-        return kotlin.math.abs(area) / 2
+        return area / 2f
+    }
+
+    private fun isConvexClockwise(points: List<ImagePoint>): Boolean {
+        for (i in points.indices) {
+            val a = points[i]
+            val b = points[(i + 1) % points.size]
+            val c = points[(i + 2) % points.size]
+            val cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+            // Image Y points downward, so clockwise turns have positive cross product
+            if (cross <= 1e-3f) return false
+        }
+        return true
     }
 }

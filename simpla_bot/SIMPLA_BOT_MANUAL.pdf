@@ -1,0 +1,794 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R] /Count 6 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 2667 >>
+stream
+0.10 0.28 0.20 rg
+0 582 612 210 re f
+0.88 0.42 0.12 rg
+0 574 612 8 re f
+1 1 1 rg
+BT /F2 28 Tf 48 697 Td (SIMPLA BOT) Tj ET
+BT /F1 15 Tf 48 667 Td (Complete Hardware, Wiring & Operation Manual) Tj ET
+0.82 0.94 0.87 rg
+BT /F1 11 Tf 48 634 Td (Sipeed MaixSense-A075V  +  Normal Motor Driver  +  Flame Control & Grinder) Tj ET
+BT /F3 10 Tf 48 608 Td (Git Branch: simpla_bot   |   Version 1.0   |   Zero-ROS Standalone Python 3) Tj ET
+0.95 0.97 0.96 rg
+48 367 516 170 re f
+0.15 0.35 0.25 RG 1 w
+48 367 516 170 re S
+0.10 0.28 0.20 rg
+BT /F2 12 Tf 64 511 Td (WHAT THIS ROBOT USES) Tj ET
+0.15 0.18 0.16 rg
+BT /F1 9.5 Tf 64 487 Td (1. Sensor \(All Spatial Logic\): Sipeed MaixSense-A075V ToF Depth + RGB \(USB-RNDIS 192.168.233.1\)) Tj ET
+BT /F1 9.5 Tf 64 469 Td (   Detects corners \(Left/Right/Dead-End/Row-End\), distance-to-go \(mm\), obstacles & weeds.) Tj ET
+BT /F1 9.5 Tf 64 451 Td (2. Drive Control: Standard Normal Motor Driver \(L298N, BTS7960, or Arduino USB Serial\).) Tj ET
+BT /F1 9.5 Tf 64 433 Td (   Direct Raspberry Pi GPIO or Arduino Uno/Nano hardware watchdog bridge.) Tj ET
+BT /F1 9.5 Tf 64 415 Td (3. Weeding Tools ONLY: 2-Channel Opto-Isolated Relay for Grinding Machine + Flame Control.) Tj ET
+BT /F1 9.5 Tf 64 397 Td (4. Safety First: dry_run=True default, stationary interlock, 2.5s flame cap, physical E-Stop.) Tj ET
+0.10 0.28 0.20 rg
+BT /F2 13 Tf 48 331 Td (TABLE OF CONTENTS) Tj ET
+0.18 0.20 0.19 rg
+BT /F1 10.5 Tf 60 309 Td (1. System Architecture & Bill of Materials \(BOM\)) Tj ET
+BT /F1 10.5 Tf 60 292 Td (2. Wiring Diagrams & Pinout Tables \(Raspberry Pi GPIO + Arduino Serial\)) Tj ET
+BT /F1 10.5 Tf 60 275 Td (3. Sipeed MaixSense-A075V Mounting, USB-RNDIS Setup & Protocol) Tj ET
+BT /F1 10.5 Tf 60 258 Td (4. Corner Detection, Distance-to-Go Math & Weed-to-Tool Alignment) Tj ET
+BT /F1 10.5 Tf 60 241 Td (5. Normal Motor Driver Calibration \(Distance, 90-Deg Turns & Tool Offset\)) Tj ET
+BT /F1 10.5 Tf 60 224 Td (6. Flame Control & Grinding Machine Safety Interlocks \(5 Layers\)) Tj ET
+BT /F1 10.5 Tf 60 207 Td (7. Step-by-Step Bench Test, Dry-Run & Armed Field Operation) Tj ET
+BT /F1 10.5 Tf 60 190 Td (8. Troubleshooting Guide & Creating the simpla_bot Git Branch) Tj ET
+0.98 0.92 0.90 rg
+48 66 516 68 re f
+0.78 0.16 0.12 RG 1.2 w
+48 66 516 68 re S
+0.72 0.12 0.08 rg
+BT /F2 10.5 Tf 60 114 Td (CRITICAL SAFETY NOTICE - READ BEFORE POWERING ON) Tj ET
+0.20 0.10 0.10 rg
+BT /F1 9 Tf 60 96 Td (Always wire a physical Normally-Closed E-Stop switch in series with 12V motor, grinder & gas valve power.) Tj ET
+BT /F1 9 Tf 60 81 Td (Complete all bench & dry-run tests with wheels elevated and gas supply CLOSED before passing --arm-tools.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 5997 >>
+stream
+0.15 0.35 0.25 rg
+BT /F2 8.5 Tf 48 760 Td (SIMPLA BOT TECHNICAL & OPERATOR MANUAL  |  BRANCH: simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.8 w
+48 754 m 564 754 l S
+0.12 0.32 0.22 rg
+48 710 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 716 Td (1. System Architecture & Bill of Materials) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.8 Tf 48 694 Td (Simpla Bot is a minimal, zero-ROS weeding robot architecture created for the simpla_bot branch.) Tj ET
+BT /F1 9.8 Tf 48 680.5 Td (It eliminates complex LiDAR/SLAM pipelines and relies on a single Sipeed MaixSense-A075V) Tj ET
+BT /F1 9.8 Tf 48 667.0 Td (ToF+RGB camera for all spatial intelligence: measuring exact forward distance-to-go, detecting) Tj ET
+BT /F1 9.8 Tf 48 653.5 Td (left/right corners and row ends, stopping for obstacles, and computing exact weed-to-tool) Tj ET
+BT /F1 9.8 Tf 48 640.0 Td (alignment.) Tj ET
+0.94 0.96 0.95 rg
+48 525.9 516 101.6 re f
+0.75 0.80 0.77 RG 0.6 w
+48 525.9 516 101.6 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 614.5 Td (  [ Sipeed MaixSense-A075V ] --- USB-RNDIS \(192.168.233.1\) ---> [ Raspberry Pi / Python 3 ]) Tj ET
+BT /F3 8.0 Tf 58 603.3 Td (                                                                       |           |) Tj ET
+BT /F3 8.0 Tf 58 592.0999999999999 Td (                        Option A: Direct Pi GPIO \(backend: gpio\) ------+           |) Tj ET
+BT /F3 8.0 Tf 58 580.8999999999999 Td (                        Option B: Arduino USB Serial \(backend: serial\) ------------+) Tj ET
+BT /F3 8.0 Tf 58 569.6999999999998 Td (                                                                                   v) Tj ET
+BT /F3 8.0 Tf 58 558.4999999999998 Td (                  [ Normal Motor Driver \(L298N / BTS7960\) ]   [ 2-Ch Relay + NC E-Stop ]) Tj ET
+BT /F3 8.0 Tf 58 547.2999999999997 Td (                         |                        |               |              |) Tj ET
+BT /F3 8.0 Tf 58 536.0999999999997 Td (                    Left Motor               Right Motor      CH1 Grinder    CH2 Flame) Tj ET
+0.16 0.36 0.26 rg
+48 503.9 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 503.9 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 508.9 Td (Qty) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 90 508.9 Td (Component) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 245 508.9 Td (Specification & Role) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 486.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 491.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 491.9 Td (Sipeed MaixSense-A075V) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 491.9 Td (16-bit ToF Depth \(200-2400mm\) + RGB over USB-C) Tj ET
+0.95 0.97 0.96 rg
+48 469.9 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 469.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 474.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 474.9 Td (Raspberry Pi 3B+/4/5) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 474.9 Td (Runs pure-Python simpla_bot controller \(no ROS needed\)) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 452.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 457.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 457.9 Td (Normal Motor Driver) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 457.9 Td (L298N \(bench/light\) or dual BTS7960 43A \(heavy field\)) Tj ET
+0.95 0.97 0.96 rg
+48 435.9 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 435.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 440.9 Td (2) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 440.9 Td (DC Geared Motors) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 440.9 Td (12V or 24V differential drive \(left + right wheels\)) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 418.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 423.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 423.9 Td (2-Channel Relay Board) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 423.9 Td (5V opto-isolated, active-LOW, 10A-30A contacts) Tj ET
+0.95 0.97 0.96 rg
+48 401.9 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 401.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 406.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 406.9 Td (Grinding Machine) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 406.9 Td (12V/24V trimmer or contactor wired to Relay CH1 \(NO\)) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 384.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 389.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 389.9 Td (Flame Control Kit) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 389.9 Td (12V NC gas solenoid + spark igniter + flashback arrestor) Tj ET
+0.95 0.97 0.96 rg
+48 367.9 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 367.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 372.9 Td (1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 372.9 Td (Physical E-Stop \(NC\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 372.9 Td (Latching red mushroom switch cutting 12V + logic pin) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 350.9 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 355.9 Td (0-1) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 90 355.9 Td (Arduino Uno / Nano) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 245 355.9 Td (Optional serial bridge with 800ms hardware watchdog) Tj ET
+0.12 0.32 0.22 rg
+48 314.9 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 320.9 Td (2. Wiring Diagrams & Pinout Tables) Tj ET
+0.99 0.94 0.90 rg
+48 222.89999999999998 516 80.0 re f
+0.85 0.36 0.10 RG 1 w
+48 222.89999999999998 516 80.0 re S
+0.72 0.24 0.05 rg
+BT /F2 9.5 Tf 58 287.9 Td (POWER & GROUNDING RULE) Tj ET
+0.22 0.14 0.10 rg
+BT /F1 9 Tf 58 272.9 Td (NEVER power drive motors, grinding machine, or gas solenoid from Raspberry Pi 5V pins.) Tj ET
+BT /F1 9 Tf 58 260.4 Td (Always wire the physical Normally-Closed E-Stop switch in series with the 12V positive) Tj ET
+BT /F1 9 Tf 58 247.89999999999998 Td (line feeding the Motor Driver and Relay COM terminals, and connect all GND lines) Tj ET
+BT /F1 9 Tf 58 235.39999999999998 Td (together.) Tj ET
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 208.89999999999998 Td (Option A: Direct Raspberry Pi GPIO Wiring \(config.yaml -> backend: gpio\)) Tj ET
+0.78 0.84 0.80 RG 0.6 w
+48 42 m 564 42 l S
+0.40 0.46 0.43 rg
+BT /F1 8 Tf 48 28 Td (Simpla Bot Manual  -  MaixSense-A075V + Normal Motor Driver + Flame & Grinder) Tj ET
+BT /F2 8.5 Tf 506 28 Td (Page 2 of 6) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 7804 >>
+stream
+0.15 0.35 0.25 rg
+BT /F2 8.5 Tf 48 760 Td (SIMPLA BOT TECHNICAL & OPERATOR MANUAL  |  BRANCH: simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.8 w
+48 754 m 564 754 l S
+0.16 0.36 0.26 rg
+48 721 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 721 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 726 Td (Signal Function) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 199 726 Td (Pi BCM Pin) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 289 726 Td (Header Pin) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 379 726 Td (Connect To) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 704 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 709 Td (Left Motor PWM) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 709 Td (GPIO 12) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 709 Td (Pin 32) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 709 Td (L298N ENA \(or BTS7960 EN\)) Tj ET
+0.95 0.97 0.96 rg
+48 687 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 687 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 692 Td (Left Dir A / Dir B) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 692 Td (GPIO 5 / 6) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 692 Td (Pin 29 / 31) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 692 Td (L298N IN1 / IN2) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 670 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 675 Td (Right Motor PWM) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 675 Td (GPIO 13) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 675 Td (Pin 33) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 675 Td (L298N ENB) Tj ET
+0.95 0.97 0.96 rg
+48 653 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 653 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 658 Td (Right Dir A / Dir B) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 658 Td (GPIO 20 / 21) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 658 Td (Pin 38 / 40) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 658 Td (L298N IN3 / IN4) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 636 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 641 Td (Grinder Relay \(CH1\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 641 Td (GPIO 17) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 641 Td (Pin 11) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 641 Td (2-Ch Relay IN1 \(Active-LOW\)) Tj ET
+0.95 0.97 0.96 rg
+48 619 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 619 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 624 Td (Flame Relay \(CH2\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 624 Td (GPIO 27) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 624 Td (Pin 13) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 624 Td (2-Ch Relay IN2 \(Active-LOW\)) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 602 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 607 Td (Hardware E-Stop \(NC\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 607 Td (GPIO 22) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 607 Td (Pin 15) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 607 Td (NC E-Stop switch -> GND) Tj ET
+0.95 0.97 0.96 rg
+48 585 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 585 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 590 Td (Common Ground) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 199 590 Td (GND) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 289 590 Td (Pin 6 / 9) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 379 590 Td (Motor Driver + Relay + Battery GND) Tj ET
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 569 Td (Option B: Arduino Uno/Nano USB Serial Bridge \(Recommended for Field\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.8 Tf 48 554 Td (Flash simpla_bot/firmware/simpla_motor_relay.ino to an Arduino Uno or Nano, connect to the) Tj ET
+BT /F1 9.8 Tf 48 540.5 Td (Raspberry Pi via USB \(/dev/ttyUSB0\), and set backend: serial in simpla_bot/config.yaml. The) Tj ET
+BT /F1 9.8 Tf 48 527.0 Td (Arduino enforces an independent 800ms watchdog and 2.5s hard flame shutoff in firmware.) Tj ET
+0.16 0.36 0.26 rg
+48 497.5 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 497.5 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 502.5 Td (Signal Function) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 234 502.5 Td (Arduino Pin) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 364 502.5 Td (Connect To) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 480.5 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 485.5 Td (Left Motor PWM / IN1 / IN2) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 234 485.5 Td (D5 / D7 / D8) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 364 485.5 Td (L298N ENA / IN1 / IN2) Tj ET
+0.95 0.97 0.96 rg
+48 463.5 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 463.5 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 468.5 Td (Right Motor PWM / IN3 / IN4) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 234 468.5 Td (D6 / D9 / D10) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 364 468.5 Td (L298N ENB / IN3 / IN4) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 446.5 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 451.5 Td (Grinder Relay \(CH1\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 234 451.5 Td (D3) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 364 451.5 Td (2-Ch Relay IN1 \(Active-LOW\)) Tj ET
+0.95 0.97 0.96 rg
+48 429.5 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 429.5 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 434.5 Td (Flame Relay \(CH2\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 234 434.5 Td (D4) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 364 434.5 Td (2-Ch Relay IN2 \(Active-LOW\)) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 412.5 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 417.5 Td (Hardware E-Stop \(NC\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 234 417.5 Td (D2 \(INPUT_PULLUP\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 364 417.5 Td (NC E-Stop switch -> GND) Tj ET
+0.94 0.96 0.95 rg
+48 347.7 516 56.8 re f
+0.75 0.80 0.77 RG 0.6 w
+48 347.7 516 56.8 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 391.5 Td (12V+ Battery -> [20A FUSE] -> [PHYSICAL E-STOP NC] --+--> Motor Driver +12V) Tj ET
+BT /F3 8.0 Tf 58 380.3 Td (                                                     +--> Relay CH1 COM -> \(NO\) Grinder +) Tj ET
+BT /F3 8.0 Tf 58 369.1 Td (                                                     +--> Relay CH2 COM -> \(NO\) Flame Valve +) Tj ET
+BT /F3 8.0 Tf 58 357.90000000000003 Td (NOTE: Always use the NO \(Normally Open\) relay terminals so power loss keeps tools OFF.) Tj ET
+0.12 0.32 0.22 rg
+48 314.7 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 320.7 Td (3. Sipeed MaixSense-A075V Mounting & USB-RNDIS Setup) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 298.7 Td (- Mounting Height & Angle: Mount centered on the front nose at 350mm-500mm height) Tj ET
+BT /F1 9.5 Tf 66 285.7 Td (\(camera_height_mm\), pitched downward 25-35 degrees \(camera_pitch_deg\) so it views both) Tj ET
+BT /F1 9.5 Tf 66 272.7 Td (upcoming walls/corners and weeds on the ground.) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 258.2 Td (- Tool Offset Measurement: Measure horizontal mm from camera lens to the grinder/flame) Tj ET
+BT /F1 9.5 Tf 66 245.2 Td (tip. Set tool_offset_forward_mm negative if tool is behind the camera \(e.g. -120.0\) or) Tj ET
+BT /F1 9.5 Tf 66 232.2 Td (positive if mounted ahead \(+150.0\).) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 217.7 Td (- USB-RNDIS Connection: Plug MaixSense USB-C into Raspberry Pi. Default camera IP is) Tj ET
+BT /F1 9.5 Tf 66 204.7 Td (192.168.233.1. Simpla Bot sends the official 12-byte POST /set_cfg packet and polls GET) Tj ET
+BT /F1 9.5 Tf 66 191.7 Td (/getdeep for 16-bit depth + RGB JPEG.) Tj ET
+0.94 0.96 0.95 rg
+48 102.0 516 79.19999999999999 re f
+0.75 0.80 0.77 RG 0.6 w
+48 102.0 516 79.19999999999999 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 168.2 Td (# Verify MaixSense link and inspect live L/C/R depths & corners:) Tj ET
+BT /F3 8.0 Tf 58 157.0 Td (ping -c 3 192.168.233.1) Tj ET
+BT /F3 8.0 Tf 58 145.8 Td (python3 -m simpla_bot.run_simpla_bot --check-maixsense) Tj ET
+BT /F3 8.0 Tf 58 134.60000000000002 Td () Tj ET
+BT /F3 8.0 Tf 58 123.40000000000002 Td (# If Linux did not auto-assign an IP to usb0:) Tj ET
+BT /F3 8.0 Tf 58 112.20000000000002 Td (sudo ip addr add 192.168.233.2/24 dev usb0 && sudo ip link set usb0 up) Tj ET
+0.78 0.84 0.80 RG 0.6 w
+48 42 m 564 42 l S
+0.40 0.46 0.43 rg
+BT /F1 8 Tf 48 28 Td (Simpla Bot Manual  -  MaixSense-A075V + Normal Motor Driver + Flame & Grinder) Tj ET
+BT /F2 8.5 Tf 506 28 Td (Page 3 of 6) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 5846 >>
+stream
+0.15 0.35 0.25 rg
+BT /F2 8.5 Tf 48 760 Td (SIMPLA BOT TECHNICAL & OPERATOR MANUAL  |  BRANCH: simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.8 w
+48 754 m 564 754 l S
+0.12 0.32 0.22 rg
+48 710 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 716 Td (4. Corner Detection, Distance-to-Go & Weed Alignment Logic) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.8 Tf 48 694 Td (Every ToF depth frame is divided across its mid-horizon band \(25%-68% vertical\) into Left) Tj ET
+BT /F1 9.8 Tf 48 680.5 Td (\(5-33%\), Center \(34-66%\), and Right \(67-95%\) zones. Median depths filter sensor speckle while) Tj ET
+BT /F1 9.8 Tf 48 667.0 Td (the Center 10th percentile catches thin poles or close obstacles.) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 650.5 Td (- Exact Distance-to-Go: recommended_travel_mm = max\(0, center_mm - corner_stop_mm\). As) Tj ET
+BT /F1 9.5 Tf 66 637.5 Td (the bot nears a corner wall, its final step automatically slows to approach_speed_pct) Tj ET
+BT /F1 9.5 Tf 66 624.5 Td (and rolls only the exact remaining mm.) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 610.0 Td (- Row Centering: While cruising straight, steer_adjust_pct = clamp\(\(right_mm - left_mm\)) Tj ET
+BT /F1 9.5 Tf 66 597.0 Td (* 0.04, -18%, +18%\) keeps the rover centered between crop rows or corridor walls without) Tj ET
+BT /F1 9.5 Tf 66 584.0 Td (needing encoders or IMU.) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.5 Tf 56 569.5 Td (- Weed-to-Tool Projection: Green weeds are segmented in the RGB center lane using) Tj ET
+BT /F1 9.5 Tf 66 556.5 Td (Excess-Green \(2G - R - B >= 38\). The centroid ToF depth is projected horizontally using) Tj ET
+BT /F1 9.5 Tf 66 543.5 Td (camera pitch/height to compute dx_to_tool_mm = forward_from_cam_mm -) Tj ET
+BT /F1 9.5 Tf 66 530.5 Td (tool_offset_forward_mm. The rover rolls exactly that far, stops completely, and fires) Tj ET
+BT /F1 9.5 Tf 66 517.5 Td (the selected tool.) Tj ET
+0.16 0.36 0.26 rg
+48 490.0 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 490.0 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 495.0 Td (MaixSense Depth Pattern) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 290 495.0 Td (Corner Type) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 408 495.0 Td (Bot Action) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 473.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 478.0 Td (min_center <= 320mm \(not corner\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 478.0 Td (OBSTACLE_STOP) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 478.0 Td (Immediate full HALT) Tj ET
+0.95 0.97 0.96 rg
+48 456.0 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 456.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 461.0 Td (center <= 520mm, Left >= 1050mm, R shut) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 461.0 Td (LEFT_CORNER) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 461.0 Td (Stop + Pivot -90 deg LEFT) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 439.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 444.0 Td (center <= 520mm, Right >= 1050mm, L shut) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 444.0 Td (RIGHT_CORNER) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 444.0 Td (Stop + Pivot +90 deg RIGHT) Tj ET
+0.95 0.97 0.96 rg
+48 422.0 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 422.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 427.0 Td (center <= 520mm, Both sides open \(T\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 427.0 Td (Wider Side) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 427.0 Td (Pivot 90 deg to wider side) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 405.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 410.0 Td (center <= 520mm, Both sides blocked) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 410.0 Td (DEAD_END) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 410.0 Td (Stop + 180 deg U-TURN) Tj ET
+0.95 0.97 0.96 rg
+48 388.0 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 388.0 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 393.0 Td (Center, Left & Right all >= 1850mm) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 290 393.0 Td (ROW_END_HEADLAND) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 408 393.0 Td (Exited row -> 180 deg U-TURN) Tj ET
+0.12 0.32 0.22 rg
+48 352.0 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 358.0 Td (5. Five-Minute Calibration Guide) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.8 Tf 48 336.0 Td (Because normal motor drivers have no wheel encoders, Simpla Bot uses two simple constants in) Tj ET
+BT /F1 9.8 Tf 48 322.5 Td (simpla_bot/config.yaml to turn millimeter & angle commands into accurate timed moves:) Tj ET
+0.94 0.96 0.95 rg
+48 197.2 516 112.8 re f
+0.75 0.80 0.77 RG 0.6 w
+48 197.2 516 112.8 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 297.0 Td (# 1. Calibrate straight distance \(commands 1000mm at 50% PWM\):) Tj ET
+BT /F3 8.0 Tf 58 285.8 Td (python3 -m simpla_bot.run_simpla_bot --calibrate-drive 1000) Tj ET
+BT /F3 8.0 Tf 58 274.6 Td (# Measure actual tape distance \(mm\). Update config.yaml:) Tj ET
+BT /F3 8.0 Tf 58 263.40000000000003 Td (#   new_speed = old_speed * \(actual_mm / 1000.0\)) Tj ET
+BT /F3 8.0 Tf 58 252.20000000000005 Td () Tj ET
+BT /F3 8.0 Tf 58 241.00000000000006 Td (# 2. Calibrate 90-degree pivot turn:) Tj ET
+BT /F3 8.0 Tf 58 229.80000000000007 Td (python3 -m simpla_bot.run_simpla_bot --calibrate-turn 90) Tj ET
+BT /F3 8.0 Tf 58 218.60000000000008 Td (# Measure actual turn angle \(deg\). Update config.yaml:) Tj ET
+BT /F3 8.0 Tf 58 207.4000000000001 Td (#   new_turn_90_sec = old_turn_90_sec * \(90.0 / actual_deg\)) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 9.8 Tf 48 188.2 Td (3. Calibrate tool_offset_forward_mm: place a green card 600mm ahead and run in dry-run mode) Tj ET
+BT /F1 9.8 Tf 48 174.7 Td (\(--mode live --tool grinder without --arm-tools\). When it stops and prints DRY_RUN_RELAY,) Tj ET
+BT /F1 9.8 Tf 48 161.2 Td (measure how far off the grinder/flame tip is from the card and adjust tool_offset_forward_mm.) Tj ET
+0.78 0.84 0.80 RG 0.6 w
+48 42 m 564 42 l S
+0.40 0.46 0.43 rg
+BT /F1 8 Tf 48 28 Td (Simpla Bot Manual  -  MaixSense-A075V + Normal Motor Driver + Flame & Grinder) Tj ET
+BT /F2 8.5 Tf 506 28 Td (Page 4 of 6) Tj ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 15 0 R >>
+endobj
+15 0 obj
+<< /Length 7075 >>
+stream
+0.15 0.35 0.25 rg
+BT /F2 8.5 Tf 48 760 Td (SIMPLA BOT TECHNICAL & OPERATOR MANUAL  |  BRANCH: simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.8 w
+48 754 m 564 754 l S
+0.12 0.32 0.22 rg
+48 710 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 716 Td (6. Flame Control & Grinder Safety Interlocks) Tj ET
+0.16 0.36 0.26 rg
+48 681 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 681 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 686 Td (Safety Layer) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 169 686 Td (Mechanism) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 454 686 Td (Default Limit) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 664 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 669 Td (1. Safe Boot) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 669 Td (dry_run=True blocks relays unless --arm-tools passed) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 669 Td (dry_run: true) Tj ET
+0.95 0.97 0.96 rg
+48 647 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 647 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 652 Td (2. Zero-Motion) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 652 Td (Software & Arduino block relays if any wheel PWM != 0) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 652 Td (0.45s settle) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 630 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 635 Td (3. Flame Hard Cap) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 635 Td (Software + Arduino both force flame OFF after cap) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 635 Td (max 2.5s burn) Tj ET
+0.95 0.97 0.96 rg
+48 613 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 613 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 618 Td (4. Flame Cooldown) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 618 Td (Mandatory wait between consecutive flame pulses) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 618 Td (3.0s cooldown) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 596 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 601 Td (5. Watchdogs) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 601 Td (Camera freeze or USB disconnect kills all outputs) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 601 Td (1.0s cam / 0.8s USB) Tj ET
+0.95 0.97 0.96 rg
+48 579 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 579 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 584 Td (6. Physical E-Stop) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 169 584 Td (NC mushroom switch cuts 12V supply + signals pin) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 454 584 Td (Instant hardware cut) Tj ET
+0.12 0.32 0.22 rg
+48 543 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 549 Td (7. Step-by-Step Operation & Bench-to-Field Checklist) Tj ET
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 523 Td (Step 1: Offline Bench Simulation \(Run on any PC or Pi\)) Tj ET
+0.94 0.96 0.95 rg
+48 488.8 516 23.2 re f
+0.75 0.80 0.77 RG 0.6 w
+48 488.8 516 23.2 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 499 Td (python3 -m simpla_bot.run_simpla_bot --mode sim --tool both) Tj ET
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 475.8 Td (Step 2: Live Hardware Dry-Run \(Wheels Elevated, Gas Valve CLOSED\)) Tj ET
+0.94 0.96 0.95 rg
+48 419.20000000000005 516 45.599999999999994 re f
+0.75 0.80 0.77 RG 0.6 w
+48 419.20000000000005 516 45.599999999999994 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 451.8 Td (python3 -m simpla_bot.run_simpla_bot --mode live --tool both) Tj ET
+BT /F3 8.0 Tf 58 440.6 Td (# Confirm: wheels turn right direction, corner box triggers turn, unplugging) Tj ET
+BT /F3 8.0 Tf 58 429.40000000000003 Td (# MaixSense halts motors within 1s, and relays stay OFF \(dry_run=True\).) Tj ET
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 406.20000000000005 Td (Step 3: Armed Field Operation \(Physical E-Stop & Fire Extinguisher Ready\)) Tj ET
+0.94 0.96 0.95 rg
+48 349.6 516 45.599999999999994 re f
+0.75 0.80 0.77 RG 0.6 w
+48 349.6 516 45.599999999999994 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 382.20000000000005 Td (python3 -m simpla_bot.run_simpla_bot --mode live --tool grinder --arm-tools) Tj ET
+BT /F3 8.0 Tf 58 371.00000000000006 Td (python3 -m simpla_bot.run_simpla_bot --mode live --tool flame --arm-tools) Tj ET
+BT /F3 8.0 Tf 58 359.80000000000007 Td (python3 -m simpla_bot.run_simpla_bot --mode live --tool both --arm-tools) Tj ET
+0.99 0.94 0.90 rg
+48 264.6 516 80.0 re f
+0.85 0.36 0.10 RG 1 w
+48 264.6 516 80.0 re S
+0.72 0.24 0.05 rg
+BT /F2 9.5 Tf 58 329.6 Td (PRE-FLAME FIELD SAFETY CHECKLIST) Tj ET
+0.22 0.14 0.10 rg
+BT /F1 9 Tf 58 314.6 Td ([ ] Propane/gas fittings leak-checked with soapy water.  [ ] Flashback arrestor) Tj ET
+BT /F1 9 Tf 58 302.1 Td (installed.  [ ] Physical NC E-Stop tested and cuts 12V to solenoid & grinder.  [ ]) Tj ET
+BT /F1 9 Tf 58 289.6 Td (Class ABC fire extinguisher within reach.  [ ] Dry brush/straw cleared from) Tj ET
+BT /F1 9 Tf 58 277.1 Td (boundaries.  [ ] Operator walking alongside.) Tj ET
+0.12 0.32 0.22 rg
+48 230.60000000000002 516 22 re f
+1 1 1 rg
+BT /F2 11.5 Tf 58 236.60000000000002 Td (8. Troubleshooting & Publishing the simpla_bot Branch) Tj ET
+0.16 0.36 0.26 rg
+48 201.60000000000002 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 201.60000000000002 516 17 re S
+1 1 1 rg
+BT /F2 8.5 Tf 54 206.60000000000002 Td (Issue) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 179 206.60000000000002 Td (Root Cause) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 344 206.60000000000002 Td (Solution) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 184.60000000000002 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 189.60000000000002 Td (MaixSense timeout) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 179 189.60000000000002 Td (usb0 missing 192.168.233.x IP) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 344 189.60000000000002 Td (Assign 192.168.233.2/24 to usb0; retry) Tj ET
+0.95 0.97 0.96 rg
+48 167.60000000000002 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 167.60000000000002 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 172.60000000000002 Td (Bot drives backward) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 179 172.60000000000002 Td (Motor wires reversed) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 344 172.60000000000002 Td (Set invert_left or invert_right: true) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 150.60000000000002 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 155.60000000000002 Td (Relays ON at boot) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 179 155.60000000000002 Td (Active-HIGH relay board) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 344 155.60000000000002 Td (Set relay_active_low: false in config & .ino) Tj ET
+0.95 0.97 0.96 rg
+48 133.60000000000002 516 17 re f
+0.80 0.84 0.81 RG 0.4 w
+48 133.60000000000002 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 138.60000000000002 Td (Blocked: E-stop active) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 179 138.60000000000002 Td (NC switch open or unwired) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 344 138.60000000000002 Td (Verify GND continuity on E-Stop pin) Tj ET
+0.80 0.84 0.81 RG 0.4 w
+48 116.60000000000002 516 17 re S
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 54 121.60000000000002 Td (No weeds detected live) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 179 121.60000000000002 Td (JPEG decoder not installed) Tj ET
+0.14 0.16 0.15 rg
+BT /F1 8.4 Tf 344 121.60000000000002 Td (Run: pip install pillow on Raspberry Pi) Tj ET
+0.78 0.84 0.80 RG 0.6 w
+48 42 m 564 42 l S
+0.40 0.46 0.43 rg
+BT /F1 8 Tf 48 28 Td (Simpla Bot Manual  -  MaixSense-A075V + Normal Motor Driver + Flame & Grinder) Tj ET
+BT /F2 8.5 Tf 506 28 Td (Page 5 of 6) Tj ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 17 0 R >>
+endobj
+17 0 obj
+<< /Length 822 >>
+stream
+0.15 0.35 0.25 rg
+BT /F2 8.5 Tf 48 760 Td (SIMPLA BOT TECHNICAL & OPERATOR MANUAL  |  BRANCH: simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.8 w
+48 754 m 564 754 l S
+0.14 0.36 0.24 rg
+BT /F2 10.5 Tf 48 730 Td (Creating & Pushing Branch 'simpla_bot' on GitHub) Tj ET
+0.94 0.96 0.95 rg
+48 673.4 516 45.599999999999994 re f
+0.75 0.80 0.77 RG 0.6 w
+48 673.4 516 45.599999999999994 re S
+0.10 0.15 0.12 rg
+BT /F3 8.0 Tf 58 706 Td (# From your local git clone root:) Tj ET
+BT /F3 8.0 Tf 58 694.8 Td (bash simpla_bot/setup_simpla_bot_branch.sh) Tj ET
+BT /F3 8.0 Tf 58 683.5999999999999 Td (git push -u origin simpla_bot) Tj ET
+0.78 0.84 0.80 RG 0.6 w
+48 42 m 564 42 l S
+0.40 0.46 0.43 rg
+BT /F1 8 Tf 48 28 Td (Simpla Bot Manual  -  MaixSense-A075V + Normal Motor Driver + Flame & Grinder) Tj ET
+BT /F2 8.5 Tf 506 28 Td (Page 6 of 6) Tj ET
+endstream
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000155 00000 n 
+0000000225 00000 n 
+0000000300 00000 n 
+0000000368 00000 n 
+0000000514 00000 n 
+0000003232 00000 n 
+0000003378 00000 n 
+0000009426 00000 n 
+0000009574 00000 n 
+0000017430 00000 n 
+0000017578 00000 n 
+0000023476 00000 n 
+0000023624 00000 n 
+0000030751 00000 n 
+0000030899 00000 n 
+trailer
+<< /Size 18 /Root 1 0 R >>
+startxref
+31772
+%%EOF

@@ -1,0 +1,7 @@
+{
+  "name": "Weed Laser BEV Robot",
+  "description": "Semi-Autonomous Weeding Robot Android App with Bird's Eye View, OpenCV, and Mission Control.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
