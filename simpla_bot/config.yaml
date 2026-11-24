@@ -39,12 +39,13 @@ motor_driver:
   serial_port: "/dev/ttyUSB0"
   serial_baud: 115200
   pwm_freq_hz: 1000
-  left_ena_pin: 12
-  left_in1_pin: 5
-  left_in2_pin: 6
-  right_enb_pin: 13
-  right_in3_pin: 20
-  right_in4_pin: 21
+  # Reference ESP32 firmware GPIOs (not Raspberry Pi BCM pins).
+  left_ena_pin: 27
+  left_in1_pin: 25
+  left_in2_pin: 26
+  right_enb_pin: 14
+  right_in3_pin: 32
+  right_in4_pin: 33
   speed_mm_per_sec_at_100pct: 300.0  # Placeholder; calibrate.
   turn_90_deg_sec_at_50pct: 1.8      # Placeholder; calibrate.
   invert_left: false
@@ -67,7 +68,7 @@ tools:
   relay_active_low: true
   grinder_relay_pin: 17
   flame_relay_pin: 27
-  estop_pin: 22
+  estop_pin: 22  # Pi GPIO E-stop is not used by serial backend; ESP32 uses GPIO4.
   estop_active_high: true
   settle_before_fire_s: 0.45
   grinder_duration_s: 2.0
