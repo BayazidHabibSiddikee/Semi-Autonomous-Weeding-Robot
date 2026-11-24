@@ -32,7 +32,7 @@ navigation:
   max_steer_adjust_pct: 10
 
 motor_driver:
-  backend: "serial"  # Pi sends motor commands to ESP32 over USB serial.
+  backend: "sim"  # Safe CLI default; hub_server selects USB serial for live control.
   driver_type: "l298n"
   wiring: "two_left_parallel_two_right_parallel"
   motors_per_channel: 2
