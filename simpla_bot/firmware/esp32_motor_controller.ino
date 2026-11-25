@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>
 
@@ -41,10 +42,12 @@ const int ARC_INACTIVE = LOW;
 const unsigned long MAX_ARC_MS = 2000;
 
 const unsigned long WATCHDOG_MS = 500;
-const unsigned long WIFI_RETRY_MS = 5000;
+const unsigned long WIFI_RETRY_MS = 30000;
 const uint16_t UDP_DISCOVERY_PORT = 8082;
 
-WebServer server(8081);
+WebServer server(80);
+WebServer server8081(8081);
+DNSServer dnsServer;
 WiFiUDP udp;
 String rx;
 unsigned long lastCommand = 0;
@@ -185,11 +188,12 @@ String command(String line) {
          + " ARC=" + (arcActive ? "1" : "0");
   }
   if (line == "STATUS?") {
+    String currentIp = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
     return String("{\"heading\":") + headingNow + ",\"left\":" + leftNow + ",\"right\":" + rightNow
          + ",\"servo_deg\":" + servoDegNow + ",\"arc\":" + (arcActive ? 1 : 0)
          + ",\"estop\":" + (digitalRead(ESTOP) == HIGH ? 1 : 0)
          + ",\"wifi\":" + (WiFi.status() == WL_CONNECTED ? 1 : 0)
-         + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+         + ",\"ip\":\"" + currentIp + "\"}";
   }
   if (line.startsWith("SERVO ") || line.startsWith("TURRET ")) {
     int sp = line.indexOf(' ');
@@ -235,23 +239,65 @@ String command(String line) {
   return "ERR UNKNOWN";
 }
 
-void setupWifi() {
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.softAP(AP_SSID, AP_PASS);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  MDNS.begin("esp32-rover");
-  udp.begin(UDP_DISCOVERY_PORT);
-
-  server.on("/", []() { server.send_P(200, "text/html", WEB_UI_HTML); });
-  server.on("/ping", []() { server.send(200, "text/plain", command("PING")); });
-  server.on("/status", []() { server.send(200, "application/json", command("STATUS?")); });
-  server.on("/cmd", []() {
+void setupWebServers() {
+  auto onRoot = []() { server.send_P(200, "text/html", WEB_UI_HTML); };
+  auto onPing = []() { server.send(200, "text/plain", command("PING")); };
+  auto onStatus = []() { server.send(200, "application/json", command("STATUS?")); };
+  auto onCmd = []() {
     String q = server.hasArg("q") ? server.arg("q") : "";
     String res = command(q);
     server.send(res.startsWith("ERR") ? 400 : 200, "text/plain", res);
+  };
+
+  server.on("/", onRoot);
+  server.on("/generate_204", onRoot);
+  server.on("/gen_204", onRoot);
+  server.on("/hotspot-detect.html", onRoot);
+  server.on("/canonical.html", onRoot);
+  server.on("/ncsi.txt", onRoot);
+  server.on("/ping", onPing);
+  server.on("/status", onStatus);
+  server.on("/cmd", onCmd);
+  server.onNotFound([]() {
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
   });
+
+  server8081.on("/", []() { server8081.send_P(200, "text/html", WEB_UI_HTML); });
+  server8081.on("/ping", []() { server8081.send(200, "text/plain", command("PING")); });
+  server8081.on("/status", []() { server8081.send(200, "application/json", command("STATUS?")); });
+  server8081.on("/cmd", []() {
+    String q = server8081.hasArg("q") ? server8081.arg("q") : "";
+    String res = command(q);
+    server8081.send(res.startsWith("ERR") ? 400 : 200, "text/plain", res);
+  });
+
   server.begin();
+  server8081.begin();
+}
+
+void setupWifi() {
+  WiFi.persistent(false);
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setSleep(false);
+
+  IPAddress apIP(192, 168, 4, 1);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  bool apOk = WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 4);
+  Serial.println(apOk ? "[WIFI] AP started: esp32-rover (192.168.4.1)" : "[WIFI] AP failed!");
+
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("[WIFI] Station attempting connect to SSID: ");
+  Serial.println(WIFI_SSID);
+
+  dnsServer.start(53, "*", apIP);
+  MDNS.begin("esp32-rover");
+  udp.begin(UDP_DISCOVERY_PORT);
+
+  setupWebServers();
   wifiStarted = true;
 }
 
@@ -301,7 +347,9 @@ void loop() {
     setArc(false);
   }
   if (wifiStarted) {
+    dnsServer.processNextRequest();
     server.handleClient();
+    server8081.handleClient();
     handleUdpDiscovery();
     if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry > WIFI_RETRY_MS) {
       lastWifiRetry = millis();
