@@ -150,8 +150,8 @@ fun SimplaControlScreen() {
         wifiBinder.bindToWifiHotspot()
     }
 
-    // Dual status poll loop: connects to BOTH Pi Hub AND Direct ESP32 simultaneously
-    LaunchedEffect(transport, host, esp32Host, token) {
+    // Pi Hub status poll loop (independent so ESP32 timeouts never slow down Pi checks)
+    LaunchedEffect(transport, host, token) {
         while (true) {
             if (token.isNotBlank()) {
                 runCatching { requestPi("/api/status") }
@@ -178,7 +178,13 @@ fun SimplaControlScreen() {
             } else {
                 piConnected = false
             }
+            delay(500)
+        }
+    }
 
+    // Direct ESP32 status poll loop (independent)
+    LaunchedEffect(transport, esp32Host) {
+        while (true) {
             runCatching { requestEsp32Status() }
                 .onSuccess {
                     espStatus = it
@@ -196,8 +202,7 @@ fun SimplaControlScreen() {
                         error = it.message
                     }
                 }
-
-            delay(600)
+            delay(800)
         }
     }
 
