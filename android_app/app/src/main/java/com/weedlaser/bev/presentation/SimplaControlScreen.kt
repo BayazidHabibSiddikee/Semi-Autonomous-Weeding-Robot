@@ -34,12 +34,24 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+
+enum class ControlTransport {
+    PI_HUB,
+    DIRECT_ESP32,
+}
 
 @Composable
 fun SimplaControlScreen() {
     val context = LocalContext.current
+    var transport by remember { mutableStateOf(ControlTransport.PI_HUB) }
     var host by remember { mutableStateOf("10.42.0.1") }
+    var esp32Host by remember { mutableStateOf("192.168.4.1") }
     // Fixed default password/token matching Pi Wi-Fi hotspot ("bayazid" / "12345678")
     var token by remember { mutableStateOf("12345678") }
     var mode by remember { mutableStateOf("manual") }
@@ -47,6 +59,8 @@ fun SimplaControlScreen() {
     var status by remember { mutableStateOf(JSONObject()) }
     var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var servoSlider by remember { mutableFloatStateOf(0f) }
+
     val scope = rememberCoroutineScope()
     val wifiBinder = remember { WifiNetworkBinder(context) }
     val http = remember {
@@ -57,7 +71,7 @@ fun SimplaControlScreen() {
     }
     val jsonType = "application/json".toMediaType()
 
-    suspend fun request(path: String, body: JSONObject? = null): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun requestPi(path: String, body: JSONObject? = null): JSONObject = withContext(Dispatchers.IO) {
         val builder = Request.Builder().url("http://$host:8080$path").header("Authorization", "Bearer $token")
         val req = if (body == null) builder.get().build() else builder.post(body.toString().toRequestBody(jsonType)).build()
         http.newCall(req).execute().use { response ->
@@ -65,6 +79,53 @@ fun SimplaControlScreen() {
             if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}: $raw")
             JSONObject(raw)
         }
+    }
+
+    suspend fun requestEsp32Cmd(cmd: String): String = withContext(Dispatchers.IO) {
+        val enc = URLEncoder.encode(cmd, "UTF-8")
+        val req = Request.Builder().url("http://$esp32Host:8081/cmd?q=$enc").get().build()
+        http.newCall(req).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IllegalStateException("ESP32 HTTP ${response.code}: $raw")
+            raw
+        }
+    }
+
+    suspend fun requestEsp32Status(): JSONObject = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url("http://$esp32Host:8081/status").get().build()
+        http.newCall(req).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IllegalStateException("ESP32 HTTP ${response.code}: $raw")
+            JSONObject(raw)
+        }
+    }
+
+    suspend fun discoverEsp32Ip(): String? = withContext(Dispatchers.IO) {
+        var found: String? = null
+        val socket = DatagramSocket().apply {
+            broadcast = true
+            soTimeout = 1000
+        }
+        try {
+            val msg = "DISCOVER_ESP32".toByteArray()
+            for (target in listOf("255.255.255.255", "10.42.0.255", "192.168.4.255")) {
+                runCatching {
+                    socket.send(DatagramPacket(msg, msg.size, InetAddress.getByName(target), 8082))
+                }
+            }
+            val buf = ByteArray(512)
+            val pkt = DatagramPacket(buf, buf.size)
+            try {
+                socket.receive(pkt)
+                val txt = String(pkt.data, 0, pkt.length)
+                val obj = JSONObject(txt)
+                found = obj.optString("ip").takeIf { it.isNotBlank() } ?: pkt.address.hostAddress
+            } catch (_: SocketTimeoutException) {
+            }
+        } finally {
+            socket.close()
+        }
+        found
     }
 
     suspend fun fetchFrame(): Bitmap? = withContext(Dispatchers.IO) {
@@ -84,18 +145,32 @@ fun SimplaControlScreen() {
         wifiBinder.bindToWifiHotspot()
     }
 
-    // Status poll loop
-    LaunchedEffect(host, token) {
+    // Status poll loop (switches automatically between Pi Hub and Direct ESP32)
+    LaunchedEffect(transport, host, esp32Host, token) {
         while (true) {
-            if (token.isBlank()) {
-                connected = false
-                error = "Enter Pi password (default: 12345678)."
+            if (transport == ControlTransport.PI_HUB) {
+                if (token.isBlank()) {
+                    connected = false
+                    error = "Enter Pi password (default: 12345678)."
+                } else {
+                    runCatching { requestPi("/api/status") }
+                        .onSuccess {
+                            status = it
+                            connected = true
+                            mode = it.optString("mode", mode)
+                            error = null
+                        }
+                        .onFailure {
+                            connected = false
+                            error = it.message
+                        }
+                }
             } else {
-                runCatching { request("/api/status") }
+                mode = "manual"
+                runCatching { requestEsp32Status() }
                     .onSuccess {
                         status = it
                         connected = true
-                        mode = it.optString("mode", mode)
                         error = null
                     }
                     .onFailure {
@@ -107,10 +182,10 @@ fun SimplaControlScreen() {
         }
     }
 
-    // Live camera + action overlay frame poll loop (~10 FPS)
-    LaunchedEffect(host, token, connected) {
+    // Live camera + action overlay frame poll loop (when using Pi Hub)
+    LaunchedEffect(transport, host, token, connected) {
         while (true) {
-            if (connected && token.isNotBlank()) {
+            if (transport == ControlTransport.PI_HUB && connected && token.isNotBlank()) {
                 runCatching { fetchFrame() }
                     .onSuccess { bmp -> if (bmp != null) liveBitmap = bmp }
             }
@@ -119,12 +194,17 @@ fun SimplaControlScreen() {
     }
 
     suspend fun driveDir(angle: Int, speed: Int = 28) {
-        request("/api/dir", JSONObject().put("angle", angle).put("speed", speed))
+        if (transport == ControlTransport.PI_HUB) {
+            requestPi("/api/dir", JSONObject().put("angle", angle).put("speed", speed))
+        } else {
+            requestEsp32Cmd("DIR $angle $speed")
+        }
     }
 
     fun setMode(next: String) {
+        if (transport != ControlTransport.PI_HUB) return
         scope.launch {
-            runCatching { request("/api/mode", JSONObject().put("mode", next)) }
+            runCatching { requestPi("/api/mode", JSONObject().put("mode", next)) }
                 .onSuccess { mode = next; error = null }
                 .onFailure { error = it.message }
         }
@@ -132,31 +212,48 @@ fun SimplaControlScreen() {
 
     fun stop() {
         scope.launch {
-            runCatching { request("/api/stop", JSONObject()) }
-                .onFailure { error = it.message }
+            runCatching {
+                if (transport == ControlTransport.PI_HUB) requestPi("/api/stop", JSONObject())
+                else requestEsp32Cmd("STOP")
+            }.onFailure { error = it.message }
         }
     }
 
     fun setServo(deg: Int) {
+        val clamped = deg.coerceIn(-30, 30)
         scope.launch {
-            runCatching { request("/api/servo", JSONObject().put("angle_deg", deg.coerceIn(-30, 30))) }
-                .onSuccess { error = null }
-                .onFailure { error = it.message }
+            runCatching {
+                if (transport == ControlTransport.PI_HUB) {
+                    requestPi("/api/servo", JSONObject().put("angle_deg", clamped))
+                } else {
+                    requestEsp32Cmd("SERVO $clamped")
+                }
+            }.onSuccess { error = null }.onFailure { error = it.message }
         }
     }
 
     fun fireArc(action: String, durationMs: Int = 800) {
         scope.launch {
             runCatching {
-                request("/api/arc", JSONObject().put("action", action).put("duration_ms", durationMs))
-            }
-                .onSuccess { error = null }
-                .onFailure { error = it.message }
+                if (transport == ControlTransport.PI_HUB) {
+                    requestPi("/api/arc", JSONObject().put("action", action).put("duration_ms", durationMs))
+                } else {
+                    requestEsp32Cmd(if (action == "off") "ARC OFF" else "ARC $durationMs")
+                }
+            }.onSuccess { error = null }.onFailure { error = it.message }
         }
     }
 
-    val esp32Ready = connected && status.optBoolean("esp32_online")
-    val liveAction = status.optString("last_action", if (connected) "READY" else "OFFLINE")
+    val esp32Ready = if (transport == ControlTransport.PI_HUB) {
+        connected && status.optBoolean("esp32_online")
+    } else {
+        connected && status.optInt("estop", 0) == 0
+    }
+    val liveAction = if (transport == ControlTransport.PI_HUB) {
+        status.optString("last_action", if (connected) "READY" else "OFFLINE")
+    } else {
+        if (connected) "DIRECT ESP32 · HEADING ${status.optInt("heading", 0)}°" else "ESP32 OFFLINE"
+    }
 
     Column(
         Modifier
@@ -169,10 +266,15 @@ fun SimplaControlScreen() {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT · 8-WAY", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
-                    text = if (connected) {
-                        "Pi connected (Wi-Fi: bayazid) · ESP32 ${if (!status.optBoolean("esp32_responding")) "no heartbeat" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}"
+                    text = if (transport == ControlTransport.PI_HUB) {
+                        if (connected) {
+                            "Pi connected (bayazid) · ESP32 ${if (!status.optBoolean("esp32_responding")) "no heartbeat" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}"
+                        } else {
+                            "Connect phone Wi-Fi to \"bayazid\" (pass: 12345678)"
+                        }
                     } else {
-                        "Connect phone Wi-Fi to \"bayazid\" (pass: 12345678)"
+                        if (connected) "Direct ESP32 connected ($esp32Host:8081)"
+                        else "Direct ESP32 offline · tap Find ESP32 or join \"esp32-rover\""
                     },
                     color = if (esp32Ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
@@ -182,79 +284,104 @@ fun SimplaControlScreen() {
                 onClick = {
                     scope.launch {
                         wifiBinder.bindToWifiHotspot()
-                        runCatching { request("/api/status") }
-                            .onSuccess { status = it; connected = true; error = null }
-                            .onFailure { error = it.message }
+                        if (transport == ControlTransport.DIRECT_ESP32) {
+                            val ip = discoverEsp32Ip()
+                            if (ip != null) esp32Host = ip
+                        }
                     }
                 },
-                label = { Text("Bind Wi-Fi") },
+                label = { Text(if (transport == ControlTransport.DIRECT_ESP32) "Find ESP32" else "Bind Wi-Fi") },
             )
         }
 
-        // Live Camera + Action Video Feed Card
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Live Camera & Action", fontWeight = FontWeight.Bold)
-                    Surface(
-                        color = if (mode == "autonomous") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
-                        shape = RoundedCornerShape(8.dp),
-                    ) {
-                        Text(
-                            text = liveAction,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
+        // Two-Way Connection Selector: Via Pi Hub OR Direct ESP32
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = transport == ControlTransport.PI_HUB,
+                onClick = { transport = ControlTransport.PI_HUB },
+                label = { Text("Via Pi Hub (:8080)") },
+                modifier = Modifier.weight(1f),
+            )
+            FilterChip(
+                selected = transport == ControlTransport.DIRECT_ESP32,
+                onClick = {
+                    transport = ControlTransport.DIRECT_ESP32
+                    scope.launch {
+                        val ip = discoverEsp32Ip()
+                        if (ip != null) esp32Host = ip
                     }
-                }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(210.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF10141A)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    val bmp = liveBitmap
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = "Live MaixSense Camera Feed",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop,
-                        )
-                    } else {
-                        Text(
-                            text = if (connected) "Waiting for Pi camera frame..." else "Connect to Pi hotspot \"bayazid\" to view live feed",
-                            color = Color(0xFFB0BEC5),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                },
+                label = { Text("Direct ESP32 (:8081)") },
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        // Live Camera + Action Video Feed Card (Pi Hub)
+        if (transport == ControlTransport.PI_HUB) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Live Camera & Action", fontWeight = FontWeight.Bold)
+                        Surface(
+                            color = if (mode == "autonomous") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text(
+                                text = liveAction,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(210.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF10141A)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val bmp = liveBitmap
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Live MaixSense Camera Feed",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        } else {
+                            Text(
+                                text = if (connected) "Waiting for Pi camera frame..." else "Connect to Pi hotspot \"bayazid\" to view live feed",
+                                color = Color(0xFFB0BEC5),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        // Auto + Manual Mode Switcher
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { setMode("manual") },
-                enabled = esp32Ready && mode != "manual",
-                modifier = Modifier.weight(1f),
-            ) { Text("MANUAL") }
-            Button(
-                onClick = { setMode("autonomous") },
-                enabled = esp32Ready && status.optBoolean("camera_online") && mode != "autonomous",
-                modifier = Modifier.weight(1f),
-            ) { Text("AUTONOMOUS") }
+            // Auto + Manual Mode Switcher
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { setMode("manual") },
+                    enabled = esp32Ready && mode != "manual",
+                    modifier = Modifier.weight(1f),
+                ) { Text("MANUAL") }
+                Button(
+                    onClick = { setMode("autonomous") },
+                    enabled = esp32Ready && status.optBoolean("camera_online") && mode != "autonomous",
+                    modifier = Modifier.weight(1f),
+                ) { Text("AUTONOMOUS") }
+            }
         }
 
         // 8-Direction Hold-to-Drive D-Pad
-        Text("Manual 8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
+        Text("8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -292,7 +419,6 @@ fun SimplaControlScreen() {
         }
 
         // MG996R Servo (±30° · 50 Hz) + Arc Module Controller
-        var servoSlider by remember { mutableFloatStateOf(0f) }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Turret Servo (MG996R ±30° · 50Hz) & Arc Module", fontWeight = FontWeight.Bold)
@@ -326,26 +452,21 @@ fun SimplaControlScreen() {
             }
         }
 
-        // Telemetry Card
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Robot Telemetry", fontWeight = FontWeight.Bold)
-                Text("Mode: ${mode.uppercase()} · Moving: ${status.optBoolean("moving")} · Heading: ${status.optInt("heading_8way", 0)}°")
-                Text("Camera: ${if (status.optBoolean("camera_online")) "Fresh" else "Waiting"} · ESP32: ${if (!status.optBoolean("esp32_responding")) "offline" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}")
-                val d = status.optJSONObject("distances_mm")
-                Text("Depth L/C/R: ${d?.opt("left") ?: "--"} / ${d?.opt("center") ?: "--"} / ${d?.opt("right") ?: "--"} mm")
-                Text("Corner: ${status.optString("corner", "--")} · Weed: ${status.optBoolean("weed_detected")}")
-                Text("Travel: ${status.optDouble("distance_mm", 0.0).toInt()} mm · Fault: ${status.optString("fault", "none")}")
+        // Host Config
+        if (transport == ControlTransport.PI_HUB) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = host == "10.42.0.1", onClick = { host = "10.42.0.1" }, label = { Text("10.42.0.1") })
+                FilterChip(selected = host == "192.168.4.1", onClick = { host = "192.168.4.1" }, label = { Text("192.168.4.1") })
             }
+            OutlinedTextField(value = host, onValueChange = { host = it.trim() }, label = { Text("Pi hotspot IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = token, onValueChange = { token = it.trim() }, label = { Text("Pi Password / Token (default: 12345678)") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = esp32Host == "192.168.4.1", onClick = { esp32Host = "192.168.4.1" }, label = { Text("AP 192.168.4.1") })
+                FilterChip(selected = esp32Host == "esp32-rover.local", onClick = { esp32Host = "esp32-rover.local" }, label = { Text("esp32-rover.local") })
+            }
+            OutlinedTextField(value = esp32Host, onValueChange = { esp32Host = it.trim() }, label = { Text("ESP32 Direct IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         }
-
-        // Pi Hotspot Config (pre-filled with bayazid / 12345678)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = host == "10.42.0.1", onClick = { host = "10.42.0.1" }, label = { Text("10.42.0.1") })
-            FilterChip(selected = host == "192.168.4.1", onClick = { host = "192.168.4.1" }, label = { Text("192.168.4.1") })
-        }
-        OutlinedTextField(value = host, onValueChange = { host = it.trim() }, label = { Text("Pi hotspot IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = token, onValueChange = { token = it.trim() }, label = { Text("Pi Password / Token (default: 12345678)") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
 
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     }

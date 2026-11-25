@@ -20,11 +20,16 @@
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WiFiUdp.h>
+#include <ESPmDNS.h>
 
-// Raspberry Pi Hotspot Credentials (fixed)
+// Raspberry Pi Hotspot Credentials + Direct Phone AP fallback
 const char* WIFI_SSID = "bayazid";
 const char* WIFI_PASS = "12345678";
+const char* AP_SSID   = "esp32-rover";
+const char* AP_PASS   = "12345678";
 WebServer wifiServer(8081);
+WiFiUDP udp;
 unsigned long lastWifiRetry = 0;
 
 // =========================================================================
@@ -251,9 +256,22 @@ void setup() {
 
   setMotorRaw(0, 0);
 
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.setAutoReconnect(true);
+  WiFi.softAP(AP_SSID, AP_PASS);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  MDNS.begin("esp32-rover");
+  udp.begin(8082);
+  wifiServer.on("/", []() {
+    wifiServer.send(200, "text/html",
+      "<html><body style='font-family:sans-serif;text-align:center;background:#10141a;color:#eef'>"
+      "<h3>ESP32 8-Way Rover</h3>"
+      "<button onclick=\"fetch('/cmd?q=DIR+0')\">FWD</button> "
+      "<button onclick=\"fetch('/cmd?q=STOP')\">STOP</button> "
+      "<button onclick=\"fetch('/cmd?q=DIR+180')\">REV</button><br><br>"
+      "<button onclick=\"fetch('/cmd?q=ARC+800')\">ARC 0.8s</button>"
+      "</body></html>");
+  });
   wifiServer.on("/cmd", []() {
     String q = wifiServer.hasArg("q") ? wifiServer.arg("q") : "";
     parseCommand(q);
@@ -273,6 +291,19 @@ void setup() {
 
 void loop() {
   wifiServer.handleClient();
+  int pkt = udp.parsePacket();
+  if (pkt > 0) {
+    char buf[64];
+    int n = udp.read(buf, sizeof(buf) - 1);
+    buf[n > 0 ? n : 0] = '\0';
+    String m(buf); m.trim();
+    if (m == "DISCOVER_ESP32" || m == "DISCOVER_PI_ROVER") {
+      String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+      udp.beginPacket(udp.remoteIP(), udp.remotePort());
+      udp.print(String("{\"service\":\"esp32-rover\",\"port\":8081,\"ip\":\"") + ipStr + "\"}");
+      udp.endPacket();
+    }
+  }
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry > 5000) {
     lastWifiRetry = millis();
     WiFi.begin(WIFI_SSID, WIFI_PASS);
