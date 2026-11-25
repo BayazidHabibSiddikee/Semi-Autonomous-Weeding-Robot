@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Small Simpla Bot phone hub: Android/Wi-Fi -> Pi -> ESP32; one MaixSense reader."""
+"""Small Simpla Bot phone hub: Android/Wi-Fi ("bayazid"/"12345678") -> Pi -> ESP32; live MaixSense video + 8-way."""
 from __future__ import annotations
 
 import hmac
 import json
 import os
-import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import sys
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -28,22 +28,23 @@ cfg["motor_driver"]["serial_port"] = os.environ.get(
 cfg.setdefault("tools", {})["dry_run"] = True
 cfg["tools"]["default_mode"] = "none"
 
-API_TOKEN = os.environ.get("SIMPLA_API_TOKEN", "").strip()
-if not API_TOKEN:
-    API_TOKEN = secrets.token_urlsafe(32)
-    print("\nSIMPLA_API_TOKEN was not set. Copy this token into the Android Control screen:")
-    print(API_TOKEN)
-    print("Set SIMPLA_API_TOKEN in the service environment to keep it stable across restarts.\n")
+# Fixed default password matching Pi Wi-Fi hotspot ("bayazid" / "12345678")
+API_TOKEN = os.environ.get("SIMPLA_API_TOKEN", "12345678").strip() or "12345678"
+print(f"\n[SIMPLA HUB] Wi-Fi SSID: bayazid | API Password/Token: {API_TOKEN}")
 
 controller, motor, tools = create_live_controller(cfg, tool_mode="none", arm_tools=False)
 camera_fetch = controller.frame_provider
 controller_frame_condition = threading.Condition()
 latest_frame = None
+latest_decision = None
+latest_annotated_jpeg: bytes = b""
 last_consumed_frame_id = -1
 last_camera_monotonic = 0.0
 
 state: dict[str, Any] = {
     "mode": "manual",
+    "last_action": "IDLE",
+    "heading_8way": 0,
     "camera_online": False,
     "esp32_serial_open": bool(motor._serial is not None and getattr(motor._serial, "is_open", True)),
     "esp32_online": False,
@@ -54,7 +55,7 @@ state: dict[str, Any] = {
     "last_command": 0.0,
     "fault": None,
     "camera_error": None,
-    "version": "pi4-maixsense-hub-2",
+    "version": "pi4-maixsense-hub-3-8way",
 }
 lock = threading.RLock()
 auto_stop = threading.Event()
@@ -66,8 +67,6 @@ _original_motor_stop = motor.stop
 
 
 def guarded_motor_drive(left: float, right: float) -> None:
-    # A STOP request takes this same lock. Once STOP acquires it, the autonomous
-    # worker cannot issue a later drive command after the stop has completed.
     with motion_lock:
         if threading.current_thread() is autonomous_thread and auto_stop.is_set():
             _original_motor_stop()
@@ -86,8 +85,77 @@ _original_estop_safe = tools.is_estop_safe
 tools.is_estop_safe = lambda: _original_estop_safe() and not auto_stop.is_set() and bool(state["esp32_online"])
 
 
+def dir_to_differential(angle_deg: int, speed: int = 28) -> tuple[int, int]:
+    """Map 8-way heading (0, 45, 90, 135, 180, 225, 270, 315) to differential drive (-35..35)."""
+    spd = max(10, min(35, int(speed)))
+    ang = ((int(angle_deg) + 22) // 45 * 45) % 360
+    mapping = {
+        0: (spd, spd),
+        45: (spd, int(spd * 0.40)),
+        90: (int(spd * 0.85), -int(spd * 0.85)),
+        135: (-int(spd * 0.80), -int(spd * 0.35)),
+        180: (-spd, -spd),
+        225: (-int(spd * 0.35), -int(spd * 0.80)),
+        270: (-int(spd * 0.85), int(spd * 0.85)),
+        315: (int(spd * 0.40), spd),
+    }
+    return mapping.get(ang, (0, 0))
+
+
+def _render_live_jpeg(frame: Any, decision: Any, mode: str, action: str) -> bytes:
+    """Render annotated RGB + live action/depth/weed overlay JPEG for the Android app."""
+    try:
+        import cv2
+        import numpy as np
+
+        img = None
+        if frame is not None and getattr(frame, "rgb_jpeg", b""):
+            arr = np.frombuffer(frame.rgb_jpeg, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+        if img is None and frame is not None and getattr(frame, "depth_mm", None):
+            dh = int(getattr(frame, "depth_height", 240))
+            dw = int(getattr(frame, "depth_width", 320))
+            d_arr = np.array(frame.depth_mm, dtype=np.uint16).reshape((dh, dw))
+            norm = np.clip((d_arr.astype(np.float32) / 2000.0) * 255.0, 0, 255).astype(np.uint8)
+            img = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+
+        if img is None:
+            img = np.zeros((360, 480, 3), dtype=np.uint8)
+            cv2.putText(img, "WAITING FOR MAIXSENSE CAMERA...", (28, 175),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
+        h, w = img.shape[:2]
+        # Top HUD banner
+        cv2.rectangle(img, (0, 0), (w, 54), (18, 24, 32), -1)
+        hud1 = f"MODE: {mode.upper()} | {action}"
+        cv2.putText(img, hud1[:44], (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 160), 2)
+
+        if decision is not None:
+            l_mm = int(decision.left_mm) if decision.left_mm is not None else -1
+            c_mm = int(decision.center_mm) if decision.center_mm is not None else -1
+            r_mm = int(decision.right_mm) if decision.right_mm is not None else -1
+            hud2 = f"L:{l_mm} C:{c_mm} R:{r_mm}mm | {decision.corner_type}"
+            cv2.putText(img, hud2[:52], (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 235, 255), 1)
+
+            if decision.weed is not None:
+                wx = int(((decision.weed.cx_norm + 1.0) * 0.5) * w)
+                wy = int(decision.weed.cy_norm * h)
+                cv2.circle(img, (wx, wy), 16, (0, 0, 255), 2)
+                cv2.drawMarker(img, (wx, wy), (0, 255, 255), cv2.MARKER_CROSS, 24, 2)
+                cv2.putText(img, f"WEED {int(decision.weed.dx_to_tool_mm)}mm",
+                            (max(8, wx - 45), max(72, wy - 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        ok, enc = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        return enc.tobytes() if ok else (frame.rgb_jpeg if frame is not None else b"")
+    except Exception:
+        if frame is not None and getattr(frame, "rgb_jpeg", b""):
+            return frame.rgb_jpeg
+        return b""
+
+
 def controller_frame_provider():
-    """Return each new cached camera frame once; never access the camera transport here."""
     global last_consumed_frame_id
     deadline = time.monotonic() + float(controller.max_frame_age_s)
     with controller_frame_condition:
@@ -103,27 +171,38 @@ def controller_frame_provider():
         return latest_frame
 
 
-# Exactly one worker owns the MaixSense HTTP transport. It publishes frames for
-# both manual telemetry and the autonomous state machine.
 controller.frame_provider = controller_frame_provider
 
 
 def camera_worker() -> None:
-    global latest_frame, last_camera_monotonic
+    global latest_frame, latest_decision, latest_annotated_jpeg, last_camera_monotonic
     while True:
         try:
             frame = camera_fetch()
             if frame is None:
                 with lock:
                     state["camera_error"] = "No valid frame from MaixSense /getdeep"
-                time.sleep(0.08)
+                    mode = state["mode"]
+                    action = state["last_action"]
+                placeholder = _render_live_jpeg(None, None, mode, action)
+                if placeholder:
+                    with lock:
+                        latest_annotated_jpeg = placeholder
+                time.sleep(0.15)
                 continue
             decision = controller.analyzer.analyze(frame)
+            with lock:
+                mode = state["mode"]
+                action = state["last_action"]
+            jpeg_bytes = _render_live_jpeg(frame, decision, mode, action)
             with controller_frame_condition:
                 latest_frame = frame
+                latest_decision = decision
                 last_camera_monotonic = time.monotonic()
                 controller_frame_condition.notify_all()
             with lock:
+                if jpeg_bytes:
+                    latest_annotated_jpeg = jpeg_bytes
                 state["camera_online"] = True
                 state["last_camera_frame"] = time.time()
                 state["camera_error"] = None
@@ -135,6 +214,12 @@ def camera_worker() -> None:
                 state["corner"] = decision.corner_type
                 state["weed_detected"] = decision.weed is not None
                 state["camera_frame_id"] = frame.frame_id
+                if mode == "autonomous":
+                    state["last_action"] = (
+                        f"AUTO: WEED ({int(decision.weed.dx_to_tool_mm)}mm)"
+                        if decision.weed is not None
+                        else f"AUTO: {decision.corner_type}"
+                    )
         except Exception as exc:
             with lock:
                 state["camera_error"] = str(exc)
@@ -171,6 +256,7 @@ def stop_all() -> None:
             state["esp32_online"] = False
     with lock:
         state["mode"] = "manual"
+        state["last_action"] = "STOPPED"
 
 
 def autonomous_worker() -> None:
@@ -184,10 +270,12 @@ def autonomous_worker() -> None:
             if decision is not None:
                 with lock:
                     state["last_decision_at"] = time.time()
+                    state["last_action"] = f"AUTO: {stats.state}"
             if stats.state in ("DONE", "ESTOP_HALT"):
                 with lock:
                     state["fault"] = stats.halt_reason or stats.state
                     state["mode"] = "manual"
+                    state["last_action"] = f"HALT: {stats.state}"
                 try:
                     motor.stop()
                 except Exception:
@@ -198,6 +286,7 @@ def autonomous_worker() -> None:
             with lock:
                 state["fault"] = f"Autonomy error: {exc}"
                 state["mode"] = "manual"
+                state["last_action"] = "AUTO ERROR"
             auto_stop.set()
             try:
                 motor.stop()
@@ -219,6 +308,8 @@ def watchdog_worker() -> None:
         if should_stop:
             try:
                 motor.stop()
+                with lock:
+                    state["last_action"] = "MANUAL IDLE"
             except Exception as exc:
                 with lock:
                     state["fault"] = f"Pi command watchdog STOP failed: {exc}"
@@ -240,11 +331,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def authorized(self) -> bool:
         supplied = self.headers.get("Authorization", "")
+        query = parse_qs(urlparse(self.path).query)
+        q_token = query.get("token", [""])[0]
         expected = "Bearer " + API_TOKEN
-        if not hmac.compare_digest(supplied, expected):
-            self.send_json(401, {"error": "unauthorized", "message": "Enter the Pi API token in the Android Control screen."})
-            return False
-        return True
+        if hmac.compare_digest(supplied, expected) or hmac.compare_digest(q_token, API_TOKEN):
+            return True
+        self.send_json(401, {"error": "unauthorized", "message": "Use password/token 12345678."})
+        return False
 
     def read_json(self) -> dict[str, Any]:
         try:
@@ -263,9 +356,52 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self.authorized():
             return
-        if self.path != "/api/status":
+        clean_path = urlparse(self.path).path
+
+        if clean_path == "/api/frame.jpg":
+            with lock:
+                jpeg = latest_annotated_jpeg
+                mode = state["mode"]
+                action = state["last_action"]
+            if not jpeg:
+                jpeg = _render_live_jpeg(None, None, mode, action)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(jpeg)))
+            self.end_headers()
+            self.wfile.write(jpeg)
+            return
+
+        if clean_path == "/video_feed":
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                while True:
+                    with lock:
+                        jpeg = latest_annotated_jpeg
+                        mode = state["mode"]
+                        action = state["last_action"]
+                    if not jpeg:
+                        jpeg = _render_live_jpeg(None, None, mode, action)
+                    if jpeg:
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                            + str(len(jpeg)).encode()
+                            + b"\r\n\r\n"
+                            + jpeg
+                            + b"\r\n"
+                        )
+                    time.sleep(0.08)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+        if clean_path != "/api/status":
             self.send_json(404, {"error": "not_found"})
             return
+
         now = time.time()
         with lock:
             frame_age = now - state["last_camera_frame"] if state["last_camera_frame"] else None
@@ -286,13 +422,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self.authorized():
             return
+        clean_path = urlparse(self.path).path
         try:
             data = self.read_json()
-            if self.path == "/api/stop":
+            if clean_path == "/api/stop":
                 stop_all()
                 self.send_json(200, {"ok": True, "mode": "manual"})
                 return
-            if self.path == "/api/mode":
+            if clean_path == "/api/mode":
                 global autonomous_thread
                 mode = str(data.get("mode", ""))
                 if mode not in ("manual", "autonomous"):
@@ -319,11 +456,15 @@ class Handler(BaseHTTPRequestHandler):
                     with lock:
                         state["fault"] = None
                         state["mode"] = "autonomous"
+                        state["last_action"] = "AUTO: DRIVE_ROW"
                     autonomous_thread = threading.Thread(target=autonomous_worker, daemon=True)
                     autonomous_thread.start()
+                else:
+                    with lock:
+                        state["last_action"] = "MANUAL READY"
                 self.send_json(200, {"ok": True, "mode": mode})
                 return
-            if self.path == "/api/drive":
+            if clean_path in ("/api/drive", "/api/dir"):
                 with lock:
                     if state["mode"] != "manual":
                         self.send_json(409, {"error": "manual mode is not active"})
@@ -331,8 +472,16 @@ class Handler(BaseHTTPRequestHandler):
                     if not state["esp32_online"]:
                         self.send_json(503, {"error": "ESP32 heartbeat is not healthy"})
                         return
-                    left = max(-35, min(35, int(data.get("left", 0))))
-                    right = max(-35, min(35, int(data.get("right", 0))))
+                    if clean_path == "/api/dir":
+                        angle = int(data.get("angle", 0))
+                        speed = int(data.get("speed", 28))
+                        left, right = dir_to_differential(angle, speed)
+                        state["heading_8way"] = angle
+                        action_label = f"MANUAL DIR {angle} deg"
+                    else:
+                        left = max(-35, min(35, int(data.get("left", 0))))
+                        right = max(-35, min(35, int(data.get("right", 0))))
+                        action_label = f"MANUAL L:{left} R:{right}"
                     try:
                         motor.drive(left, right)
                     except Exception as exc:
@@ -342,6 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json(503, {"error": "ESP32 serial unavailable; command rejected"})
                         return
                     state["last_command"] = time.monotonic()
+                    state["last_action"] = action_label
                 self.send_json(200, {"ok": True, "left": left, "right": right})
                 return
             self.send_json(404, {"error": "not_found"})

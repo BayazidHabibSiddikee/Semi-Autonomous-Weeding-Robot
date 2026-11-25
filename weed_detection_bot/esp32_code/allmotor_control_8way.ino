@@ -18,6 +18,14 @@
  */
 
 #include <ESP32Servo.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Raspberry Pi Hotspot Credentials (fixed)
+const char* WIFI_SSID = "bayazid";
+const char* WIFI_PASS = "12345678";
+WebServer wifiServer(8081);
+unsigned long lastWifiRetry = 0;
 
 // =========================================================================
 // PIN DEFINITIONS
@@ -217,10 +225,33 @@ void setup() {
   setTurretAngle(0);
 
   setMotorRaw(0, 0);
-  Serial.println("ESP32 8-Way Weeding Controller Ready.");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  wifiServer.on("/cmd", []() {
+    String q = wifiServer.hasArg("q") ? wifiServer.arg("q") : "";
+    parseCommand(q);
+    wifiServer.send(200, "text/plain", "OK");
+  });
+  wifiServer.on("/status", []() {
+    String json = String("{\"heading\":") + currentHeading + ",\"turret_deg\":" + currentTurretDeg
+                + ",\"grinder\":" + (digitalRead(PIN_RELAY_GRINDER) == RELAY_ACTIVE)
+                + ",\"flame\":" + (digitalRead(PIN_RELAY_FLAME) == RELAY_ACTIVE)
+                + ",\"wifi\":" + (WiFi.status() == WL_CONNECTED ? 1 : 0) + "}";
+    wifiServer.send(200, "application/json", json);
+  });
+  wifiServer.begin();
+
+  Serial.println("ESP32 8-Way Weeding Controller Ready (Wi-Fi: bayazid).");
 }
 
 void loop() {
+  wifiServer.handleClient();
+  if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry > 5000) {
+    lastWifiRetry = millis();
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  }
   // Read from USB Serial or Hardware UART2 (from Pi)
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');

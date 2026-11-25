@@ -153,7 +153,7 @@ Every endpoint requires `Authorization: Bearer <token>`. The hub has no permissi
 On Raspberry Pi OS with NetworkManager, connect Pi Ethernet to the router for internet, then create the robot hotspot:
 
 ```bash
-sudo nmcli device wifi hotspot ifname wlan0 ssid SimplaBot password 'CHANGE-THIS-PASSWORD'
+sudo nmcli device wifi hotspot ifname wlan0 ssid bayazid password '12345678'
 ```
 
 NetworkManager's default shared hotspot address is commonly `10.42.0.1`; open the Android app's **Control** tab and use the actual Pi hotspot IP shown by `ip -4 addr show wlan0`. The app defaults to `10.42.0.1` but lets you edit it.
