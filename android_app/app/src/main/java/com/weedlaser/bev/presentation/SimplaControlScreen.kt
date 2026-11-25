@@ -56,7 +56,10 @@ fun SimplaControlScreen() {
     var token by remember { mutableStateOf("12345678") }
     var mode by remember { mutableStateOf("manual") }
     var connected by remember { mutableStateOf(false) }
+    var piConnected by remember { mutableStateOf(false) }
+    var espConnected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf(JSONObject()) }
+    var espStatus by remember { mutableStateOf(JSONObject()) }
     var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var servoSlider by remember { mutableFloatStateOf(0f) }
@@ -147,56 +150,70 @@ fun SimplaControlScreen() {
         wifiBinder.bindToWifiHotspot()
     }
 
-    // Status poll loop (switches automatically between Pi Hub and Direct ESP32)
+    // Dual status poll loop: connects to BOTH Pi Hub AND Direct ESP32 simultaneously
     LaunchedEffect(transport, host, esp32Host, token) {
         while (true) {
-            if (transport == ControlTransport.PI_HUB) {
-                if (token.isBlank()) {
-                    connected = false
-                    error = "Enter Pi password (default: 12345678)."
-                } else {
-                    runCatching { requestPi("/api/status") }
-                        .onSuccess {
-                            status = it
+            if (token.isNotBlank()) {
+                runCatching { requestPi("/api/status") }
+                    .onSuccess {
+                        status = it
+                        piConnected = true
+                        mode = it.optString("mode", mode)
+                        val piEspIp = it.optString("esp32_ip", "")
+                        if (piEspIp.isNotBlank() && piEspIp != "null" && esp32Host == "192.168.4.1") {
+                            esp32Host = piEspIp
+                        }
+                        if (transport == ControlTransport.PI_HUB) {
                             connected = true
-                            mode = it.optString("mode", mode)
                             error = null
                         }
-                        .onFailure {
+                    }
+                    .onFailure {
+                        piConnected = false
+                        if (transport == ControlTransport.PI_HUB) {
                             connected = false
                             error = it.message
                         }
-                }
+                    }
             } else {
-                mode = "manual"
-                runCatching { requestEsp32Status() }
-                    .onSuccess {
+                piConnected = false
+            }
+
+            runCatching { requestEsp32Status() }
+                .onSuccess {
+                    espStatus = it
+                    espConnected = true
+                    if (transport == ControlTransport.DIRECT_ESP32) {
                         status = it
                         connected = true
                         error = null
                     }
-                    .onFailure {
+                }
+                .onFailure {
+                    espConnected = false
+                    if (transport == ControlTransport.DIRECT_ESP32) {
                         connected = false
                         error = it.message
                     }
-            }
-            delay(500)
+                }
+
+            delay(600)
         }
     }
 
-    // Live camera + action overlay frame poll loop (when using Pi Hub)
-    LaunchedEffect(transport, host, token, connected) {
+    // Live camera + action overlay frame poll loop (whenever Pi Hub is connected)
+    LaunchedEffect(host, token, piConnected) {
         while (true) {
-            if (transport == ControlTransport.PI_HUB && connected && token.isNotBlank()) {
+            if (piConnected && token.isNotBlank()) {
                 runCatching { fetchFrame() }
                     .onSuccess { bmp -> if (bmp != null) liveBitmap = bmp }
             }
-            delay(100)
+            delay(120)
         }
     }
 
     suspend fun driveDir(angle: Int, speed: Int = 28) {
-        if (transport == ControlTransport.PI_HUB) {
+        if (transport == ControlTransport.PI_HUB && piConnected) {
             requestPi("/api/dir", JSONObject().put("angle", angle).put("speed", speed))
         } else {
             requestEsp32Cmd("DIR $angle $speed")
@@ -204,7 +221,7 @@ fun SimplaControlScreen() {
     }
 
     fun setMode(next: String) {
-        if (transport != ControlTransport.PI_HUB) return
+        if (!piConnected) return
         scope.launch {
             runCatching { requestPi("/api/mode", JSONObject().put("mode", next)) }
                 .onSuccess { mode = next; error = null }
@@ -215,7 +232,7 @@ fun SimplaControlScreen() {
     fun stop() {
         scope.launch {
             runCatching {
-                if (transport == ControlTransport.PI_HUB) requestPi("/api/stop", JSONObject())
+                if (transport == ControlTransport.PI_HUB && piConnected) requestPi("/api/stop", JSONObject())
                 else requestEsp32Cmd("STOP")
             }.onFailure { error = it.message }
         }
@@ -225,7 +242,7 @@ fun SimplaControlScreen() {
         val clamped = deg.coerceIn(-30, 30)
         scope.launch {
             runCatching {
-                if (transport == ControlTransport.PI_HUB) {
+                if (transport == ControlTransport.PI_HUB && piConnected) {
                     requestPi("/api/servo", JSONObject().put("angle_deg", clamped))
                 } else {
                     requestEsp32Cmd("SERVO $clamped")
@@ -237,7 +254,7 @@ fun SimplaControlScreen() {
     fun fireArc(action: String, durationMs: Int = 800) {
         scope.launch {
             runCatching {
-                if (transport == ControlTransport.PI_HUB) {
+                if (transport == ControlTransport.PI_HUB && piConnected) {
                     requestPi("/api/arc", JSONObject().put("action", action).put("duration_ms", durationMs))
                 } else {
                     requestEsp32Cmd(if (action == "off") "ARC OFF" else "ARC $durationMs")
@@ -246,15 +263,13 @@ fun SimplaControlScreen() {
         }
     }
 
-    val esp32Ready = if (transport == ControlTransport.PI_HUB) {
-        connected && status.optBoolean("esp32_online")
+    val esp32Ready = (piConnected && status.optBoolean("esp32_online")) || espConnected
+    val liveAction = if (piConnected) {
+        status.optString("last_action", "READY")
+    } else if (espConnected) {
+        "DIRECT ESP32 · HEADING ${espStatus.optInt("heading", 0)}°"
     } else {
-        connected && status.optInt("estop", 0) == 0
-    }
-    val liveAction = if (transport == ControlTransport.PI_HUB) {
-        status.optString("last_action", if (connected) "READY" else "OFFLINE")
-    } else {
-        if (connected) "DIRECT ESP32 · HEADING ${status.optInt("heading", 0)}°" else "ESP32 OFFLINE"
+        "OFFLINE"
     }
 
     Column(
@@ -268,16 +283,7 @@ fun SimplaControlScreen() {
             Column(Modifier.weight(1f)) {
                 Text("SIMPLA BOT · 8-WAY", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
-                    text = if (transport == ControlTransport.PI_HUB) {
-                        if (connected) {
-                            "Pi connected (bayazid) · ESP32 ${if (!status.optBoolean("esp32_responding")) "no heartbeat" else if (status.optBoolean("esp32_estop_ok")) "ready" else "E-stop open"}"
-                        } else {
-                            "Connect phone Wi-Fi to \"bayazid\" (pass: 12345678)"
-                        }
-                    } else {
-                        if (connected) "Direct ESP32 connected ($esp32Host:8081)"
-                        else "Direct ESP32 offline · tap Find ESP32 or join \"esp32-rover\""
-                    },
+                    text = "Pi: ${if (piConnected) "ONLINE" else "OFFLINE"} · ESP32: ${if (espConnected) "DIRECT ($esp32Host)" else if (piConnected && status.optBoolean("esp32_online")) "VIA PI (${status.optString("esp32_transport", "ok")})" else "OFFLINE"}",
                     color = if (esp32Ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )

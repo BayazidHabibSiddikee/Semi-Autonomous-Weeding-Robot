@@ -15,6 +15,7 @@
  */
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <WiFiUdp.h>
@@ -290,6 +291,8 @@ void setupWifi() {
 
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   Serial.print("[WIFI] Station attempting connect to SSID: ");
   Serial.println(WIFI_SSID);
 
