@@ -39,9 +39,12 @@ const int PIN_ENA = 25; // Left Motor PWM speed
 const int PIN_ENB = 33; // Right Motor PWM speed
 
 // Actuation & Turret Pins
-const int PIN_TURRET_SERVO = 15; // MG996R Yaw Servo PWM
+const int PIN_TURRET_SERVO = 15; // MG996R Yaw Servo (50 Hz LEDC frequency PWM, -30..+30 deg)
+const int SERVO_FREQ_HZ    = 50;
+const int SERVO_RES_BITS   = 16;
 const int PIN_RELAY_GRINDER = 4;  // Relay 1: Grinder Motor
 const int PIN_RELAY_FLAME   = 2;  // Relay 2: Flame Valve Solenoid
+const int PIN_ARC_MODULE    = 18; // High-Voltage Arc Module (active HIGH)
 
 // Serial Communication Pins with Pi
 #define RXD2 16
@@ -140,16 +143,19 @@ void apply8WayDirection(int headingDeg, int baseSpeed = 200) {
 }
 
 void setTurretAngle(int deg) {
-  // Servo range: -35 to +35 deg mapped to 55° - 125° physical servo range (90° is center)
-  deg = constrain(deg, -35, 35);
+  // MG996R +/-30 deg rotation driven by exact 50 Hz LEDC frequency PWM (60..120 deg)
+  deg = constrain(deg, -30, 30);
   currentTurretDeg = deg;
-  int servoPwmDeg = 90 + deg;
-  turretServo.write(servoPwmDeg);
+  float physicalDeg = 90.0f + (float)deg;
+  float pulseUs = 500.0f + (physicalDeg / 180.0f) * 2000.0f;
+  uint32_t duty = (uint32_t)((pulseUs / 20000.0f) * 65535.0f);
+  ledcWrite(PIN_TURRET_SERVO, duty);
 }
 
 void executeCut(String tool, int durationMs) {
   // Stop rover movement during cutting
   setMotorRaw(0, 0);
+  int clampedMs = constrain(durationMs, 50, 2000);
 
   if (tool == "GRINDER" || tool == "ALL") {
     digitalWrite(PIN_RELAY_GRINDER, RELAY_ACTIVE);
@@ -157,11 +163,15 @@ void executeCut(String tool, int durationMs) {
   if (tool == "FLAME" || tool == "ALL") {
     digitalWrite(PIN_RELAY_FLAME, RELAY_ACTIVE);
   }
+  if (tool == "ARC" || tool == "ALL") {
+    digitalWrite(PIN_ARC_MODULE, HIGH);
+  }
 
-  delay(durationMs);
+  delay(clampedMs);
 
   digitalWrite(PIN_RELAY_GRINDER, RELAY_INACTIVE);
   digitalWrite(PIN_RELAY_FLAME, RELAY_INACTIVE);
+  digitalWrite(PIN_ARC_MODULE, LOW);
 }
 
 void parseCommand(String cmd) {
@@ -175,10 +185,23 @@ void parseCommand(String cmd) {
   } else if (cmd == "STOP") {
     setMotorRaw(0, 0);
     Serial.println("ACK: STOPPED");
-  } else if (cmd.startsWith("TURRET")) {
-    int deg = cmd.substring(7).toInt();
+  } else if (cmd.startsWith("TURRET") || cmd.startsWith("SERVO")) {
+    int sp = cmd.indexOf(' ');
+    int deg = cmd.substring(sp + 1).toInt();
     setTurretAngle(deg);
-    Serial.printf("ACK: TURRET %d\n", deg);
+    Serial.printf("ACK: SERVO %d\n", currentTurretDeg);
+  } else if (cmd.startsWith("ARC")) {
+    String arg = cmd.length() > 3 ? cmd.substring(3) : "";
+    arg.trim();
+    arg.toUpperCase();
+    if (arg == "OFF" || arg == "0") {
+      digitalWrite(PIN_ARC_MODULE, LOW);
+      Serial.println("ACK: ARC OFF");
+    } else {
+      int ms = (arg == "ON" || arg.length() == 0) ? 800 : arg.toInt();
+      executeCut("ARC", ms > 0 ? ms : 800);
+      Serial.println("ACK: ARC COMPLETE");
+    }
   } else if (cmd.startsWith("CUT")) {
     // Format: CUT <TOOL> <DURATION_MS>
     int firstSpace = cmd.indexOf(' ', 4);
@@ -214,14 +237,16 @@ void setup() {
   ledcAttachChannel(PIN_ENA, PWM_FREQ, PWM_RES, CH_LEFT);
   ledcAttachChannel(PIN_ENB, PWM_FREQ, PWM_RES, CH_RIGHT);
 
-  // Relay pins
+  // Relay & Arc Module pins
   pinMode(PIN_RELAY_GRINDER, OUTPUT);
   pinMode(PIN_RELAY_FLAME, OUTPUT);
+  pinMode(PIN_ARC_MODULE, OUTPUT);
   digitalWrite(PIN_RELAY_GRINDER, RELAY_INACTIVE);
   digitalWrite(PIN_RELAY_FLAME, RELAY_INACTIVE);
+  digitalWrite(PIN_ARC_MODULE, LOW);
 
-  // Turret Servo
-  turretServo.attach(PIN_TURRET_SERVO);
+  // MG996R Servo (50 Hz LEDC frequency PWM, -30..+30 deg)
+  ledcAttach(PIN_TURRET_SERVO, SERVO_FREQ_HZ, SERVO_RES_BITS);
   setTurretAngle(0);
 
   setMotorRaw(0, 0);

@@ -137,6 +137,24 @@ fun SimplaControlScreen() {
         }
     }
 
+    fun setServo(deg: Int) {
+        scope.launch {
+            runCatching { request("/api/servo", JSONObject().put("angle_deg", deg.coerceIn(-30, 30))) }
+                .onSuccess { error = null }
+                .onFailure { error = it.message }
+        }
+    }
+
+    fun fireArc(action: String, durationMs: Int = 800) {
+        scope.launch {
+            runCatching {
+                request("/api/arc", JSONObject().put("action", action).put("duration_ms", durationMs))
+            }
+                .onSuccess { error = null }
+                .onFailure { error = it.message }
+        }
+    }
+
     val esp32Ready = connected && status.optBoolean("esp32_online")
     val liveAction = status.optString("last_action", if (connected) "READY" else "OFFLINE")
 
@@ -271,6 +289,41 @@ fun SimplaControlScreen() {
             Icon(Icons.Default.Warning, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("EMERGENCY SOFTWARE STOP")
+        }
+
+        // MG996R Servo (±30° · 50 Hz) + Arc Module Controller
+        var servoSlider by remember { mutableFloatStateOf(0f) }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Turret Servo (MG996R ±30° · 50Hz) & Arc Module", fontWeight = FontWeight.Bold)
+                Text("Angle: ${servoSlider.toInt()}° (ESP32: ${status.optInt("servo_deg", 0)}°)")
+                Slider(
+                    value = servoSlider,
+                    onValueChange = { servoSlider = it },
+                    onValueChangeFinished = { setServo(servoSlider.toInt()) },
+                    valueRange = -30f..30f,
+                    steps = 11,
+                    enabled = esp32Ready,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { servoSlider = -30f; setServo(-30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("-30°") }
+                    OutlinedButton(onClick = { servoSlider = 0f; setServo(0) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("0°") }
+                    OutlinedButton(onClick = { servoSlider = 30f; setServo(30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("+30°") }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { fireArc("pulse", 800) },
+                        enabled = esp32Ready && mode == "manual" && !status.optBoolean("moving"),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("ARC PULSE (0.8s)") }
+                    OutlinedButton(
+                        onClick = { fireArc("off", 0) },
+                        enabled = esp32Ready,
+                        modifier = Modifier.weight(0.6f),
+                    ) { Text("ARC OFF") }
+                }
+            }
         }
 
         // Telemetry Card

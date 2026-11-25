@@ -45,6 +45,8 @@ state: dict[str, Any] = {
     "mode": "manual",
     "last_action": "IDLE",
     "heading_8way": 0,
+    "servo_deg": 0,
+    "arc_active": False,
     "camera_online": False,
     "esp32_serial_open": bool(motor._serial is not None and getattr(motor._serial, "is_open", True)),
     "esp32_online": False,
@@ -249,6 +251,8 @@ def stop_all() -> None:
     auto_stop.set()
     try:
         motor.stop()
+        if getattr(motor, "_serial", None) is not None:
+            motor._send_serial("ARC OFF")
     except Exception as exc:
         with lock:
             state["fault"] = f"Motor STOP failed: {exc}"
@@ -256,6 +260,7 @@ def stop_all() -> None:
             state["esp32_online"] = False
     with lock:
         state["mode"] = "manual"
+        state["arc_active"] = False
         state["last_action"] = "STOPPED"
 
 
@@ -493,6 +498,47 @@ class Handler(BaseHTTPRequestHandler):
                     state["last_command"] = time.monotonic()
                     state["last_action"] = action_label
                 self.send_json(200, {"ok": True, "left": left, "right": right})
+                return
+            if clean_path == "/api/servo":
+                with lock:
+                    if not state["esp32_online"]:
+                        self.send_json(503, {"error": "ESP32 heartbeat is not healthy"})
+                        return
+                    deg = max(-30, min(30, int(data.get("angle_deg", 0))))
+                    resp = motor._send_serial(f"SERVO {deg}")
+                    if resp is None:
+                        self.send_json(503, {"error": "ESP32 serial unavailable; servo rejected"})
+                        return
+                    state["servo_deg"] = deg
+                    state["last_action"] = f"SERVO {deg} deg"
+                self.send_json(200, {"ok": True, "servo_deg": deg})
+                return
+            if clean_path == "/api/arc":
+                with lock:
+                    if state["mode"] != "manual":
+                        self.send_json(409, {"error": "manual mode is not active"})
+                        return
+                    if not state["esp32_online"]:
+                        self.send_json(503, {"error": "ESP32 heartbeat is not healthy"})
+                        return
+                    if motor.is_moving:
+                        self.send_json(409, {"error": "stop rover before firing arc module"})
+                        return
+                    act = str(data.get("action", "pulse")).lower()
+                    if act == "off":
+                        motor._send_serial("ARC OFF")
+                        state["arc_active"] = False
+                        state["last_action"] = "ARC OFF"
+                        self.send_json(200, {"ok": True, "arc_active": False})
+                        return
+                    dur_ms = max(50, min(2000, int(data.get("duration_ms", 800))))
+                    resp = motor._send_serial(f"ARC {dur_ms}")
+                    if resp is None or resp.startswith("ERR"):
+                        self.send_json(409, {"error": resp or "ESP32 arc command rejected"})
+                        return
+                    state["arc_active"] = True
+                    state["last_action"] = f"ARC PULSE {dur_ms}ms"
+                self.send_json(200, {"ok": True, "arc_active": True, "duration_ms": dur_ms})
                 return
             self.send_json(404, {"error": "not_found"})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
