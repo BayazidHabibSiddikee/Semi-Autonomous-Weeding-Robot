@@ -60,6 +60,8 @@ fun SimplaControlScreen() {
     var liveBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var servoSlider by remember { mutableFloatStateOf(0f) }
+    var driveSpeed by remember { mutableIntStateOf(28) }
+    var arcDurationMs by remember { mutableIntStateOf(800) }
 
     val scope = rememberCoroutineScope()
     val wifiBinder = remember { WifiNetworkBinder(context) }
@@ -362,6 +364,28 @@ fun SimplaControlScreen() {
                             )
                         }
                     }
+                    // Live Telemetry Strip
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            "Model: ${status.optString("model_name", "yolo26n")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "Weeds: ${status.optInt("weeds_count", 0)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            "ESP32: ${status.optString("esp32_transport", "none").uppercase()}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -380,31 +404,46 @@ fun SimplaControlScreen() {
             }
         }
 
-        // 8-Direction Hold-to-Drive D-Pad
-        Text("8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
+        // 8-Direction Hold-to-Drive D-Pad + Speed Selector
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf(18 to "Slow", 28 to "Med", 35 to "Fast").forEach { (spd, label) ->
+                    FilterChip(
+                        selected = driveSpeed == spd,
+                        onClick = { driveSpeed = spd },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+        }
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                DirHoldButton("↖", 315, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("▲", 0, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("↗", 45, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("↖", 315, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("▲", 0, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("↗", 45, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                DirHoldButton("◀", 270, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("◀", 270, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
                 OutlinedButton(
                     onClick = ::stop,
                     modifier = Modifier.size(72.dp),
                     shape = RoundedCornerShape(16.dp),
                 ) { Text("STOP", fontWeight = FontWeight.Bold) }
-                DirHoldButton("▶", 90, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("▶", 90, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                DirHoldButton("↙", 225, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("▼", 180, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("↘", 135, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("↙", 225, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("▼", 180, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                DirHoldButton("↘", 135, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
             }
         }
 
@@ -437,12 +476,21 @@ fun SimplaControlScreen() {
                     OutlinedButton(onClick = { servoSlider = 30f; setServo(30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("+30°") }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(400 to "0.4s", 800 to "0.8s", 1500 to "1.5s").forEach { (ms, lbl) ->
+                        FilterChip(
+                            selected = arcDurationMs == ms,
+                            onClick = { arcDurationMs = ms },
+                            label = { Text(lbl) },
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
-                        onClick = { fireArc("pulse", 800) },
+                        onClick = { fireArc("pulse", arcDurationMs) },
                         enabled = esp32Ready && mode == "manual" && !status.optBoolean("moving"),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
                         modifier = Modifier.weight(1f),
-                    ) { Text("ARC PULSE (0.8s)") }
+                    ) { Text("ARC PULSE (${arcDurationMs / 1000f}s)") }
                     OutlinedButton(
                         onClick = { fireArc("off", 0) },
                         enabled = esp32Ready,
@@ -461,9 +509,10 @@ fun SimplaControlScreen() {
             OutlinedTextField(value = host, onValueChange = { host = it.trim() }, label = { Text("Pi hotspot IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = token, onValueChange = { token = it.trim() }, label = { Text("Pi Password / Token (default: 12345678)") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
         } else {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = esp32Host == "192.168.4.1", onClick = { esp32Host = "192.168.4.1" }, label = { Text("AP 192.168.4.1") })
-                FilterChip(selected = esp32Host == "esp32-rover.local", onClick = { esp32Host = "esp32-rover.local" }, label = { Text("esp32-rover.local") })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected = esp32Host == "192.168.4.1", onClick = { esp32Host = "192.168.4.1" }, label = { Text("AP .4.1") })
+                FilterChip(selected = esp32Host == "10.42.0.242", onClick = { esp32Host = "10.42.0.242" }, label = { Text("Pi .0.242") })
+                FilterChip(selected = esp32Host == "esp32-rover.local", onClick = { esp32Host = "esp32-rover.local" }, label = { Text("mDNS") })
             }
             OutlinedTextField(value = esp32Host, onValueChange = { esp32Host = it.trim() }, label = { Text("ESP32 Direct IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         }
@@ -476,6 +525,7 @@ fun SimplaControlScreen() {
 private fun DirHoldButton(
     label: String,
     angle: Int,
+    speed: Int,
     mode: String,
     connected: Boolean,
     driveDir: suspend (Int, Int) -> Unit,
@@ -485,12 +535,12 @@ private fun DirHoldButton(
     FilledTonalButton(
         onClick = {},
         enabled = connected && mode == "manual",
-        modifier = Modifier.size(72.dp).pointerInput(mode, connected, angle) {
+        modifier = Modifier.size(72.dp).pointerInput(mode, connected, angle, speed) {
             detectTapGestures(onPress = {
                 if (connected && mode == "manual") {
                     val sender = scope.launch {
                         while (true) {
-                            runCatching { driveDir(angle, 28) }
+                            runCatching { driveDir(angle, speed) }
                             delay(150)
                         }
                     }
