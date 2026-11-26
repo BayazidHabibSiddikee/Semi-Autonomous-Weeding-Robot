@@ -115,6 +115,62 @@ function stopMove() { stopTimer(); sendCommand('stop'); }
 </html>
 )rawliteral";
 
+String rxBuffer = "";
+
+void processCommand(String cmd) {
+  cmd.trim();
+  cmd.toUpperCase();
+  if (cmd.length() == 0) return;
+
+  if (cmd == "FORWARD" || cmd == "F" || cmd.startsWith("DIR 0") || cmd == "DIR 360") {
+    forward();
+    Serial.println("OK FORWARD");
+  } else if (cmd == "BACKWARD" || cmd == "B" || cmd.startsWith("DIR 180")) {
+    backward();
+    Serial.println("OK BACKWARD");
+  } else if (cmd == "LEFT" || cmd == "L" || cmd.startsWith("DIR 270") || cmd.startsWith("DIR 315") || cmd.startsWith("DIR 225")) {
+    turnLeft();
+    Serial.println("OK LEFT");
+  } else if (cmd == "RIGHT" || cmd == "R" || cmd.startsWith("DIR 90") || cmd.startsWith("DIR 45") || cmd.startsWith("DIR 135")) {
+    turnRight();
+    Serial.println("OK RIGHT");
+  } else if (cmd == "STOP" || cmd == "S") {
+    stopCar();
+    Serial.println("OK STOP");
+  } else if (cmd == "PING") {
+    Serial.println("PONG ESTOP=0 WIFI=1");
+  } else if (cmd == "STATUS?") {
+    Serial.printf("{\"moving\":%d,\"isMoving\":%s}\n", isMoving ? 1 : 0, isMoving ? "true" : "false");
+  } else if (cmd.startsWith("M ")) {
+    int sp = cmd.indexOf(' ', 2);
+    if (sp > 0) {
+      int l = constrain(cmd.substring(2, sp).toInt(), -255, 255);
+      int r = constrain(cmd.substring(sp + 1).toInt(), -255, 255);
+      leftMotor(l);
+      rightMotor(r);
+      isMoving = (l != 0 || r != 0);
+      lastCommand = millis();
+      Serial.println("OK M");
+    }
+  } else {
+    Serial.println("ERR UNKNOWN");
+  }
+}
+
+void handleSerial() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (rxBuffer.length() > 0) {
+        processCommand(rxBuffer);
+        rxBuffer = "";
+      }
+    } else if (rxBuffer.length() < 64) {
+      rxBuffer += c;
+    }
+  }
+}
+
 void setupServer() {
   auto sendPage = []() { server.send_P(200, "text/html", webpage); };
   server.on("/", sendPage);
@@ -126,6 +182,11 @@ void setupServer() {
   server.on("/left", []() { turnLeft(); server.send(200, "text/plain", "Left"); });
   server.on("/right", []() { turnRight(); server.send(200, "text/plain", "Right"); });
   server.on("/stop", []() { stopCar(); server.send(200, "text/plain", "Stop"); });
+  server.on("/cmd", []() {
+    String q = server.hasArg("q") ? server.arg("q") : "";
+    processCommand(q);
+    server.send(200, "text/plain", "OK");
+  });
   server.onNotFound(sendPage);
   server.begin();
 }
@@ -156,6 +217,7 @@ void setup() {
 }
 
 void loop() {
+  handleSerial();
   dnsServer.processNextRequest();
   server.handleClient();
 

@@ -2,13 +2,14 @@ import os
 import time
 import math
 import threading
+import serial
 from collections import deque
 import requests
 import numpy as np
 import cv2
 from ultralytics import YOLO
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, Response
 
 app = FastAPI(title="Weed Rover Boustrophedon & Targeting Brain")
 
@@ -333,6 +334,126 @@ def pi_master_loop():
             _, m_jpg = cv2.imencode(".jpg", map_view)
             latest_video_jpg = v_jpg.tobytes()
             latest_map_jpg = m_jpg.tobytes()
+
+# =========================================================================
+# ESP32 HARDWARE USB SERIAL & NETWORK BRIDGE
+# =========================================================================
+esp32_serial = None
+esp32_lock = threading.Lock()
+
+def get_esp32_serial():
+    global esp32_serial
+    if esp32_serial is not None and getattr(esp32_serial, "is_open", False):
+        return esp32_serial
+    for p in ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0"]:
+        if os.path.exists(p):
+            try:
+                s = serial.Serial(p, 115200, timeout=0.1)
+                esp32_serial = s
+                print(f"[ESP32 BRIDGE] Connected on {p}")
+                return esp32_serial
+            except Exception as e:
+                print(f"[ESP32 BRIDGE] Port {p} open error: {e}")
+    return None
+
+def send_esp32_cmd(cmd: str):
+    with esp32_lock:
+        s = get_esp32_serial()
+        if s:
+            try:
+                s.write(f"{cmd.strip()}\n".encode("ascii"))
+                s.flush()
+                return
+            except Exception as e:
+                print(f"[ESP32 BRIDGE] Serial write error: {e}")
+        # Fallback to HTTP if ESP32 Wi-Fi is reachable at 192.168.4.1
+        try:
+            requests.get(f"http://192.168.4.1/cmd?q={cmd.strip()}", timeout=0.2)
+        except Exception:
+            pass
+
+def send_esp32_dir(angle: int, speed: int = 28):
+    if angle in (0, 360):
+        cmd = "FORWARD"
+    elif angle == 180:
+        cmd = "BACKWARD"
+    elif angle in (90, 45, 135):
+        cmd = "RIGHT"
+    elif angle in (270, 225, 315):
+        cmd = "LEFT"
+    else:
+        cmd = f"DIR {angle} {speed}"
+    send_esp32_cmd(cmd)
+
+def send_esp32_stop():
+    send_esp32_cmd("STOP")
+
+@app.get("/api/frame.jpg")
+def api_frame():
+    with lock:
+        f = latest_video_jpg
+    if f:
+        return Response(content=f, media_type="image/jpeg")
+    return Response(content=b"", status_code=503)
+
+@app.get("/api/status")
+def api_status():
+    with lock:
+        st = dict(rover_state)
+        st["mode"] = rover_state.get("mode", "autonomous")
+        st["esp32_online"] = esp32_serial is not None and getattr(esp32_serial, "is_open", False)
+        st["camera_online"] = latest_video_jpg is not None
+        st["version"] = "pi4-weed-boustrophedon-v2"
+        return st
+
+@app.post("/api/dir")
+async def api_dir(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    angle = int(body.get("angle", 0))
+    speed = int(body.get("speed", 28))
+    send_esp32_dir(angle, speed)
+    return {"ok": True, "angle": angle, "speed": speed}
+
+@app.post("/api/stop")
+def api_stop():
+    send_esp32_stop()
+    return {"ok": True, "action": "STOP"}
+
+@app.post("/api/mode")
+async def api_mode(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    m = str(body.get("mode", "autonomous"))
+    with lock:
+        rover_state["mode"] = m
+    return {"ok": True, "mode": m}
+
+@app.post("/api/servo")
+async def api_servo(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    deg = int(body.get("angle_deg", 0))
+    send_esp32_cmd(f"SERVO {deg}")
+    return {"ok": True, "servo_deg": deg}
+
+@app.post("/api/arc")
+async def api_arc(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    act = str(body.get("action", "pulse")).lower()
+    dur = int(body.get("duration_ms", 800))
+    cmd = "ARC OFF" if act == "off" else f"ARC {dur}"
+    send_esp32_cmd(cmd)
+    return {"ok": True, "arc": cmd}
 
 @app.get("/video_feed")
 def video_feed():
