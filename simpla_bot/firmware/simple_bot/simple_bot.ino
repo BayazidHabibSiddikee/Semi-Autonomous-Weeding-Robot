@@ -1,7 +1,6 @@
 #include <WiFi.h>
-#include <esp_wifi.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>
+#include <DNSServer.h>
 
 // Motor driver pins
 const int ENA = 27;
@@ -12,17 +11,19 @@ const int ENB = 14;
 const int IN3 = 32;
 const int IN4 = 33;
 
-// Phone Hotspot Credentials
-const char* ssid = "Inox";
-const char* password = "12345678";
+// Phone Hotspot + Fallback AP
+const char* sta_ssid = "Inox";
+const char* sta_pass = "12345678";
+const char* ap_ssid  = "ESP32-BOT";
+const char* ap_pass  = "12345678";
 
 WebServer server(80);
+DNSServer dnsServer;
 
 unsigned long lastCommand = 0;
 const unsigned long WATCHDOG = 500;
-bool mdnsStarted = false;
+bool staPrinted = false;
 
-// Motor control
 void leftMotor(int speed) {
   speed = constrain(speed, -255, 255);
   digitalWrite(IN1, speed > 0);
@@ -66,42 +67,19 @@ void turnRight() {
   lastCommand = millis();
 }
 
-// HTML Web Page
 const char webpage[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body {
-  background: #111827;
-  color: white;
-  font-family: Arial;
-  text-align: center;
-  margin-top: 30px;
-}
-h2 { color: #38bdf8; }
-.grid {
-  display: grid;
-  grid-template-columns: 90px 90px 90px;
-  gap: 12px;
-  justify-content: center;
-  margin-top: 35px;
-}
-button {
-  height: 80px;
-  width: 90px;
-  font-size: 25px;
-  border: none;
-  border-radius: 15px;
-  background: #334155;
-  color: white;
-  touch-action: none;
-  user-select: none;
-}
-button:active { background: #0ea5e9; }
-.stop { background: #dc2626; font-size: 18px; }
-.empty { visibility: hidden; }
+body { background:#111827; color:white; font-family:Arial; text-align:center; margin-top:30px; }
+h2 { color:#38bdf8; }
+.grid { display:grid; grid-template-columns:90px 90px 90px; gap:12px; justify-content:center; margin-top:35px; }
+button { height:80px; width:90px; font-size:25px; border:none; border-radius:15px; background:#334155; color:white; touch-action:none; user-select:none; }
+button:active { background:#0ea5e9; }
+.stop { background:#dc2626; font-size:18px; }
+.empty { visibility:hidden; }
 </style>
 </head>
 <body>
@@ -126,25 +104,25 @@ function startMove(cmd) {
   sendCommand(cmd);
   timer = setInterval(() => { sendCommand(cmd); }, 200);
 }
-function stopTimer() {
-  if (timer) { clearInterval(timer); timer = null; }
-}
-function stopMove() {
-  stopTimer();
-  sendCommand('stop');
-}
+function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+function stopMove() { stopTimer(); sendCommand('stop'); }
 </script>
 </body>
 </html>
 )rawliteral";
 
 void setupServer() {
-  server.on("/", []() { server.send_P(200, "text/html", webpage); });
+  auto sendPage = []() { server.send_P(200, "text/html", webpage); };
+  server.on("/", sendPage);
+  server.on("/generate_204", sendPage);
+  server.on("/gen_204", sendPage);
+  server.on("/hotspot-detect.html", sendPage);
   server.on("/forward", []() { forward(); server.send(200, "text/plain", "Forward"); });
   server.on("/backward", []() { backward(); server.send(200, "text/plain", "Backward"); });
   server.on("/left", []() { turnLeft(); server.send(200, "text/plain", "Left"); });
   server.on("/right", []() { turnRight(); server.send(200, "text/plain", "Right"); });
   server.on("/stop", []() { stopCar(); server.send(200, "text/plain", "Stop"); });
+  server.onNotFound(sendPage);
   server.begin();
 }
 
@@ -159,49 +137,28 @@ void setup() {
   pinMode(IN4, OUTPUT);
   stopCar();
 
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(ssid, password);
+  WiFi.begin(sta_ssid, sta_pass);
   WiFi.setSleep(false);
-  esp_wifi_set_ps(WIFI_PS_NONE);
 
-  Serial.print("\nConnecting to phone hotspot: ");
-  Serial.println(ssid);
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
-    delay(250);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Connected! IP Address: ");
-    Serial.println(WiFi.localIP());
-    if (MDNS.begin("esp32-bot")) {
-      mdnsStarted = true;
-      Serial.println("mDNS active: http://esp32-bot.local");
-    }
-  } else {
-    Serial.println("Hotspot not found yet, will auto-reconnect when Inox is on.");
-  }
-
+  dnsServer.start(53, "*", IPAddress(192,168,4,1));
   setupServer();
+
+  Serial.println("\nREADY! AP: ESP32-BOT (192.168.4.1) + Connecting to Inox");
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED && !mdnsStarted) {
-    Serial.print("Connected! IP Address: ");
+  if (!staPrinted && WiFi.status() == WL_CONNECTED) {
+    staPrinted = true;
+    Serial.print("Inox IP: ");
     Serial.println(WiFi.localIP());
-    if (MDNS.begin("esp32-bot")) {
-      mdnsStarted = true;
-      Serial.println("mDNS active: http://esp32-bot.local");
-    }
   }
-
+  dnsServer.processNextRequest();
   server.handleClient();
 
-  // Safety watchdog
   if ((millis() - lastCommand > WATCHDOG) &&
       (digitalRead(IN1) != digitalRead(IN2) ||
        digitalRead(IN3) != digitalRead(IN4))) {
