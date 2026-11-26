@@ -2,7 +2,6 @@
 #include <esp_wifi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <WiFiUdp.h>
 
 // Motor driver pins
 const int ENA = 27;
@@ -13,21 +12,16 @@ const int ENB = 14;
 const int IN3 = 32;
 const int IN4 = 33;
 
-// Phone Hotspot + Fallback AP
-const char* sta_ssid = "Inox";
-const char* sta_pass = "12345678";
-const char* ap_ssid  = "ESP32-BOT";
-const char* ap_pass  = "12345678";
+// AP-only Wi-Fi (no channel hopping, no phone hotspot dependency)
+const char* ap_ssid = "ESP32-BOT";
+const char* ap_pass = "12345678";
 
 WebServer server(80);
-WebServer server8081(8081);
 DNSServer dnsServer;
-WiFiUDP udp;
 
 unsigned long lastCommand = 0;
-unsigned long lastWifiCheck = 0;
 const unsigned long WATCHDOG = 600;
-bool staPrinted = false;
+bool isMoving = false;
 
 void leftMotor(int speed) {
   speed = constrain(speed, -255, 255);
@@ -46,29 +40,34 @@ void rightMotor(int speed) {
 void stopCar() {
   leftMotor(0);
   rightMotor(0);
+  isMoving = false;
 }
 
 void forward() {
   leftMotor(255);
   rightMotor(255);
+  isMoving = true;
   lastCommand = millis();
 }
 
 void backward() {
   leftMotor(-255);
   rightMotor(-255);
+  isMoving = true;
   lastCommand = millis();
 }
 
 void turnLeft() {
   leftMotor(-255);
   rightMotor(255);
+  isMoving = true;
   lastCommand = millis();
 }
 
 void turnRight() {
   leftMotor(255);
   rightMotor(-255);
+  isMoving = true;
   lastCommand = millis();
 }
 
@@ -103,7 +102,7 @@ button:active { background:#0ea5e9; }
 </div>
 <script>
 let timer = null;
-function sendCommand(cmd) { fetch('/' + cmd).catch(() => {}); }
+function sendCommand(cmd) { fetch('/' + cmd, { cache: 'no-store' }).catch(() => {}); }
 function startMove(cmd) {
   stopTimer();
   sendCommand(cmd);
@@ -116,25 +115,6 @@ function stopMove() { stopTimer(); sendCommand('stop'); }
 </html>
 )rawliteral";
 
-String handleCmdText(String q) {
-  q.trim();
-  if (q == "PING") return "PONG ESTOP=0 WIFI=1";
-  if (q == "STATUS?") {
-    String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-    return String("{\"heading\":0,\"estop\":0,\"wifi\":") + (WiFi.status() == WL_CONNECTED ? 1 : 0) + ",\"ip\":\"" + ipStr + "\"}";
-  }
-  if (q == "STOP") { stopCar(); return "OK STOP"; }
-  if (q.startsWith("DIR ")) {
-    int ang = q.substring(4).toInt() % 360;
-    if (ang >= 315 || ang < 45) forward();
-    else if (ang >= 45 && ang < 135) turnRight();
-    else if (ang >= 135 && ang < 225) backward();
-    else turnLeft();
-    return String("OK DIR ") + ang;
-  }
-  return "OK";
-}
-
 void setupServer() {
   auto sendPage = []() { server.send_P(200, "text/html", webpage); };
   server.on("/", sendPage);
@@ -146,80 +126,40 @@ void setupServer() {
   server.on("/left", []() { turnLeft(); server.send(200, "text/plain", "Left"); });
   server.on("/right", []() { turnRight(); server.send(200, "text/plain", "Right"); });
   server.on("/stop", []() { stopCar(); server.send(200, "text/plain", "Stop"); });
-  server.on("/ping", []() { server.send(200, "text/plain", handleCmdText("PING")); });
-  server.on("/status", []() { server.send(200, "application/json", handleCmdText("STATUS?")); });
-  server.on("/cmd", []() { server.send(200, "text/plain", handleCmdText(server.hasArg("q") ? server.arg("q") : "")); });
   server.onNotFound(sendPage);
   server.begin();
-
-  server8081.on("/", []() { server8081.send_P(200, "text/html", webpage); });
-  server8081.on("/ping", []() { server8081.send(200, "text/plain", handleCmdText("PING")); });
-  server8081.on("/status", []() { server8081.send(200, "application/json", handleCmdText("STATUS?")); });
-  server8081.on("/cmd", []() { server8081.send(200, "text/plain", handleCmdText(server8081.hasArg("q") ? server8081.arg("q") : "")); });
-  server8081.begin();
-  udp.begin(8082);
 }
 
 void setup() {
   Serial.begin(115200);
 
-  pinMode(ENA, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(ENB, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
   stopCar();
 
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  WiFi.softAP(ap_ssid, ap_pass, 1, 0, 4);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(sta_ssid, sta_pass);
+  WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) {
+    if (e == ARDUINO_EVENT_WIFI_AP_STACONNECTED)
+      Serial.println("Client connected to AP");
+    if (e == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED)
+      Serial.println("A client left the AP");
+  });
+
+  WiFi.mode(WIFI_AP);                       // AP only: no channel hopping
   WiFi.setSleep(false);
+  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  WiFi.softAP(ap_ssid, ap_pass, 6, 0, 4);   // channel 6, max 4 clients
   esp_wifi_set_ps(WIFI_PS_NONE);
 
   dnsServer.start(53, "*", IPAddress(192,168,4,1));
   setupServer();
-
-  Serial.println("\nREADY! AP: ESP32-BOT (192.168.4.1) + Connecting to Inox");
+  Serial.println("READY! Connect to ESP32-BOT, open http://192.168.4.1");
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!staPrinted) {
-      staPrinted = true;
-      Serial.print("Inox IP: ");
-      Serial.println(WiFi.localIP());
-    }
-  } else {
-    staPrinted = false;
-    if (millis() - lastWifiCheck > 10000) {
-      lastWifiCheck = millis();
-      WiFi.disconnect(false);
-      WiFi.begin(sta_ssid, sta_pass);
-    }
-  }
   dnsServer.processNextRequest();
   server.handleClient();
-  server8081.handleClient();
-  int pkt = udp.parsePacket();
-  if (pkt > 0) {
-    char b[48];
-    int n = udp.read(b, sizeof(b) - 1);
-    b[n > 0 ? n : 0] = '\0';
-    String m(b); m.trim();
-    if (m == "DISCOVER_ESP32") {
-      String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-      udp.beginPacket(udp.remoteIP(), udp.remotePort());
-      udp.print(String("{\"service\":\"esp32-rover\",\"port\":8081,\"ip\":\"") + ipStr + "\"}");
-      udp.endPacket();
-    }
-  }
 
-  if ((millis() - lastCommand > WATCHDOG) &&
-      (digitalRead(IN1) != digitalRead(IN2) ||
-       digitalRead(IN3) != digitalRead(IN4))) {
+  if (isMoving && (millis() - lastCommand > WATCHDOG)) {
     stopCar();
   }
 }
