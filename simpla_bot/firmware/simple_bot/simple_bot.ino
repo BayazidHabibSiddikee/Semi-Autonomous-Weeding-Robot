@@ -2,6 +2,7 @@
 #include <esp_wifi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <WiFiUdp.h>
 
 // Motor driver pins
 const int ENA = 27;
@@ -19,7 +20,9 @@ const char* ap_ssid  = "ESP32-BOT";
 const char* ap_pass  = "12345678";
 
 WebServer server(80);
+WebServer server8081(8081);
 DNSServer dnsServer;
+WiFiUDP udp;
 
 unsigned long lastCommand = 0;
 unsigned long lastWifiCheck = 0;
@@ -113,6 +116,25 @@ function stopMove() { stopTimer(); sendCommand('stop'); }
 </html>
 )rawliteral";
 
+String handleCmdText(String q) {
+  q.trim();
+  if (q == "PING") return "PONG ESTOP=0 WIFI=1";
+  if (q == "STATUS?") {
+    String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+    return String("{\"heading\":0,\"estop\":0,\"wifi\":") + (WiFi.status() == WL_CONNECTED ? 1 : 0) + ",\"ip\":\"" + ipStr + "\"}";
+  }
+  if (q == "STOP") { stopCar(); return "OK STOP"; }
+  if (q.startsWith("DIR ")) {
+    int ang = q.substring(4).toInt() % 360;
+    if (ang >= 315 || ang < 45) forward();
+    else if (ang >= 45 && ang < 135) turnRight();
+    else if (ang >= 135 && ang < 225) backward();
+    else turnLeft();
+    return String("OK DIR ") + ang;
+  }
+  return "OK";
+}
+
 void setupServer() {
   auto sendPage = []() { server.send_P(200, "text/html", webpage); };
   server.on("/", sendPage);
@@ -124,8 +146,18 @@ void setupServer() {
   server.on("/left", []() { turnLeft(); server.send(200, "text/plain", "Left"); });
   server.on("/right", []() { turnRight(); server.send(200, "text/plain", "Right"); });
   server.on("/stop", []() { stopCar(); server.send(200, "text/plain", "Stop"); });
+  server.on("/ping", []() { server.send(200, "text/plain", handleCmdText("PING")); });
+  server.on("/status", []() { server.send(200, "application/json", handleCmdText("STATUS?")); });
+  server.on("/cmd", []() { server.send(200, "text/plain", handleCmdText(server.hasArg("q") ? server.arg("q") : "")); });
   server.onNotFound(sendPage);
   server.begin();
+
+  server8081.on("/", []() { server8081.send_P(200, "text/html", webpage); });
+  server8081.on("/ping", []() { server8081.send(200, "text/plain", handleCmdText("PING")); });
+  server8081.on("/status", []() { server8081.send(200, "application/json", handleCmdText("STATUS?")); });
+  server8081.on("/cmd", []() { server8081.send(200, "text/plain", handleCmdText(server8081.hasArg("q") ? server8081.arg("q") : "")); });
+  server8081.begin();
+  udp.begin(8082);
 }
 
 void setup() {
@@ -170,6 +202,20 @@ void loop() {
   }
   dnsServer.processNextRequest();
   server.handleClient();
+  server8081.handleClient();
+  int pkt = udp.parsePacket();
+  if (pkt > 0) {
+    char b[48];
+    int n = udp.read(b, sizeof(b) - 1);
+    b[n > 0 ? n : 0] = '\0';
+    String m(b); m.trim();
+    if (m == "DISCOVER_ESP32") {
+      String ipStr = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+      udp.beginPacket(udp.remoteIP(), udp.remotePort());
+      udp.print(String("{\"service\":\"esp32-rover\",\"port\":8081,\"ip\":\"") + ipStr + "\"}");
+      udp.endPacket();
+    }
+  }
 
   if ((millis() - lastCommand > WATCHDOG) &&
       (digitalRead(IN1) != digitalRead(IN2) ||

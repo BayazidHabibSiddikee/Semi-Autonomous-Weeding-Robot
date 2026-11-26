@@ -2,6 +2,12 @@ package com.weedlaser.bev.presentation
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -33,9 +39,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -420,6 +428,13 @@ fun SimplaControlScreen() {
 
             // Live AI Model & Virtual Rover Simulation Widgets (Default View)
             ModelSimulationWidgets(status = status, mode = mode)
+
+            // Field Photo -> Pi Boustrophedon Map Generator (:8000)
+            FieldMapGeneratorCard(
+                host = host,
+                token = token,
+                http = http,
+            )
         }
 
         Button(
@@ -685,6 +700,123 @@ private fun ModelSimulationWidgets(status: JSONObject, mode: String) {
                 }
             } else {
                 Text("Scanning furrow with YOLO26n (crops protected)...", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FieldMapGeneratorCard(
+    host: String,
+    token: String,
+    http: OkHttpClient,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var bevBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var statusText by remember { mutableStateOf("Send a field photo to Pi (:8000) to generate BEV + Boustrophedon map") }
+    var busy by remember { mutableStateOf(false) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
+    fun uploadUriToPi(uri: Uri) {
+        scope.launch {
+            busy = true
+            statusText = "Uploading field image to Pi (:8000/image)..."
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Unable to read image")
+                }
+                val body = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("file", "field.jpg", bytes.toRequestBody("image/jpeg".toMediaType()))
+                    .build()
+                val req = Request.Builder()
+                    .url("http://$host:8000/image")
+                    .header("Authorization", "Bearer $token")
+                    .post(body)
+                    .build()
+                val uploadResp = withContext(Dispatchers.IO) {
+                    http.newCall(req).execute().use { r ->
+                        val raw = r.body?.string().orEmpty()
+                        if (!r.isSuccessful) error("HTTP ${r.code}: $raw")
+                        raw
+                    }
+                }
+                val bevReq = Request.Builder()
+                    .url("http://$host:8000/bev_image")
+                    .header("Authorization", "Bearer $token")
+                    .get()
+                    .build()
+                val bmp = withContext(Dispatchers.IO) {
+                    http.newCall(bevReq).execute().use { r ->
+                        if (!r.isSuccessful) null
+                        else r.body?.bytes()?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size) }
+                    }
+                }
+                Pair(uploadResp, bmp)
+            }.onSuccess { (_, bmp) ->
+                if (bmp != null) bevBitmap = bmp
+                statusText = "Boustrophedon BEV Map generated on Pi!"
+                busy = false
+            }.onFailure { err ->
+                statusText = "Map upload failed: ${err.message}"
+                busy = false
+            }
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri -> if (uri != null) uploadUriToPi(uri) }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { ok -> if (ok) pendingCameraUri?.let { uploadUriToPi(it) } }
+
+    fun launchCamera() {
+        runCatching {
+            val f = File(context.cacheDir, "field_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
+            pendingCameraUri = uri
+            takePictureLauncher.launch(uri)
+        }.onFailure {
+            Toast.makeText(context, "Camera error: ${it.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val camPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) launchCamera() }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Field Image → Pi Boustrophedon Map", fontWeight = FontWeight.Bold)
+            Text(statusText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context, android.Manifest.permission.CAMERA
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (granted) launchCamera() else camPermLauncher.launch(android.Manifest.permission.CAMERA)
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Snap Field") }
+                OutlinedButton(
+                    onClick = { photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Pick Image") }
+            }
+            bevBitmap?.let { bmp ->
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "Pi Generated Boustrophedon BEV Map",
+                    modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)),
+                    contentScale = ContentScale.Fit,
+                )
             }
         }
     }
