@@ -44,26 +44,26 @@ void stopCar() {
 }
 
 void forward() {
-  leftMotor(180);
-  rightMotor(180);
+  leftMotor(200);
+  rightMotor(200);
   lastCommand = millis();
 }
 
 void backward() {
-  leftMotor(-180);
-  rightMotor(-180);
+  leftMotor(-200);
+  rightMotor(-200);
   lastCommand = millis();
 }
 
 void turnLeft() {
-  leftMotor(-160);
-  rightMotor(160);
+  leftMotor(-220);
+  rightMotor(220);
   lastCommand = millis();
 }
 
 void turnRight() {
-  leftMotor(160);
-  rightMotor(-160);
+  leftMotor(220);
+  rightMotor(-220);
   lastCommand = millis();
 }
 
