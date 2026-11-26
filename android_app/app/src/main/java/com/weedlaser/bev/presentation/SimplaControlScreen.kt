@@ -2,6 +2,7 @@ package com.weedlaser.bev.presentation
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -16,8 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -54,7 +57,8 @@ fun SimplaControlScreen() {
     var esp32Host by remember { mutableStateOf("192.168.4.1") }
     // Fixed default password/token matching Pi Wi-Fi hotspot ("bayazid" / "12345678")
     var token by remember { mutableStateOf("12345678") }
-    var mode by remember { mutableStateOf("manual") }
+    var mode by remember { mutableStateOf("autonomous") }
+    var showManualControls by remember { mutableStateOf(false) }
     var connected by remember { mutableStateOf(false) }
     var piConnected by remember { mutableStateOf(false) }
     var espConnected by remember { mutableStateOf(false) }
@@ -403,59 +407,19 @@ fun SimplaControlScreen() {
             // Auto + Manual Mode Switcher
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = { setMode("manual") },
-                    enabled = esp32Ready && mode != "manual",
-                    modifier = Modifier.weight(1f),
-                ) { Text("MANUAL") }
-                Button(
-                    onClick = { setMode("autonomous") },
+                    onClick = { setMode("autonomous"); showManualControls = false },
                     enabled = esp32Ready && status.optBoolean("camera_online") && mode != "autonomous",
                     modifier = Modifier.weight(1f),
                 ) { Text("AUTONOMOUS") }
-            }
-        }
-
-        // 8-Direction Hold-to-Drive D-Pad + Speed Selector
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(18 to "Slow", 28 to "Med", 35 to "Fast").forEach { (spd, label) ->
-                    FilterChip(
-                        selected = driveSpeed == spd,
-                        onClick = { driveSpeed = spd },
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                    )
-                }
-            }
-        }
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                DirHoldButton("↖", 315, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("▲", 0, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("↗", 45, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                DirHoldButton("◀", 270, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
                 OutlinedButton(
-                    onClick = ::stop,
-                    modifier = Modifier.size(72.dp),
-                    shape = RoundedCornerShape(16.dp),
-                ) { Text("STOP", fontWeight = FontWeight.Bold) }
-                DirHoldButton("▶", 90, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                    onClick = { setMode("manual"); showManualControls = true },
+                    enabled = esp32Ready && mode != "manual",
+                    modifier = Modifier.weight(1f),
+                ) { Text("MANUAL") }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                DirHoldButton("↙", 225, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("▼", 180, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-                DirHoldButton("↘", 135, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
-            }
+
+            // Live AI Model & Virtual Rover Simulation Widgets (Default View)
+            ModelSimulationWidgets(status = status, mode = mode)
         }
 
         Button(
@@ -468,45 +432,106 @@ fun SimplaControlScreen() {
             Text("EMERGENCY SOFTWARE STOP")
         }
 
-        // MG996R Servo (±30° · 50 Hz) + Arc Module Controller
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Turret Servo (MG996R ±30° · 50Hz) & Arc Module", fontWeight = FontWeight.Bold)
-                Text("Angle: ${servoSlider.toInt()}° (ESP32: ${status.optInt("servo_deg", 0)}°)")
-                Slider(
-                    value = servoSlider,
-                    onValueChange = { servoSlider = it },
-                    onValueChangeFinished = { setServo(servoSlider.toInt()) },
-                    valueRange = -30f..30f,
-                    steps = 11,
-                    enabled = esp32Ready,
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { servoSlider = -30f; setServo(-30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("-30°") }
-                    OutlinedButton(onClick = { servoSlider = 0f; setServo(0) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("0°") }
-                    OutlinedButton(onClick = { servoSlider = 30f; setServo(30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("+30°") }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(400 to "0.4s", 800 to "0.8s", 1500 to "1.5s").forEach { (ms, lbl) ->
+        // Physical Controls Toggle (Hidden by default so Autonomous Simulation is primary)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text("Manual Physical Controls", fontWeight = FontWeight.SemiBold)
+                Text("8-Way Drive, Servo & Arc Override", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(
+                checked = showManualControls,
+                onCheckedChange = { showManualControls = it },
+            )
+        }
+
+        if (showManualControls) {
+            // 8-Direction Hold-to-Drive D-Pad + Speed Selector
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("8-Direction Drive · hold to move", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(18 to "Slow", 28 to "Med", 35 to "Fast").forEach { (spd, label) ->
                         FilterChip(
-                            selected = arcDurationMs == ms,
-                            onClick = { arcDurationMs = ms },
-                            label = { Text(lbl) },
+                            selected = driveSpeed == spd,
+                            onClick = { driveSpeed = spd },
+                            label = { Text(label, style = MaterialTheme.typography.labelSmall) },
                         )
                     }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { fireArc("pulse", arcDurationMs) },
-                        enabled = esp32Ready && mode == "manual" && !status.optBoolean("moving"),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
-                        modifier = Modifier.weight(1f),
-                    ) { Text("ARC PULSE (${arcDurationMs / 1000f}s)") }
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    DirHoldButton("↖", 315, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                    DirHoldButton("▲", 0, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                    DirHoldButton("↗", 45, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    DirHoldButton("◀", 270, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
                     OutlinedButton(
-                        onClick = { fireArc("off", 0) },
+                        onClick = ::stop,
+                        modifier = Modifier.size(72.dp),
+                        shape = RoundedCornerShape(16.dp),
+                    ) { Text("STOP", fontWeight = FontWeight.Bold) }
+                    DirHoldButton("▶", 90, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    DirHoldButton("↙", 225, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                    DirHoldButton("▼", 180, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                    DirHoldButton("↘", 135, driveSpeed, mode, esp32Ready, ::driveDir, ::stop)
+                }
+            }
+
+            // MG996R Servo (±30° · 50 Hz) + Arc Module Controller
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Turret Servo (MG996R ±30° · 50Hz) & Arc Module", fontWeight = FontWeight.Bold)
+                    Text("Angle: ${servoSlider.toInt()}° (ESP32: ${status.optInt("servo_deg", 0)}°)")
+                    Slider(
+                        value = servoSlider,
+                        onValueChange = { servoSlider = it },
+                        onValueChangeFinished = { setServo(servoSlider.toInt()) },
+                        valueRange = -30f..30f,
+                        steps = 11,
                         enabled = esp32Ready,
-                        modifier = Modifier.weight(0.6f),
-                    ) { Text("ARC OFF") }
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { servoSlider = -30f; setServo(-30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("-30°") }
+                        OutlinedButton(onClick = { servoSlider = 0f; setServo(0) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("0°") }
+                        OutlinedButton(onClick = { servoSlider = 30f; setServo(30) }, enabled = esp32Ready, modifier = Modifier.weight(1f)) { Text("+30°") }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(400 to "0.4s", 800 to "0.8s", 1500 to "1.5s").forEach { (ms, lbl) ->
+                            FilterChip(
+                                selected = arcDurationMs == ms,
+                                onClick = { arcDurationMs = ms },
+                                label = { Text(lbl) },
+                            )
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { fireArc("pulse", arcDurationMs) },
+                            enabled = esp32Ready && mode == "manual" && !status.optBoolean("moving"),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                            modifier = Modifier.weight(1f),
+                        ) { Text("ARC PULSE (${arcDurationMs / 1000f}s)") }
+                        OutlinedButton(
+                            onClick = { fireArc("off", 0) },
+                            enabled = esp32Ready,
+                            modifier = Modifier.weight(0.6f),
+                        ) { Text("ARC OFF") }
+                    }
                 }
             }
         }
@@ -561,4 +586,106 @@ private fun DirHoldButton(
         },
         shape = RoundedCornerShape(16.dp),
     ) { Text(label, style = MaterialTheme.typography.headlineSmall) }
+}
+
+@Composable
+private fun ModelSimulationWidgets(status: JSONObject, mode: String) {
+    val cutQueue = status.optJSONArray("cut_queue")
+    val weedsCount = status.optInt("weeds_count", cutQueue?.length() ?: 0)
+    val dir8Way = status.optInt("dir_8way", 0)
+    val servoDeg = status.optInt("servo_deg", 0)
+    val modelName = status.optString("model_name", "yolo26n_best.onnx")
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("AI Model & Rover Simulation", fontWeight = FontWeight.Bold)
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Text(
+                        text = mode.uppercase(),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+
+            // Live 2D Radar & Turret Simulation Canvas
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(150.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF0D131A)),
+            ) {
+                val cx = size.width / 2f
+                val cy = size.height * 0.80f
+
+                // Corridor & range rings
+                drawCircle(Color(0xFF1E2D3D), radius = size.height * 0.65f, center = Offset(cx, cy), style = Stroke(1.5f))
+                drawCircle(Color(0xFF1E2D3D), radius = size.height * 0.35f, center = Offset(cx, cy), style = Stroke(1.5f))
+                drawLine(Color(0xFF263849), Offset(cx - 80f, 0f), Offset(cx - 80f, size.height), 1.5f)
+                drawLine(Color(0xFF263849), Offset(cx + 80f, 0f), Offset(cx + 80f, size.height), 1.5f)
+
+                // Rover body
+                drawRect(Color(0xFF38BDF8), topLeft = Offset(cx - 22f, cy - 12f), size = androidx.compose.ui.geometry.Size(44f, 24f))
+
+                // 8-way steering vector
+                val dirRad = Math.toRadians(dir8Way.toDouble())
+                val dx = (kotlin.math.sin(dirRad) * 45.0).toFloat()
+                val dy = (-kotlin.math.cos(dirRad) * 45.0).toFloat()
+                drawLine(Color(0xFF22C55E), Offset(cx, cy), Offset(cx + dx, cy + dy), strokeWidth = 5f)
+
+                // Turret servo beam (-30..+30 deg)
+                val servoRad = Math.toRadians(servoDeg.toDouble())
+                val sx = (kotlin.math.sin(servoRad) * 95.0).toFloat()
+                val sy = (-kotlin.math.cos(servoRad) * 95.0).toFloat()
+                drawLine(Color(0xFFF59E0B), Offset(cx, cy - 10f), Offset(cx + sx, cy - 10f + sy), strokeWidth = 3f)
+
+                // Plot detected weeds from cut_queue
+                if (cutQueue != null) {
+                    for (i in 0 until cutQueue.length()) {
+                        val w = cutQueue.optJSONObject(i) ?: continue
+                        val xg = w.optDouble("x_ground_mm", 0.0).toFloat()
+                        val yf = w.optDouble("y_forward_mm", 80.0).toFloat()
+                        val wx = (cx + xg * 0.55f).coerceIn(12f, size.width - 12f)
+                        val wy = (cy - 20f - yf * 0.35f).coerceIn(12f, size.height - 12f)
+                        val dotColor = if (i == 0) Color(0xFFEF4444) else Color(0xFFF97316)
+                        drawCircle(dotColor, radius = if (i == 0) 9f else 6f, center = Offset(wx, wy))
+                    }
+                }
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Model: $modelName", style = MaterialTheme.typography.labelSmall)
+                Text("Steer: ${dir8Way}°", style = MaterialTheme.typography.labelSmall)
+                Text("Servo: ${servoDeg}°", style = MaterialTheme.typography.labelSmall)
+                Text("Weeds: $weedsCount", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
+
+            if (cutQueue != null && cutQueue.length() > 0) {
+                HorizontalDivider()
+                for (i in 0 until minOf(cutQueue.length(), 4)) {
+                    val w = cutQueue.optJSONObject(i) ?: continue
+                    val rank = w.optInt("order_rank", i + 1)
+                    val ang = w.optDouble("turret_deg", 0.0).toInt()
+                    val dist = w.optDouble("drive_to_cut_mm", 0.0).toInt()
+                    Text(
+                        text = "#$rank Weed · Turret: ${ang}° · Dist: ${dist}mm (${if (i == 0) "AIMING" else "QUEUED"})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (i == 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text("Scanning furrow with YOLO26n (crops protected)...", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }
