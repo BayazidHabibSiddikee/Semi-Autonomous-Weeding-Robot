@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 
@@ -21,7 +22,8 @@ WebServer server(80);
 DNSServer dnsServer;
 
 unsigned long lastCommand = 0;
-const unsigned long WATCHDOG = 500;
+unsigned long lastWifiCheck = 0;
+const unsigned long WATCHDOG = 600;
 bool staPrinted = false;
 
 void leftMotor(int speed) {
@@ -44,26 +46,26 @@ void stopCar() {
 }
 
 void forward() {
-  leftMotor(200);
-  rightMotor(200);
+  leftMotor(255);
+  rightMotor(255);
   lastCommand = millis();
 }
 
 void backward() {
-  leftMotor(-200);
-  rightMotor(-200);
+  leftMotor(-255);
+  rightMotor(-255);
   lastCommand = millis();
 }
 
 void turnLeft() {
-  leftMotor(-220);
-  rightMotor(220);
+  leftMotor(-255);
+  rightMotor(255);
   lastCommand = millis();
 }
 
 void turnRight() {
-  leftMotor(220);
-  rightMotor(-220);
+  leftMotor(255);
+  rightMotor(-255);
   lastCommand = millis();
 }
 
@@ -143,6 +145,7 @@ void setup() {
   WiFi.setAutoReconnect(true);
   WiFi.begin(sta_ssid, sta_pass);
   WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
 
   dnsServer.start(53, "*", IPAddress(192,168,4,1));
   setupServer();
@@ -151,10 +154,19 @@ void setup() {
 }
 
 void loop() {
-  if (!staPrinted && WiFi.status() == WL_CONNECTED) {
-    staPrinted = true;
-    Serial.print("Inox IP: ");
-    Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!staPrinted) {
+      staPrinted = true;
+      Serial.print("Inox IP: ");
+      Serial.println(WiFi.localIP());
+    }
+  } else {
+    staPrinted = false;
+    if (millis() - lastWifiCheck > 10000) {
+      lastWifiCheck = millis();
+      WiFi.disconnect(false);
+      WiFi.begin(sta_ssid, sta_pass);
+    }
   }
   dnsServer.processNextRequest();
   server.handleClient();
