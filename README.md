@@ -6,6 +6,20 @@ A hardened, fail-closed agricultural weeding rover engineered to run **all-in-on
 > 1. **Navigation/ + Web Console + ros2_ws/** *(active focus)* — Wheeled closed-loop rover with encoder/IMU localization, hardware E-stop & watchdog interlocks, crop-row vision, modular treatment hooks, and a live web/Android control stack.
 > 2. **Project-RIPRA / Weed_Detection** — Earlier gantry-on-rails vision and laser prototype.
 
+
+## Contributors & Acknowledgements
+
+### Special Thanks — AI Model Development & Electrical Systems
+
+Special thanks to **the project collaborator reachable at [pretabinda@gmail.com](mailto:pretabinda@gmail.com)** for his substantial hands-on contributions to this project.
+
+- **Initial AI model:** He developed the initial **six-class plant/weed model using YOLOv8n**, establishing an early multi-class recognition baseline for the project.
+- **Subsequent model expansion:** The project lead later expanded the model to **nine classes using YOLO26s**. This is a later development built on the project's evolving model work.
+- **Electrical system:** The electrical system was developed collaboratively. Both contributors worked together on the electrical work across the project, rather than treating it as an individual contribution.
+- **Contribution history:** His work was carried out through direct collaboration and hands-on engineering, rather than GitHub commits or pull requests. Therefore, the repository's commit history does not fully represent his contribution.
+
+We sincerely acknowledge his role in the AI model development and the jointly completed electrical-system work. Thank you for the collaboration and effort that helped move this project forward.
+
 ---
 
 ## Navigation Architecture
