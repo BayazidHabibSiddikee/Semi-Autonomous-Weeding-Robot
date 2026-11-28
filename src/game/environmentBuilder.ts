@@ -1,10 +1,18 @@
 import * as THREE from 'three';
+import { CROP_FIELD_BY_ID } from './fieldTypesCatalog';
 import { ProceduralTexturePack } from './textures';
-import { FieldObstacle3D, FieldPlant3D, FieldWeed3D, TreatmentToolType } from './types';
+import {
+  CropFieldId,
+  FieldObstacle3D,
+  FieldPlant3D,
+  FieldWeed3D,
+  TreatmentToolType,
+} from './types';
 
 export interface FieldEnvironmentHandle {
   workshopGroup: THREE.Group;
   fieldGroup: THREE.Group;
+  setFieldType: (fieldType: CropFieldId) => void;
   syncFieldEntities: (
     crops: FieldPlant3D[],
     weeds: FieldWeed3D[],
@@ -321,19 +329,45 @@ export function buildGameEnvironments(
 
   const cropMeshes = new Map<number, THREE.Group>();
   const weedMeshes = new Map<number, { alive: THREE.Group; treated: THREE.Mesh }>();
+  let currentFieldType: CropFieldId = 'tomato';
 
-  // Shared crop & weed geometries/materials
+  // Shared crop & weed geometries/materials across all 8 crop species
   const stemGeo = trackGeo(new THREE.CylinderGeometry(0.006, 0.009, 0.075, 6));
+  const tallStemGeo = trackGeo(new THREE.CylinderGeometry(0.0055, 0.0085, 0.125, 6));
   const leafClusterGeo = trackGeo(new THREE.DodecahedronGeometry(0.028, 0));
+  const broadLeafGeo = trackGeo(new THREE.BoxGeometry(0.044, 0.004, 0.016));
   const tomatoGeo = trackGeo(new THREE.SphereGeometry(0.009, 8, 8));
+  const chiliPodGeo = trackGeo(new THREE.ConeGeometry(0.0055, 0.026, 6));
+  const flowerBloomGeo = trackGeo(new THREE.DodecahedronGeometry(0.014, 0));
+  const eggplantGeo = trackGeo(new THREE.CapsuleGeometry(0.009, 0.018, 5, 8));
+  const cabbageHeadGeo = trackGeo(new THREE.SphereGeometry(0.024, 10, 8));
+  const berryGeo = trackGeo(new THREE.ConeGeometry(0.0075, 0.013, 6));
+  const tasselGeo = trackGeo(new THREE.ConeGeometry(0.009, 0.028, 6));
+
   const matStem = trackMat(new THREE.MeshStandardMaterial({ color: 0x2f6b29, roughness: 0.82 }));
   const matCropLeaf = trackMat(new THREE.MeshStandardMaterial({ color: 0x1e6b30, roughness: 0.76 }));
+  const matCropLeafLight = trackMat(new THREE.MeshStandardMaterial({ color: 0x65a30d, roughness: 0.74 }));
+  const matCropLeafBlue = trackMat(new THREE.MeshStandardMaterial({ color: 0x3b8b5b, roughness: 0.78 }));
   const matCropDamaged = trackMat(new THREE.MeshStandardMaterial({ color: 0x7c5d32, roughness: 0.9 }));
   const matTomatoRed = trackMat(new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.32 }));
+  const matChiliRed = trackMat(new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.28 }));
+  const matChiliGreen = trackMat(new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.34 }));
+  const matMarigoldOrange = trackMat(new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.58 }));
+  const matMarigoldGold = trackMat(new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.55 }));
+  const matEggplantPurple = trackMat(new THREE.MeshStandardMaterial({ color: 0x581c87, roughness: 0.22, metalness: 0.05 }));
+  const matCabbageCore = trackMat(new THREE.MeshStandardMaterial({ color: 0x86efac, roughness: 0.68 }));
+  const matCornTassel = trackMat(new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.72 }));
+  const matBerryRed = trackMat(new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.32 }));
+  const matBlossomWhite = trackMat(new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.6 }));
+  const matLettuceHeart = trackMat(new THREE.MeshStandardMaterial({ color: 0xbef264, roughness: 0.7 }));
 
   const weedLeafGeo = trackGeo(new THREE.ConeGeometry(0.017, 0.036, 5));
+  const grassBladeGeo = trackGeo(new THREE.ConeGeometry(0.006, 0.048, 4));
+  const dandelionHeadGeo = trackGeo(new THREE.SphereGeometry(0.0085, 7, 7));
   const matWeedGreen = trackMat(new THREE.MeshStandardMaterial({ color: 0x84cc16, roughness: 0.72 }));
   const matWeedDark = trackMat(new THREE.MeshStandardMaterial({ color: 0x65a30d, roughness: 0.78 }));
+  const matDandelionYellow = trackMat(new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.6 }));
+  const matPurslaneStem = trackMat(new THREE.MeshStandardMaterial({ color: 0x991b1b, roughness: 0.75 }));
   const treatedSpotGeo = trackGeo(new THREE.CircleGeometry(0.034, 12));
   treatedSpotGeo.rotateX(-Math.PI / 2);
   const matTreatedSpot = trackMat(
@@ -455,32 +489,180 @@ export function buildGameEnvironments(
     const cg = new THREE.Group();
     cg.position.set(plant.x, 0.02, plant.z);
 
-    const stem = new THREE.Mesh(stemGeo, matStem);
-    stem.position.y = 0.036;
-    stem.castShadow = true;
-    cg.add(stem);
+    if (currentFieldType === 'tomato') {
+      const stem = new THREE.Mesh(stemGeo, matStem);
+      stem.position.y = 0.036;
+      stem.castShadow = true;
+      cg.add(stem);
 
-    const offsets: [number, number, number, number][] = [
-      [-0.018, 0.068, 0.008, 1.0],
-      [0.018, 0.072, -0.01, 0.92],
-      [0.0, 0.082, 0.015, 0.84],
-    ];
-    offsets.forEach(([ox, oy, oz, sc]) => {
-      const leaf = new THREE.Mesh(leafClusterGeo, matCropLeaf);
-      leaf.position.set(ox, oy, oz);
-      leaf.scale.set(sc * 1.15, sc * 0.65, sc);
-      leaf.castShadow = true;
-      leaf.userData.isLeaf = true;
-      cg.add(leaf);
-    });
+      const offsets: [number, number, number, number][] = [
+        [-0.018, 0.068, 0.008, 1.0],
+        [0.018, 0.072, -0.01, 0.92],
+        [0.0, 0.082, 0.015, 0.84],
+      ];
+      offsets.forEach(([ox, oy, oz, sc]) => {
+        const leaf = new THREE.Mesh(leafClusterGeo, matCropLeaf);
+        leaf.position.set(ox, oy, oz);
+        leaf.scale.set(sc * 1.15, sc * 0.65, sc);
+        leaf.castShadow = true;
+        leaf.userData.isLeaf = true;
+        cg.add(leaf);
+      });
 
-    // Two small ripe cherry tomatoes visible inside the young tomato plant
-    const tom1 = new THREE.Mesh(tomatoGeo, matTomatoRed);
-    tom1.position.set(0.016, 0.056, 0.014);
-    cg.add(tom1);
-    const tom2 = new THREE.Mesh(tomatoGeo, matTomatoRed);
-    tom2.position.set(-0.014, 0.052, -0.012);
-    cg.add(tom2);
+      const tom1 = new THREE.Mesh(tomatoGeo, matTomatoRed);
+      tom1.position.set(0.016, 0.056, 0.014);
+      cg.add(tom1);
+      const tom2 = new THREE.Mesh(tomatoGeo, matTomatoRed);
+      tom2.position.set(-0.014, 0.052, -0.012);
+      cg.add(tom2);
+    } else if (currentFieldType === 'chili') {
+      const stem = new THREE.Mesh(stemGeo, matStem);
+      stem.position.y = 0.04;
+      stem.castShadow = true;
+      cg.add(stem);
+
+      for (let i = 0; i < 4; i++) {
+        const ang = (i / 4) * Math.PI * 2 + plant.id * 0.3;
+        const leaf = new THREE.Mesh(leafClusterGeo, matCropLeaf);
+        leaf.position.set(Math.cos(ang) * 0.019, 0.074 + (i % 2) * 0.01, Math.sin(ang) * 0.019);
+        leaf.scale.set(0.88, 0.55, 0.88);
+        leaf.userData.isLeaf = true;
+        cg.add(leaf);
+      }
+
+      // Hanging slender red & green chili pods
+      const pods: [number, number, number, boolean][] = [
+        [0.017, 0.052, 0.012, true],
+        [-0.015, 0.056, 0.01, false],
+        [0.004, 0.048, -0.017, true],
+      ];
+      pods.forEach(([px, py, pz, isRed]) => {
+        const pod = new THREE.Mesh(chiliPodGeo, isRed ? matChiliRed : matChiliGreen);
+        pod.position.set(px, py, pz);
+        pod.rotation.x = Math.PI + 0.2;
+        pod.rotation.z = px > 0 ? 0.25 : -0.25;
+        cg.add(pod);
+      });
+    } else if (currentFieldType === 'flower') {
+      const stem = new THREE.Mesh(stemGeo, matStem);
+      stem.position.y = 0.034;
+      cg.add(stem);
+
+      for (let i = 0; i < 3; i++) {
+        const ang = (i / 3) * Math.PI * 2 + plant.id * 0.5;
+        const leaf = new THREE.Mesh(leafClusterGeo, matCropLeaf);
+        leaf.position.set(Math.cos(ang) * 0.02, 0.048, Math.sin(ang) * 0.02);
+        leaf.scale.set(0.9, 0.55, 0.9);
+        leaf.userData.isLeaf = true;
+        cg.add(leaf);
+
+        const bloom = new THREE.Mesh(
+          flowerBloomGeo,
+          i % 2 === 0 ? matMarigoldOrange : matMarigoldGold
+        );
+        bloom.position.set(Math.cos(ang) * 0.015, 0.078 + (i === 0 ? 0.012 : 0), Math.sin(ang) * 0.015);
+        bloom.castShadow = true;
+        cg.add(bloom);
+      }
+    } else if (currentFieldType === 'eggplant') {
+      const stem = new THREE.Mesh(stemGeo, matStem);
+      stem.position.y = 0.042;
+      cg.add(stem);
+
+      for (let i = 0; i < 3; i++) {
+        const ang = (i / 3) * Math.PI * 2 + plant.id * 0.4;
+        const leaf = new THREE.Mesh(leafClusterGeo, matCropLeaf);
+        leaf.position.set(Math.cos(ang) * 0.022, 0.078, Math.sin(ang) * 0.022);
+        leaf.scale.set(1.25, 0.58, 1.05);
+        leaf.userData.isLeaf = true;
+        cg.add(leaf);
+      }
+
+      const egg1 = new THREE.Mesh(eggplantGeo, matEggplantPurple);
+      egg1.position.set(0.016, 0.048, 0.013);
+      egg1.rotation.z = -0.22;
+      cg.add(egg1);
+      const egg2 = new THREE.Mesh(eggplantGeo, matEggplantPurple);
+      egg2.position.set(-0.016, 0.044, -0.01);
+      egg2.rotation.z = 0.2;
+      cg.add(egg2);
+    } else if (currentFieldType === 'cabbage') {
+      // Compact spherical pale-green heart surrounded by cupped blue-green outer leaves
+      const head = new THREE.Mesh(cabbageHeadGeo, matCabbageCore);
+      head.position.y = 0.032;
+      head.scale.set(1.12, 0.92, 1.12);
+      head.castShadow = true;
+      head.userData.isLeaf = true;
+      cg.add(head);
+
+      for (let i = 0; i < 5; i++) {
+        const ang = (i / 5) * Math.PI * 2 + plant.id * 0.25;
+        const outer = new THREE.Mesh(leafClusterGeo, matCropLeafBlue);
+        outer.position.set(Math.cos(ang) * 0.026, 0.025, Math.sin(ang) * 0.026);
+        outer.scale.set(0.95, 0.48, 0.95);
+        outer.userData.isLeaf = true;
+        cg.add(outer);
+      }
+    } else if (currentFieldType === 'corn') {
+      const stalk = new THREE.Mesh(tallStemGeo, matStem);
+      stalk.position.y = 0.062;
+      stalk.castShadow = true;
+      cg.add(stalk);
+
+      for (let i = 0; i < 4; i++) {
+        const ang = (i / 4) * Math.PI * 2 + plant.id * 0.35;
+        const blade = new THREE.Mesh(broadLeafGeo, matCropLeafLight);
+        blade.position.set(Math.cos(ang) * 0.02, 0.045 + i * 0.016, Math.sin(ang) * 0.02);
+        blade.rotation.y = -ang;
+        blade.rotation.z = -0.45;
+        blade.userData.isLeaf = true;
+        cg.add(blade);
+      }
+
+      const tassel = new THREE.Mesh(tasselGeo, matCornTassel);
+      tassel.position.y = 0.132;
+      cg.add(tassel);
+    } else if (currentFieldType === 'strawberry') {
+      for (let i = 0; i < 4; i++) {
+        const ang = (i / 4) * Math.PI * 2 + plant.id * 0.5;
+        const mound = new THREE.Mesh(leafClusterGeo, matCropLeaf);
+        mound.position.set(Math.cos(ang) * 0.02, 0.028, Math.sin(ang) * 0.02);
+        mound.scale.set(0.92, 0.52, 0.92);
+        mound.userData.isLeaf = true;
+        cg.add(mound);
+      }
+      const berries: [number, number, number][] = [
+        [0.022, 0.018, 0.014],
+        [-0.02, 0.018, 0.012],
+        [0.005, 0.017, -0.022],
+      ];
+      berries.forEach(([bx, by, bz]) => {
+        const berry = new THREE.Mesh(berryGeo, matBerryRed);
+        berry.position.set(bx, by, bz);
+        berry.rotation.x = Math.PI;
+        cg.add(berry);
+      });
+      const blossom = new THREE.Mesh(tomatoGeo, matBlossomWhite);
+      blossom.scale.setScalar(0.65);
+      blossom.position.set(0, 0.046, 0.006);
+      cg.add(blossom);
+    } else {
+      // Crisphead Lettuce
+      const center = new THREE.Mesh(cabbageHeadGeo, matLettuceHeart);
+      center.position.y = 0.028;
+      center.scale.set(1.05, 0.72, 1.05);
+      center.userData.isLeaf = true;
+      cg.add(center);
+
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2 + plant.id * 0.2;
+        const ruffle = new THREE.Mesh(leafClusterGeo, matCropLeafLight);
+        ruffle.position.set(Math.cos(ang) * 0.024, 0.024 + (i % 2) * 0.008, Math.sin(ang) * 0.024);
+        ruffle.scale.set(0.88, 0.52, 0.88);
+        ruffle.userData.isLeaf = true;
+        cg.add(ruffle);
+      }
+    }
 
     return cg;
   };
@@ -489,15 +671,53 @@ export function buildGameEnvironments(
     const alive = new THREE.Group();
     alive.position.set(weed.x, 0.004, weed.z);
 
-    // Multi-blade broadleaf weed rosette (distinct bright lime hue so player spots it instantly)
-    for (let i = 0; i < 5; i++) {
-      const ang = (i / 5) * Math.PI * 2 + weed.id * 0.4;
-      const blade = new THREE.Mesh(weedLeafGeo, i % 2 === 0 ? matWeedGreen : matWeedDark);
-      blade.position.set(Math.cos(ang) * 0.014, 0.016, Math.sin(ang) * 0.014);
-      blade.rotation.z = -Math.cos(ang) * 0.55;
-      blade.rotation.x = Math.sin(ang) * 0.55;
-      blade.castShadow = true;
-      alive.add(blade);
+    if (weed.weedClass === 'weed_grass') {
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2 + weed.id * 0.3;
+        const blade = new THREE.Mesh(grassBladeGeo, i % 2 === 0 ? matWeedGreen : matWeedDark);
+        blade.position.set(Math.cos(ang) * 0.009, 0.022, Math.sin(ang) * 0.009);
+        blade.rotation.z = -Math.cos(ang) * 0.35;
+        blade.rotation.x = Math.sin(ang) * 0.35;
+        blade.castShadow = true;
+        alive.add(blade);
+      }
+    } else if (weed.weedClass === 'weed_dandelion') {
+      for (let i = 0; i < 5; i++) {
+        const ang = (i / 5) * Math.PI * 2 + weed.id * 0.4;
+        const blade = new THREE.Mesh(weedLeafGeo, matWeedDark);
+        blade.position.set(Math.cos(ang) * 0.015, 0.012, Math.sin(ang) * 0.015);
+        blade.rotation.z = -Math.cos(ang) * 0.72;
+        blade.rotation.x = Math.sin(ang) * 0.72;
+        alive.add(blade);
+      }
+      const head = new THREE.Mesh(dandelionHeadGeo, matDandelionYellow);
+      head.position.set(0, 0.036, 0);
+      alive.add(head);
+    } else if (weed.weedClass === 'weed_purslane') {
+      const centerStem = new THREE.Mesh(tomatoGeo, matPurslaneStem);
+      centerStem.scale.set(0.8, 0.4, 0.8);
+      centerStem.position.y = 0.008;
+      alive.add(centerStem);
+      for (let i = 0; i < 5; i++) {
+        const ang = (i / 5) * Math.PI * 2 + weed.id * 0.5;
+        const lobe = new THREE.Mesh(weedLeafGeo, matWeedGreen);
+        lobe.position.set(Math.cos(ang) * 0.016, 0.01, Math.sin(ang) * 0.016);
+        lobe.scale.set(1.1, 0.6, 1.1);
+        lobe.rotation.z = -Math.cos(ang) * 0.85;
+        lobe.rotation.x = Math.sin(ang) * 0.85;
+        alive.add(lobe);
+      }
+    } else {
+      // weed_amaranth / broadleaf rosette
+      for (let i = 0; i < 5; i++) {
+        const ang = (i / 5) * Math.PI * 2 + weed.id * 0.4;
+        const blade = new THREE.Mesh(weedLeafGeo, i % 2 === 0 ? matWeedGreen : matWeedDark);
+        blade.position.set(Math.cos(ang) * 0.014, 0.018, Math.sin(ang) * 0.014);
+        blade.rotation.z = -Math.cos(ang) * 0.52;
+        blade.rotation.x = Math.sin(ang) * 0.52;
+        blade.castShadow = true;
+        alive.add(blade);
+      }
     }
 
     const treated = new THREE.Mesh(treatedSpotGeo, matTreatedSpot);
@@ -506,6 +726,24 @@ export function buildGameEnvironments(
 
     dynamicWeedsGroup.add(alive, treated);
     return { alive, treated };
+  };
+
+  const setFieldType = (fieldType: CropFieldId) => {
+    currentFieldType = fieldType;
+    const spec = CROP_FIELD_BY_ID[fieldType];
+    soilMat.color.setHex(spec.soilTintHex);
+    ridgeMat.color.setHex(spec.ridgeTintHex);
+    meadowMat.color.setHex(spec.meadowTintHex);
+
+    // Clear existing cached crop & weed meshes so the next sync builds the new crop species cleanly
+    for (const group of cropMeshes.values()) {
+      dynamicCropsGroup.remove(group);
+    }
+    cropMeshes.clear();
+    for (const entry of weedMeshes.values()) {
+      dynamicWeedsGroup.remove(entry.alive, entry.treated);
+    }
+    weedMeshes.clear();
   };
 
   const syncFieldEntities = (
@@ -579,6 +817,7 @@ export function buildGameEnvironments(
   return {
     workshopGroup,
     fieldGroup,
+    setFieldType,
     syncFieldEntities,
     spawnTreatmentParticles,
     updateParticles,

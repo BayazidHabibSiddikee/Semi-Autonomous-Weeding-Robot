@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PART_BY_ID, ROVER_PARTS } from './roverPartsCatalog';
+import { ROVER_PARTS } from './roverPartsCatalog';
 import { ProceduralTexturePack } from './textures';
 import { PartId, TreatmentToolType } from './types';
 
@@ -14,6 +14,10 @@ export interface RoverRig {
   toolVariants: Record<TreatmentToolType, THREE.Group>;
   grinderDisc: THREE.Group;
   flameConeGroup: THREE.Group;
+  sparkArcMesh: THREE.Mesh;
+  servoGearMesh: THREE.Group;
+  turretGearMesh: THREE.Group;
+  turretPivotGroup: THREE.Group;
   laserGimbalPan: THREE.Group;
   laserGimbalTilt: THREE.Group;
   laserBeamMesh: THREE.Mesh;
@@ -29,17 +33,22 @@ export interface RoverRig {
     firing: boolean,
     tool: TreatmentToolType,
     elapsed: number,
-    localTarget?: { x: number; z: number } | null
+    localTarget?: { x: number; z: number } | null,
+    sparkPhase?: boolean,
+    manualAimRad?: number | null
   ) => void;
+  getTurretYawDeg: () => number;
   setEstopPressed: (pressed: boolean) => void;
+  syncPartHighlights: (selectedId: PartId | null, hoveredId: PartId | null) => void;
+  getPartWorldCenter: (partId: PartId, outVec: THREE.Vector3) => void;
   dispose: () => void;
 }
 
 function makeDeckGeometry(): THREE.ExtrudeGeometry {
-  // Matches generate_chassis_model.py: 256mm x 155mm octagonal chamfered deck (chamfer 32mm)
+  // Exact 256mm x 155mm chamfered wooden deck from CAD + real bot
   const hl = 0.128;
   const hw = 0.0775;
-  const c = 0.032;
+  const c = 0.03;
 
   const shape = new THREE.Shape();
   shape.moveTo(hl - c, -hw);
@@ -52,23 +61,8 @@ function makeDeckGeometry(): THREE.ExtrudeGeometry {
   shape.lineTo(-hl + c, -hw);
   shape.closePath();
 
-  // Signature 5-point star cutout at X=+40mm
-  const starHole = new THREE.Path();
-  const rOut = 0.019;
-  const rIn = 0.0082;
-  for (let i = 0; i < 10; i++) {
-    const r = i % 2 === 0 ? rOut : rIn;
-    const ang = (i * Math.PI) / 5;
-    const x = 0.04 + Math.cos(ang) * r;
-    const y = Math.sin(ang) * r;
-    if (i === 0) starHole.moveTo(x, y);
-    else starHole.lineTo(x, y);
-  }
-  starHole.closePath();
-  shape.holes.push(starHole);
-
-  // Signature diamond cutout at X=-55mm
-  const d = 0.025;
+  // Rear diamond wire cutout
+  const d = 0.022;
   const diamond = new THREE.Path();
   diamond.moveTo(-0.055 + d, 0);
   diamond.lineTo(-0.055, d);
@@ -77,20 +71,10 @@ function makeDeckGeometry(): THREE.ExtrudeGeometry {
   diamond.closePath();
   shape.holes.push(diamond);
 
-  // Ventilation slots (3 per side for clean triangulation)
-  for (const side of [-1, 1]) {
-    for (let i = 0; i < 3; i++) {
-      const sx = 0.024 + i * 0.016;
-      const sy = side * 0.05;
-      const slot = new THREE.Path();
-      slot.moveTo(sx, sy - 0.007);
-      slot.lineTo(sx + 0.006, sy - 0.007);
-      slot.lineTo(sx + 0.006, sy + 0.007);
-      slot.lineTo(sx, sy + 0.007);
-      slot.closePath();
-      shape.holes.push(slot);
-    }
-  }
+  // Front canister pass-through circular bore (canister drops through top plate into arch!)
+  const bore = new THREE.Path();
+  bore.absarc(0.056, 0, 0.031, 0, Math.PI * 2, true);
+  shape.holes.push(bore);
 
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: 0.0045,
@@ -99,13 +83,12 @@ function makeDeckGeometry(): THREE.ExtrudeGeometry {
     bevelSize: 0.0008,
     bevelSegments: 2,
   });
-  // Extrude is in XY (+Z depth); rotate so plate lies flat in XZ with thickness along +Y
   geo.rotateX(-Math.PI / 2);
   return geo;
 }
 
-function makeArchPanelGeometry(): THREE.ExtrudeGeometry {
-  // Matches generate_chassis_model.py side arch panel in X-Y plane
+function makeArchPanelGeometry(isOuter: boolean): THREE.ExtrudeGeometry {
+  // Exact arched walnut wood side panels from user's real rover photos
   const pts: [number, number][] = [
     [-0.045, 0.125],
     [-0.038, 0.129],
@@ -138,29 +121,178 @@ function makeArchPanelGeometry(): THREE.ExtrudeGeometry {
   });
   shape.closePath();
 
-  // Front & rear triangular lightening cutouts
-  const triF = new THREE.Path();
-  triF.moveTo(0.072, 0.076);
-  triF.lineTo(0.084, 0.064);
-  triF.lineTo(0.07, 0.064);
-  triF.closePath();
-  shape.holes.push(triF);
+  // 3 signature vertical slots in the center bridge (clearly visible in side photo!)
+  for (const sx of [-0.008, 0.0, 0.008]) {
+    const slot = new THREE.Path();
+    slot.moveTo(sx - 0.0018, 0.112);
+    slot.lineTo(sx + 0.0018, 0.112);
+    slot.lineTo(sx + 0.0018, 0.122);
+    slot.lineTo(sx - 0.0018, 0.122);
+    slot.closePath();
+    shape.holes.push(slot);
+  }
 
-  const triR = new THREE.Path();
-  triR.moveTo(-0.072, 0.076);
-  triR.lineTo(-0.07, 0.064);
-  triR.lineTo(-0.084, 0.064);
-  triR.closePath();
-  shape.holes.push(triR);
+  // Motor inspection windows on outer panel showing the yellow TT gearboxes!
+  if (isOuter) {
+    const winF = new THREE.Path();
+    winF.moveTo(0.088, 0.056);
+    winF.lineTo(0.104, 0.04);
+    winF.lineTo(0.095, 0.031);
+    winF.lineTo(0.079, 0.047);
+    winF.closePath();
+    shape.holes.push(winF);
+
+    const winR = new THREE.Path();
+    winR.moveTo(-0.088, 0.056);
+    winR.lineTo(-0.079, 0.047);
+    winR.lineTo(-0.095, 0.031);
+    winR.lineTo(-0.104, 0.04);
+    winR.closePath();
+    shape.holes.push(winR);
+  }
 
   const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: 0.004,
+    depth: 0.0042,
     bevelEnabled: true,
     bevelThickness: 0.0005,
     bevelSize: 0.0005,
     bevelSegments: 1,
   });
-  geo.translate(0, 0, -0.002);
+  geo.translate(0, 0, -0.0021);
+  return geo;
+}
+
+function makeSpurGearGeometry(outerRadius: number, teeth: number, thickness: number): THREE.ExtrudeGeometry {
+  const shape = new THREE.Shape();
+  const rootR = outerRadius * 0.86;
+  const step = (Math.PI * 2) / teeth;
+
+  for (let i = 0; i < teeth; i++) {
+    const a0 = i * step;
+    const a1 = a0 + step * 0.22;
+    const a2 = a0 + step * 0.34;
+    const a3 = a0 + step * 0.66;
+    const a4 = a0 + step * 0.78;
+    const p0x = Math.cos(a0) * rootR;
+    const p0y = Math.sin(a0) * rootR;
+    if (i === 0) shape.moveTo(p0x, p0y);
+    else shape.lineTo(p0x, p0y);
+    shape.lineTo(Math.cos(a1) * rootR, Math.sin(a1) * rootR);
+    shape.lineTo(Math.cos(a2) * outerRadius, Math.sin(a2) * outerRadius);
+    shape.lineTo(Math.cos(a3) * outerRadius, Math.sin(a3) * outerRadius);
+    shape.lineTo(Math.cos(a4) * rootR, Math.sin(a4) * rootR);
+  }
+  shape.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: thickness,
+    bevelEnabled: true,
+    bevelThickness: 0.0006,
+    bevelSize: 0.0005,
+    bevelSegments: 1,
+  });
+  geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+
+function makeCanisterLabelTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+
+  // Signature cobalt-blue top + white band + red hazard lower stripe (matching real butane canister!)
+  ctx.fillStyle = '#1e3a8a';
+  ctx.fillRect(0, 0, 512, 146);
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 146, 512, 34);
+
+  ctx.fillStyle = '#b91c1c';
+  ctx.fillRect(0, 180, 512, 76);
+
+  // Stylized industrial chevron & flame emblem
+  ctx.strokeStyle = '#93c5fd';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  for (let x = 0; x <= 512; x += 32) {
+    ctx.lineTo(x, x % 64 === 0 ? 18 : 34);
+  }
+  ctx.stroke();
+
+  // Hazard diamond icon
+  ctx.save();
+  ctx.translate(128, 86);
+  ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(-20, -20, 40, 40);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(-20, -20, 40, 40);
+  ctx.restore();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillText('BUTANE FUEL', 210, 86);
+  ctx.font = '600 18px monospace';
+  ctx.fillStyle = '#bfdbfe';
+  ctx.fillText('THERMAL WEEDING CELL', 210, 114);
+
+  ctx.fillStyle = '#0f172a';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('PRESSURIZED · AUTO-VALVE INTERLOCK', 48, 169);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeVentedCaseTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#181a1f';
+  ctx.fillRect(0, 0, 256, 256);
+
+  // Perforated honeycomb ventilation holes like the real black Pi 4 case in top-down photo
+  ctx.fillStyle = '#090a0d';
+  for (let row = 28; row < 228; row += 18) {
+    for (let col = 28; col < 228; col += 18) {
+      ctx.beginPath();
+      ctx.arc(col + (row % 36 === 0 ? 0 : 9), row, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeGantryWallGeometry(): THREE.ExtrudeGeometry {
+  // Exact forward-cantilevered L-shaped white gantry side wall from the real side photo!
+  // Base mounts near X = +0.055..+0.115 at Y = 0.13, rises to Y = 0.27, then juts forward to X = +0.205!
+  const shape = new THREE.Shape();
+  shape.moveTo(0.058, 0.13);
+  shape.lineTo(0.116, 0.13);
+  shape.lineTo(0.116, 0.218);
+  shape.lineTo(0.205, 0.218);
+  shape.lineTo(0.205, 0.268);
+  shape.lineTo(0.068, 0.268);
+  shape.lineTo(0.058, 0.256);
+  shape.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: 0.008,
+    bevelEnabled: true,
+    bevelThickness: 0.0012,
+    bevelSize: 0.001,
+    bevelSegments: 2,
+  });
+  geo.translate(0, 0, -0.004);
   return geo;
 }
 
@@ -170,6 +302,7 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
 
   const geometriesToDispose: THREE.BufferGeometry[] = [];
   const materialsToDispose: THREE.Material[] = [];
+  const localTexturesToDispose: THREE.Texture[] = [];
 
   const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
     geometriesToDispose.push(g);
@@ -180,47 +313,96 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     return m;
   };
 
-  // Shared calibrated PBR Materials (varied roughness & metalness)
+  const canisterLabelTex = makeCanisterLabelTexture();
+  const ventedCaseTex = makeVentedCaseTexture();
+  localTexturesToDispose.push(canisterLabelTex, ventedCaseTex);
+
+  // Calibrated PBR Materials matching the real rover (upgraded crisp finish!)
   const matWoodTop = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.plywood,
-      roughness: 0.68,
+      color: 0x9c5e34,
+      roughness: 0.62,
       metalness: 0.04,
     })
   );
   const matWoodLeg = trackMat(
     new THREE.MeshStandardMaterial({
       map: textures.plywoodDark,
-      roughness: 0.74,
+      color: 0x804623,
+      roughness: 0.68,
       metalness: 0.04,
     })
   );
   const matYellowPlastic = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xf4c41c,
-      roughness: 0.34,
-      metalness: 0.05,
+      color: 0xfacc15,
+      roughness: 0.3,
+      metalness: 0.06,
     })
   );
   const matRubberTire = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x1b1d20,
+      color: 0x17191c,
       roughness: 0.88,
       metalness: 0.04,
     })
   );
   const matBrushedSteel = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xd4dae2,
-      roughness: 0.24,
-      metalness: 0.9,
+      color: 0xd8dee6,
+      roughness: 0.22,
+      metalness: 0.92,
+    })
+  );
+  const matTorchMetal = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xbac2cc,
+      roughness: 0.34,
+      metalness: 0.86,
     })
   );
   const matDarkAnodized = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x262c34,
+      color: 0x20252d,
+      roughness: 0.36,
+      metalness: 0.62,
+    })
+  );
+  const matVentedPiCase = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: ventedCaseTex,
+      color: 0x262930,
+      roughness: 0.48,
+      metalness: 0.16,
+    })
+  );
+  const matPowerBank = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x3b4d59,
+      roughness: 0.34,
+      metalness: 0.55,
+    })
+  );
+  const matWhite3DPrint = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xf1f5f9,
       roughness: 0.38,
-      metalness: 0.72,
+      metalness: 0.05,
+    })
+  );
+  const matDarkGear = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x475569,
+      roughness: 0.42,
+      metalness: 0.22,
+    })
+  );
+  const matCanisterLabel = trackMat(
+    new THREE.MeshStandardMaterial({
+      map: canisterLabelTex,
+      roughness: 0.28,
+      metalness: 0.48,
     })
   );
   const matCopperGold = trackMat(
@@ -232,16 +414,9 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   );
   const matWhitePlastic = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xf1f5f9,
-      roughness: 0.45,
-      metalness: 0.02,
-    })
-  );
-  const matPcbGreen = trackMat(
-    new THREE.MeshStandardMaterial({
-      map: textures.pcbGreen,
+      color: 0xf8fafc,
       roughness: 0.42,
-      metalness: 0.12,
+      metalness: 0.02,
     })
   );
   const matPcbRed = trackMat(
@@ -265,32 +440,32 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
       metalness: 0.15,
     })
   );
-  const matLipoBlue = trackMat(
+  const matRelayBlue = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x1e56a0,
+      color: 0x0284c7,
       roughness: 0.35,
-      metalness: 0.18,
+      metalness: 0.08,
     })
   );
   const matEstopRed = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0xdc2626,
-      roughness: 0.28,
+      roughness: 0.26,
       metalness: 0.08,
     })
   );
   const matSafetyYellow = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0xeab308,
-      roughness: 0.4,
+      roughness: 0.38,
       metalness: 0.08,
     })
   );
   const matLensGlass = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      roughness: 0.08,
-      metalness: 0.85,
+      color: 0x0b1220,
+      roughness: 0.06,
+      metalness: 0.88,
     })
   );
   const matBrass = trackMat(
@@ -300,15 +475,21 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
       metalness: 0.86,
     })
   );
+  const matWireRed = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.55, metalness: 0.05 })
+  );
+  const matWireDark = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6, metalness: 0.05 })
+  );
 
-  // Soft contact shadow directly under the rover (Y = 0.002 to avoid z-fighting)
+  // Soft grounded contact shadow beneath rover
   const contactShadow = new THREE.Mesh(
-    trackGeo(new THREE.PlaneGeometry(0.46, 0.34)),
+    trackGeo(new THREE.PlaneGeometry(0.5, 0.36)),
     trackMat(
       new THREE.MeshBasicMaterial({
         map: textures.contactShadow,
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.52,
         depthWrite: false,
       })
     )
@@ -340,7 +521,7 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   };
 
   // =========================================================================
-  // 1. CHASSIS TOP DECK (256 x 155 x 4.5 mm at Y = 0.125)
+  // 1. WALNUT PLYWOOD TOP DECK (256 x 155 mm at Y = 0.125)
   // =========================================================================
   {
     const g = partGroups.chassis_deck;
@@ -349,9 +530,8 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     deckMesh.position.y = 0.125;
     g.add(deckMesh);
 
-    // 4 Brass corner standoffs + M3 screws on top deck
-    const standoffGeo = trackGeo(new THREE.CylinderGeometry(0.0035, 0.0035, 0.008, 8));
-    for (const sx of [-0.088, 0.088]) {
+    const standoffGeo = trackGeo(new THREE.CylinderGeometry(0.0032, 0.0032, 0.008, 8));
+    for (const sx of [-0.095, 0.095]) {
       for (const sz of [-0.058, 0.058]) {
         const st = makeShadowed(new THREE.Mesh(standoffGeo, matBrass));
         st.position.set(sx, 0.133, sz);
@@ -359,8 +539,7 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
       }
     }
 
-    // Center aluminum stiffener rails underneath deck
-    const railGeo = trackGeo(new THREE.BoxGeometry(0.18, 0.005, 0.008));
+    const railGeo = trackGeo(new THREE.BoxGeometry(0.19, 0.005, 0.008));
     for (const sz of [-0.036, 0.036]) {
       const rail = makeShadowed(new THREE.Mesh(railGeo, matBrushedSteel));
       rail.position.set(0, 0.122, sz);
@@ -369,40 +548,53 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   }
 
   // =========================================================================
-  // 2. HIGH-CLEARANCE STRADDLE ARCH LEGS (4 parallel bridge panels + M3 bolts)
+  // 2. 45° STRADDLE ARCH LEGS (Exact dual inner/outer walnut arch plates)
   // =========================================================================
   {
     const g = partGroups.arch_legs;
-    const archGeo = trackGeo(makeArchPanelGeometry());
-    const zPositions = [-0.066, -0.047, 0.047, 0.066];
-    for (const zp of zPositions) {
-      const panel = makeShadowed(new THREE.Mesh(archGeo, matWoodLeg));
-      panel.position.z = zp;
+    const archOuterGeo = trackGeo(makeArchPanelGeometry(true));
+    const archInnerGeo = trackGeo(makeArchPanelGeometry(false));
+    const placements: Array<{ z: number; outer: boolean }> = [
+      { z: -0.066, outer: true },
+      { z: -0.047, outer: false },
+      { z: 0.047, outer: false },
+      { z: 0.066, outer: true },
+    ];
+    for (const p of placements) {
+      const panel = makeShadowed(
+        new THREE.Mesh(p.outer ? archOuterGeo : archInnerGeo, matWoodLeg)
+      );
+      panel.position.z = p.z;
       g.add(panel);
     }
 
-    // Cross-bridge M3 clamping bolts & hex caps spanning inner-outer plates
+    // M3 cross-bolts & steel hex heads along arch bridge and sloping legs
     const boltGeo = trackGeo(new THREE.CylinderGeometry(0.0022, 0.0022, 0.028, 8));
     boltGeo.rotateX(Math.PI / 2);
-    const headGeo = trackGeo(new THREE.CylinderGeometry(0.0042, 0.0042, 0.003, 6));
+    const headGeo = trackGeo(new THREE.CylinderGeometry(0.004, 0.004, 0.003, 6));
     headGeo.rotateX(Math.PI / 2);
 
     for (const sideSign of [-1, 1]) {
       const zCenter = sideSign * 0.0565;
-      for (const bx of [-0.03, 0.03]) {
+      for (const [bx, by] of [
+        [-0.03, 0.118],
+        [0.03, 0.118],
+        [0.105, 0.058],
+        [-0.105, 0.058],
+      ]) {
         const bolt = makeShadowed(new THREE.Mesh(boltGeo, matBrushedSteel));
-        bolt.position.set(bx, 0.118, zCenter);
+        bolt.position.set(bx, by, zCenter);
         g.add(bolt);
 
         const head = makeShadowed(new THREE.Mesh(headGeo, matBrushedSteel));
-        head.position.set(bx, 0.118, sideSign * 0.07);
+        head.position.set(bx, by, sideSign * 0.07);
         g.add(head);
       }
     }
   }
 
   // =========================================================================
-  // 3. 4x YELLOW TT GEARED MOTORS + QUADRATURE ENCODERS
+  // 3. 4x YELLOW TT GEAR MOTORS + QUADRATURE ENCODERS
   // =========================================================================
   {
     const g = partGroups.tt_motors;
@@ -426,26 +618,22 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     for (const cfg of configs) {
       const mGroup = new THREE.Group();
       mGroup.position.set(cfg.wx, 0.035, cfg.side * 0.0565);
-      // Tilt 45 deg up-inward along the sloping arch leg
       mGroup.rotation.z = cfg.dirX > 0 ? -Math.PI / 4 : Math.PI / 4;
 
       const gb = makeShadowed(new THREE.Mesh(gearboxGeo, matYellowPlastic));
       gb.position.set(-cfg.dirX * 0.021, 0, 0);
       mGroup.add(gb);
 
-      const nose = makeShadowed(new THREE.Mesh(noseGeo, matYellowPlastic));
-      mGroup.add(nose);
+      mGroup.add(makeShadowed(new THREE.Mesh(noseGeo, matYellowPlastic)));
 
       const can = makeShadowed(new THREE.Mesh(canGeo, matBrushedSteel));
       can.position.set(-cfg.dirX * 0.054, 0, 0);
       mGroup.add(can);
 
-      // White drive shaft extending outward into wheel hub
       const shaft = makeShadowed(new THREE.Mesh(shaftGeo, matWhitePlastic));
       shaft.position.set(0, 0, cfg.side * 0.004);
       mGroup.add(shaft);
 
-      // Optical quadrature encoder disc on inner stub shaft
       const enc = makeShadowed(new THREE.Mesh(encDiscGeo, matDarkAnodized));
       enc.position.set(0, 0, -cfg.side * 0.014);
       mGroup.add(enc);
@@ -455,7 +643,7 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   }
 
   // =========================================================================
-  // 4. 4x LUGGED OFF-ROAD ROVER WHEELS (Ø70mm, W=26mm, 5-spoke yellow rims)
+  // 4. 4x YELLOW 5-SPOKE LUGGED OFF-ROAD ROVER WHEELS
   // =========================================================================
   const leftWheels: THREE.Group[] = [];
   const rightWheels: THREE.Group[] = [];
@@ -463,12 +651,14 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     const g = partGroups.rover_wheels;
     const tireOuterGeo = trackGeo(new THREE.CylinderGeometry(0.034, 0.034, 0.026, 24));
     tireOuterGeo.rotateX(Math.PI / 2);
-    const rimGeo = trackGeo(new THREE.CylinderGeometry(0.024, 0.024, 0.027, 18));
+    const rimGeo = trackGeo(new THREE.CylinderGeometry(0.0245, 0.0245, 0.027, 20));
     rimGeo.rotateX(Math.PI / 2);
-    const hubGeo = trackGeo(new THREE.CylinderGeometry(0.0075, 0.0075, 0.029, 12));
+    const rimRecessGeo = trackGeo(new THREE.CylinderGeometry(0.0205, 0.0205, 0.0276, 18));
+    rimRecessGeo.rotateX(Math.PI / 2);
+    const hubGeo = trackGeo(new THREE.CylinderGeometry(0.0072, 0.0072, 0.0295, 12));
     hubGeo.rotateX(Math.PI / 2);
-    const spokeGeo = trackGeo(new THREE.BoxGeometry(0.044, 0.005, 0.0285));
-    const lugGeo = trackGeo(new THREE.BoxGeometry(0.004, 0.0032, 0.022));
+    const spokeGeo = trackGeo(new THREE.BoxGeometry(0.043, 0.0056, 0.0285));
+    const lugGeo = trackGeo(new THREE.BoxGeometry(0.0042, 0.0032, 0.022));
 
     const wheelCoords = [
       { wx: 0.1275, wz: -0.087, isLeft: true },
@@ -483,20 +673,19 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
 
       wPivot.add(makeShadowed(new THREE.Mesh(tireOuterGeo, matRubberTire)));
       wPivot.add(makeShadowed(new THREE.Mesh(rimGeo, matYellowPlastic)));
-      wPivot.add(makeShadowed(new THREE.Mesh(hubGeo, matWhitePlastic)));
+      wPivot.add(new THREE.Mesh(rimRecessGeo, matDarkAnodized));
+      wPivot.add(makeShadowed(new THREE.Mesh(hubGeo, matYellowPlastic)));
 
-      // 5 spokes (3 crossed bars)
       for (let s = 0; s < 5; s++) {
         const sp = makeShadowed(new THREE.Mesh(spokeGeo, matYellowPlastic));
         sp.rotation.z = (s * Math.PI) / 5;
         wPivot.add(sp);
       }
 
-      // 16 agricultural tread lugs
-      for (let l = 0; l < 16; l++) {
-        const ang = (l * Math.PI * 2) / 16;
+      for (let l = 0; l < 18; l++) {
+        const ang = (l * Math.PI * 2) / 18;
         const lug = new THREE.Mesh(lugGeo, matRubberTire);
-        lug.position.set(Math.cos(ang) * 0.0345, Math.sin(ang) * 0.0345, 0);
+        lug.position.set(Math.cos(ang) * 0.0346, Math.sin(ang) * 0.0346, 0);
         lug.rotation.z = ang + Math.PI / 2;
         wPivot.add(lug);
       }
@@ -508,210 +697,196 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   }
 
   // =========================================================================
-  // 5. L298N DUAL H-BRIDGE DRIVER + 3S LiPo BATTERY PACK
+  // 5. REAR SLATE POWER BANK + L298N MOTOR DRIVER (Cleanly organized!)
   // =========================================================================
   {
     const g = partGroups.power_driver;
 
-    // 3S LiPo battery mounted cleanly on rear-center deck
-    const lipo = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.072, 0.022, 0.038)), matLipoBlue)
+    // Signature rear slate-grey high-capacity power bank (seen in top & side photos)
+    const pbBody = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.118, 0.024, 0.068)), matPowerBank)
     );
-    lipo.position.set(-0.068, 0.141, 0.028);
-    g.add(lipo);
+    pbBody.position.set(-0.064, 0.15, 0.002);
+    g.add(pbBody);
 
-    // Velcro strap around battery
-    const strap = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.014, 0.024, 0.041)), matDarkAnodized)
-    );
-    strap.position.set(-0.068, 0.141, 0.028);
-    g.add(strap);
-
-    // Yellow XT60 plug
-    const xt60 = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.014, 0.008, 0.012)), matSafetyYellow)
-    );
-    xt60.position.set(-0.026, 0.136, 0.028);
-    g.add(xt60);
-
-    // L298N Red PCB board
-    const l298Board = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.043, 0.003, 0.043)), matPcbRed)
-    );
-    l298Board.position.set(-0.015, 0.132, -0.042);
-    g.add(l298Board);
-
-    // Tall anodized aluminum finned heatsink on L298N
-    const sinkBase = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.014, 0.024, 0.024)), matDarkAnodized)
-    );
-    sinkBase.position.set(-0.022, 0.145, -0.042);
-    g.add(sinkBase);
-
-    for (let f = -1; f <= 1; f++) {
-      const fin = makeShadowed(
-        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.022, 0.003)), matDarkAnodized)
+    // Dual Velcro retention straps (cleanly mounted!)
+    for (const sx of [-0.095, -0.032]) {
+      const strap = makeShadowed(
+        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.012, 0.026, 0.072)), matDarkAnodized)
       );
-      fin.position.set(-0.022, 0.145, -0.042 + f * 0.008);
-      g.add(fin);
+      strap.position.set(sx, 0.15, 0.002);
+      g.add(strap);
     }
 
-    // Blue/green screw terminal blocks
-    const termMat = trackMat(
-      new THREE.MeshStandardMaterial({ color: 0x0f766e, roughness: 0.45, metalness: 0.1 })
+    // Tidy white & black USB-A power connectors plugging cleanly into rear of power bank
+    for (const sz of [-0.016, 0.016]) {
+      const plug = makeShadowed(
+        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.016, 0.009, 0.012)), matWhitePlastic)
+      );
+      plug.position.set(-0.128, 0.15, sz);
+      g.add(plug);
+    }
+
+    // L298N Red PCB Driver tucked cleanly under the rear deck bay
+    const l298Board = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.042, 0.003, 0.042)), matPcbRed)
     );
-    const term = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.01, 0.01, 0.028)), termMat)
+    l298Board.position.set(-0.045, 0.132, -0.052);
+    g.add(l298Board);
+
+    const heatsink = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.014, 0.022, 0.024)), matDarkAnodized)
     );
-    term.position.set(0.0, 0.138, -0.042);
-    g.add(term);
+    heatsink.position.set(-0.052, 0.144, -0.052);
+    g.add(heatsink);
   }
 
   // =========================================================================
-  // 6. ESP32 REAL-TIME MOTOR & WATCHDOG CONTROLLER
+  // 6. ESP32 CONTROLLER + BLUE OPTO-RELAY MODULE
   // =========================================================================
   {
     const g = partGroups.esp32_mcu;
-    const espGroup = new THREE.Group();
-    espGroup.position.set(0.042, 0.133, 0.042);
 
-    const pcb = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.052, 0.003, 0.028)), matPcbBlack)
+    // ESP32 board neatly mounted on right-rear deck rail
+    const espPcb = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.052, 0.003, 0.026)), matPcbBlack)
     );
-    espGroup.add(pcb);
+    espPcb.position.set(-0.04, 0.132, 0.054);
+    g.add(espPcb);
 
-    // Metallic WROOM-32 RF Shield
-    const shield = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.005, 0.018)), matBrushedSteel)
+    const rfShield = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.017, 0.005, 0.016)), matBrushedSteel)
     );
-    shield.position.set(-0.01, 0.004, 0);
-    espGroup.add(shield);
+    rfShield.position.set(-0.048, 0.136, 0.054);
+    g.add(rfShield);
 
-    // USB-C silver port
-    const usb = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.008, 0.004, 0.009)), matBrushedSteel)
+    const pins = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.044, 0.004, 0.022)), matCopperGold)
     );
-    usb.position.set(0.024, 0.0035, 0);
-    espGroup.add(usb);
+    pins.position.set(-0.04, 0.134, 0.054);
+    g.add(pins);
 
-    // Gold pin headers along both sides
-    const pinGeo = trackGeo(new THREE.BoxGeometry(0.046, 0.005, 0.0025));
-    for (const sz of [-0.0115, 0.0115]) {
-      const pins = makeShadowed(new THREE.Mesh(pinGeo, matCopperGold));
-      pins.position.set(0, 0.004, sz);
-      espGroup.add(pins);
-    }
+    // Signature sky-blue opto-isolated relay block visible beside the power bank!
+    const relayBase = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.003, 0.026)), matPcbBlue)
+    );
+    relayBase.position.set(-0.005, 0.132, -0.046);
+    g.add(relayBase);
 
-    g.add(espGroup);
+    const relayCube = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.016, 0.015, 0.014)), matRelayBlue)
+    );
+    relayCube.position.set(-0.008, 0.141, -0.046);
+    g.add(relayCube);
   }
 
   // =========================================================================
-  // 7. RASPBERRY PI 4 COMPUTE BRAIN
+  // 7. VENTED MATTE-BLACK RASPBERRY PI 4 ENCLOSURE (Stacked cleanly on power bank!)
   // =========================================================================
   {
     const g = partGroups.raspberry_pi;
-    const piGroup = new THREE.Group();
-    piGroup.position.set(0.036, 0.138, -0.024);
+    const piCase = new THREE.Group();
+    piCase.position.set(-0.068, 0.175, 0.002);
 
-    // Green PCB (85 x 56 mm scaled cleanly onto deck)
-    const pcb = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.082, 0.003, 0.054)), matPcbGreen)
+    // Signature matte-black perforated Pi 4 enclosure (clearly seen in all 3 photos & video!)
+    const caseBox = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.092, 0.024, 0.064)), matVentedPiCase)
     );
-    piGroup.add(pcb);
+    piCase.add(caseBox);
 
-    // Broadcom SoC + Black finned heatsink
-    const soc = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.009, 0.018)), matDarkAnodized)
+    // Clean chamfered metallic bezel strip around Pi case
+    const trim = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.094, 0.003, 0.066)), matDarkAnodized)
     );
-    soc.position.set(-0.008, 0.006, 0);
-    piGroup.add(soc);
+    trim.position.y = -0.009;
+    piCase.add(trim);
 
-    // Dual USB stacks + Gigabit Ethernet metal housings
-    const eth = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.02, 0.014, 0.016)), matBrushedSteel)
+    // Subtle green & amber LED indicators recessed in side slot
+    const ledGreen = new THREE.Mesh(
+      trackGeo(new THREE.BoxGeometry(0.004, 0.003, 0.003)),
+      trackMat(new THREE.MeshBasicMaterial({ color: 0x22c55e }))
     );
-    eth.position.set(0.032, 0.0085, -0.016);
-    piGroup.add(eth);
+    ledGreen.position.set(0.047, 0.004, -0.014);
+    piCase.add(ledGreen);
 
-    const usb1 = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.014, 0.013)), matBrushedSteel)
+    // Clean braided USB-C power cable curving neatly from rear power bank into Pi 4
+    const cableCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-0.06, -0.024, -0.014),
+      new THREE.Vector3(-0.072, -0.01, -0.024),
+      new THREE.Vector3(-0.046, 0.0, -0.018),
+    ]);
+    const cableMesh = new THREE.Mesh(
+      trackGeo(new THREE.TubeGeometry(cableCurve, 12, 0.0026, 6, false)),
+      matWhitePlastic
     );
-    usb1.position.set(0.032, 0.0085, 0.002);
-    piGroup.add(usb1);
+    piCase.add(cableMesh);
 
-    const usb2 = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.014, 0.013)), matBrushedSteel)
-    );
-    usb2.position.set(0.032, 0.0085, 0.018);
-    piGroup.add(usb2);
-
-    // 40-pin GPIO header strip
-    const gpio = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.052, 0.008, 0.005)), matDarkAnodized)
-    );
-    gpio.position.set(-0.006, 0.0055, -0.022);
-    piGroup.add(gpio);
-
-    // Standoffs lifting Pi 4 cleanly above plywood deck
-    const stGeo = trackGeo(new THREE.CylinderGeometry(0.0024, 0.0024, 0.008, 8));
-    for (const sx of [-0.035, 0.035]) {
-      for (const sz of [-0.022, 0.022]) {
-        const st = makeShadowed(new THREE.Mesh(stGeo, matBrass));
-        st.position.set(sx, -0.005, sz);
-        piGroup.add(st);
-      }
-    }
-
-    g.add(piGroup);
+    g.add(piCase);
   }
 
   // =========================================================================
-  // 8. BNO055 9-DOF IMU + VL53L0X FRONT OBSTACLE ToF SENSOR
+  // 8. SIDE-MOUNTED BLACK HV ARC IGNITER + BNO055 IMU + VL53L0X ToF
   // =========================================================================
   let tofBeam: THREE.Mesh;
   {
     const g = partGroups.imu_tof;
 
-    // Blue BNO055 IMU breakout mounted near center-front of deck
-    const imuBoard = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.024, 0.003, 0.02)), matPcbBlue)
+    // Signature black cylindrical High-Voltage Arc Igniter mounted cleanly on left edge of deck!
+    const hvBody = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.012, 0.012, 0.064, 16)), matDarkAnodized)
     );
-    imuBoard.position.set(0.095, 0.133, 0.0);
+    hvBody.rotation.z = Math.PI / 2;
+    hvBody.position.set(0.015, 0.144, -0.064);
+    g.add(hvBody);
+
+    // Dual brushed clamp rings holding HV igniter neatly to deck
+    const ringGeo = trackGeo(new THREE.TorusGeometry(0.013, 0.002, 8, 16));
+    ringGeo.rotateY(Math.PI / 2);
+    for (const rx of [-0.005, 0.032]) {
+      const ring = new THREE.Mesh(ringGeo, matBrushedSteel);
+      ring.position.set(rx, 0.144, -0.064);
+      g.add(ring);
+    }
+
+    // Red high-voltage ignition wire routed cleanly down from HV module to front flame nozzle tip!
+    const hvWireCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0.047, 0.144, -0.064),
+      new THREE.Vector3(0.088, 0.125, -0.062),
+      new THREE.Vector3(0.118, 0.072, -0.036),
+      new THREE.Vector3(0.132, 0.044, -0.008),
+    ]);
+    const hvWire = new THREE.Mesh(
+      trackGeo(new THREE.TubeGeometry(hvWireCurve, 16, 0.002, 6, false)),
+      matWireRed
+    );
+    g.add(hvWire);
+
+    // Blue BNO055 9-DOF IMU sensor on center deck
+    const imuBoard = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.022, 0.003, 0.018)), matPcbBlue)
+    );
+    imuBoard.position.set(0.004, 0.131, 0.0);
     g.add(imuBoard);
 
-    const imuChip = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.007, 0.003, 0.007)), matDarkAnodized)
+    // Forward VL53L0X ToF obstacle rangefinder mounted cleanly on front deck edge
+    const tofHolder = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.01, 0.016, 0.034)), matDarkAnodized)
     );
-    imuChip.position.set(0.095, 0.136, 0.0);
-    g.add(imuChip);
+    tofHolder.position.set(0.124, 0.122, 0.0);
+    g.add(tofHolder);
 
-    // Front aluminum sensor bumper bracket
-    const bracket = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.014, 0.024, 0.05)), matDarkAnodized)
-    );
-    bracket.position.set(0.132, 0.118, 0.0);
-    g.add(bracket);
-
-    // VL53L0X Time-of-Flight purple/blue sensor module facing forward (+X)
-    const tofBoard = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.005, 0.016, 0.026)), matPcbBlue)
-    );
-    tofBoard.position.set(0.14, 0.118, 0.0);
-    g.add(tofBoard);
-
-    // Twin optical emitter/receiver lenses
-    const lensGeo = trackGeo(new THREE.CylinderGeometry(0.0035, 0.0035, 0.004, 12));
+    const lensGeo = trackGeo(new THREE.CylinderGeometry(0.0032, 0.0032, 0.004, 12));
     lensGeo.rotateZ(Math.PI / 2);
-    for (const sz of [-0.006, 0.006]) {
-      const lens = makeShadowed(new THREE.Mesh(lensGeo, matLensGlass));
-      lens.position.set(0.143, 0.118, sz);
+    for (const sz of [-0.007, 0.007]) {
+      const lens = new THREE.Mesh(lensGeo, matLensGlass);
+      lens.position.set(0.13, 0.122, sz);
       g.add(lens);
     }
 
-    // Subtle forward ToF laser-rangefinder beam (visible in Field mode)
-    const beamGeo = trackGeo(new THREE.ConeGeometry(0.045, 0.35, 16, 1, true));
+    // Translucent forward ToF cone (shown in field mode)
+    const beamGeo = trackGeo(new THREE.ConeGeometry(0.045, 0.36, 16, 1, true));
     beamGeo.rotateZ(Math.PI / 2);
-    beamGeo.translate(0.175, 0, 0);
+    beamGeo.translate(0.18, 0, 0);
     tofBeam = new THREE.Mesh(
       beamGeo,
       trackMat(
@@ -724,83 +899,604 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
         })
       )
     );
-    tofBeam.position.set(0.145, 0.118, 0);
+    tofBeam.position.set(0.132, 0.118, 0);
     tofBeam.visible = false;
     g.add(tofBeam);
   }
 
   // =========================================================================
-  // 9. MAIXSENSE-A075V RGB-D CAMERA MAST + GROUND SWATH FRUSTUM
+  // 9. SIGNATURE INVERTED BUTANE TURRET, MESHING SPUR GEARS, FORWARD STEEL NOZZLE & E-STOP
+  // =========================================================================
+  let estopCap: THREE.Mesh;
+  const toolVariants = {} as Record<TreatmentToolType, THREE.Group>;
+  let grinderDisc: THREE.Group;
+  let flameConeGroup: THREE.Group;
+  let sparkArcMesh: THREE.Mesh;
+  let servoGearMesh: THREE.Group;
+  let turretGearMesh: THREE.Group;
+  let turretPivotGroup: THREE.Group;
+  let laserGimbalPan: THREE.Group;
+  let laserGimbalTilt: THREE.Group;
+  let laserBeamMesh: THREE.Mesh;
+  let laserImpactDot: THREE.Mesh;
+
+  {
+    const g = partGroups.estop_tool;
+
+    // Compact red GPIO 13 Mushroom Emergency Stop switch on rear-left corner
+    const estopBox = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.028, 0.016, 0.028)), matSafetyYellow)
+    );
+    estopBox.position.set(-0.106, 0.138, -0.052);
+    g.add(estopBox);
+
+    estopCap = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.013, 0.01, 0.011, 16)), matEstopRed)
+    );
+    estopCap.position.set(-0.106, 0.152, -0.052);
+    g.add(estopCap);
+
+    // --- Variant A (DEFAULT & ICONIC REAL BOT): Servo-Aimed Inverted Butane Flame Turret + Spur Gears + Forward Steel Barrel ---
+    const flameGroup = new THREE.Group();
+
+    // Fixed white 3D-printed outer bearing collar bolted to the top deck around X = +0.056, Z = 0
+    const collarBase = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.042, 0.044, 0.02, 24)), matWhite3DPrint)
+    );
+    collarBase.position.set(0.056, 0.139, 0);
+    flameGroup.add(collarBase);
+
+    // Fixed high-torque black side servo actuator + meshing dark-grey drive spur gear (right side, exactly like photos!)
+    const servoBody = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.04, 0.042, 0.024)), matDarkAnodized)
+    );
+    servoBody.position.set(0.02, 0.152, 0.062);
+    flameGroup.add(servoBody);
+
+    servoGearMesh = new THREE.Group();
+    servoGearMesh.position.set(0.02, 0.174, 0.062);
+    const driveGear = makeShadowed(
+      new THREE.Mesh(trackGeo(makeSpurGearGeometry(0.036, 22, 0.008)), matDarkGear)
+    );
+    servoGearMesh.add(driveGear);
+    const gearHub = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.011, 0.011, 0.011, 14)), matDarkAnodized)
+    );
+    gearHub.position.y = 0.003;
+    servoGearMesh.add(gearHub);
+    flameGroup.add(servoGearMesh);
+
+    // PIVOTING TURRET ASSEMBLY: Driven directly by servo spur gear — rotates inverted butane tank AND steel flame nozzle toward weeds!
+    turretPivotGroup = new THREE.Group();
+    turretPivotGroup.position.set(0.056, 0, 0);
+
+    // White driven spur gear ring bolted to the rotating canister carrier
+    turretGearMesh = new THREE.Group();
+    turretGearMesh.position.set(0, 0.152, 0);
+    const turretGear = makeShadowed(
+      new THREE.Mesh(trackGeo(makeSpurGearGeometry(0.046, 26, 0.007)), matWhite3DPrint)
+    );
+    turretGearMesh.add(turretGear);
+    turretPivotGroup.add(turretGearMesh);
+
+    // Upper white retention cage ring with 4 struts rotating with the canister
+    const upperRing = makeShadowed(
+      new THREE.Mesh(
+        trackGeo(new THREE.TorusGeometry(0.036, 0.0045, 8, 24)),
+        matWhite3DPrint
+      )
+    );
+    upperRing.rotation.x = Math.PI / 2;
+    upperRing.position.set(0, 0.184, 0);
+    turretPivotGroup.add(upperRing);
+
+    for (let i = 0; i < 4; i++) {
+      const ang = (i * Math.PI) / 2 + Math.PI / 4;
+      const strut = makeShadowed(
+        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.006, 0.034, 0.006)), matWhite3DPrint)
+      );
+      strut.position.set(Math.cos(ang) * 0.036, 0.168, Math.sin(ang) * 0.036);
+      turretPivotGroup.add(strut);
+    }
+
+    // Signature Inverted Cylindrical Blue/White/Red Butane Gas Canister (rotates with turret!)
+    const canisterBody = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.033, 0.033, 0.145, 24)), matCanisterLabel)
+    );
+    canisterBody.position.set(0, 0.165, 0);
+    turretPivotGroup.add(canisterBody);
+
+    // Concave brushed silver metallic top cap (bottom of inverted can)
+    const canCap = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.0335, 0.0335, 0.006, 24)), matBrushedSteel)
+    );
+    canCap.position.set(0, 0.238, 0);
+    turretPivotGroup.add(canCap);
+
+    // Lower valve dome & brass regulator underneath deck inside high-clearance arch
+    const canDome = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.03, 18, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2)), matBrushedSteel)
+    );
+    canDome.position.set(0, 0.095, 0);
+    turretPivotGroup.add(canDome);
+
+    const regulatorStem = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.006, 0.008, 0.036, 12)), matBrass)
+    );
+    regulatorStem.position.set(0, 0.058, 0);
+    turretPivotGroup.add(regulatorStem);
+
+    // Elbow fitting & signature horizontal stainless-steel flame barrel pointing forward (rotates left/right toward weeds!)
+    const elbow = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.01, 0.01, 0.022, 12)), matDarkAnodized)
+    );
+    elbow.rotation.z = Math.PI / 2;
+    elbow.position.set(0.012, 0.038, 0);
+    turretPivotGroup.add(elbow);
+
+    const redInsulator = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.007, 0.007, 0.018, 10)), matWireRed)
+    );
+    redInsulator.position.set(0.054, 0.048, 0);
+    turretPivotGroup.add(redInsulator);
+
+    const torchBarrel = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.011, 0.0115, 0.11, 18)), matTorchMetal)
+    );
+    torchBarrel.rotation.z = Math.PI / 2;
+    torchBarrel.position.set(0.069, 0.036, 0);
+    turretPivotGroup.add(torchBarrel);
+
+    const barrelMuzzle = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.009, 0.009, 0.006, 16)), matDarkAnodized)
+    );
+    barrelMuzzle.rotation.z = Math.PI / 2;
+    barrelMuzzle.position.set(0.125, 0.036, 0);
+    turretPivotGroup.add(barrelMuzzle);
+
+    // Electric arc spark flash right at muzzle tip (swings with barrel!)
+    sparkArcMesh = new THREE.Mesh(
+      trackGeo(new THREE.OctahedronGeometry(0.014, 0)),
+      trackMat(
+        new THREE.MeshBasicMaterial({
+          color: 0x7dd3fc,
+          transparent: true,
+          opacity: 0.95,
+        })
+      )
+    );
+    sparkArcMesh.position.set(0.132, 0.036, 0);
+    sparkArcMesh.visible = false;
+    turretPivotGroup.add(sparkArcMesh);
+
+    // Roaring horizontal forward flame jet (swings directly toward weed along barrel axis!)
+    flameConeGroup = new THREE.Group();
+    flameConeGroup.position.set(0.128, 0.036, 0);
+
+    const outerJetGeo = trackGeo(new THREE.ConeGeometry(0.036, 0.24, 16));
+    outerJetGeo.rotateZ(-Math.PI / 2);
+    outerJetGeo.translate(0.12, 0.004, 0);
+    const outerJet = new THREE.Mesh(
+      outerJetGeo,
+      trackMat(
+        new THREE.MeshBasicMaterial({
+          color: 0xf97316,
+          transparent: true,
+          opacity: 0.78,
+          depthWrite: false,
+        })
+      )
+    );
+    flameConeGroup.add(outerJet);
+
+    const midJetGeo = trackGeo(new THREE.ConeGeometry(0.024, 0.17, 14));
+    midJetGeo.rotateZ(-Math.PI / 2);
+    midJetGeo.translate(0.088, 0.002, 0);
+    const midJet = new THREE.Mesh(
+      midJetGeo,
+      trackMat(
+        new THREE.MeshBasicMaterial({
+          color: 0xfacc15,
+          transparent: true,
+          opacity: 0.88,
+          depthWrite: false,
+        })
+      )
+    );
+    flameConeGroup.add(midJet);
+
+    const blueCoreGeo = trackGeo(new THREE.ConeGeometry(0.012, 0.075, 12));
+    blueCoreGeo.rotateZ(-Math.PI / 2);
+    blueCoreGeo.translate(0.036, 0, 0);
+    const blueCore = new THREE.Mesh(
+      blueCoreGeo,
+      trackMat(
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false,
+        })
+      )
+    );
+    flameConeGroup.add(blueCore);
+
+    flameConeGroup.visible = false;
+    turretPivotGroup.add(flameConeGroup);
+
+    flameGroup.add(turretPivotGroup);
+    toolVariants.flame = flameGroup;
+    g.add(flameGroup);
+
+    // --- Variant B: Mechanical Rotary Grinder Attachment ---
+    const grinderGroup = new THREE.Group();
+    grinderGroup.position.set(0.056, 0.12, 0);
+
+    const gMotor = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.02, 0.02, 0.044, 16)), matDarkAnodized)
+    );
+    gMotor.position.y = -0.024;
+    grinderGroup.add(gMotor);
+
+    const gShaft = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.0045, 0.0045, 0.042, 10)), matBrushedSteel)
+    );
+    gShaft.position.y = -0.062;
+    grinderGroup.add(gShaft);
+
+    const guard = makeShadowed(
+      new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(0.042, 0.044, 0.014, 18, 1, true)),
+        matSafetyYellow
+      )
+    );
+    guard.position.y = -0.076;
+    grinderGroup.add(guard);
+
+    grinderDisc = new THREE.Group();
+    grinderDisc.position.y = -0.084;
+    grinderDisc.add(
+      makeShadowed(new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.036, 0.036, 0.004, 18)), matBrushedSteel))
+    );
+    const toothGeo = trackGeo(new THREE.BoxGeometry(0.015, 0.006, 0.005));
+    for (let t = 0; t < 6; t++) {
+      const ang = (t * Math.PI * 2) / 6;
+      const tooth = makeShadowed(new THREE.Mesh(toothGeo, matCopperGold));
+      tooth.position.set(Math.cos(ang) * 0.033, -0.003, Math.sin(ang) * 0.033);
+      tooth.rotation.y = -ang;
+      grinderDisc.add(tooth);
+    }
+    grinderGroup.add(grinderDisc);
+    toolVariants.grinder = grinderGroup;
+    g.add(grinderGroup);
+
+    // --- Variant C: Pan-Tilt Precision Diode Laser ---
+    const laserGroup = new THREE.Group();
+    laserGroup.position.set(0.056, 0.12, 0);
+
+    laserGimbalPan = new THREE.Group();
+    const panServo = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.026, 0.018, 0.024)), matDarkAnodized)
+    );
+    panServo.position.y = -0.011;
+    laserGimbalPan.add(panServo);
+
+    const uBracket = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.03, 0.018, 0.03)), matBrushedSteel)
+    );
+    uBracket.position.y = -0.026;
+    laserGimbalPan.add(uBracket);
+
+    laserGimbalTilt = new THREE.Group();
+    laserGimbalTilt.position.y = -0.036;
+    const diodeBarrel = makeShadowed(
+      new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(0.011, 0.011, 0.034, 14)),
+        trackMat(new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.25, metalness: 0.78 }))
+      )
+    );
+    diodeBarrel.position.y = -0.015;
+    laserGimbalTilt.add(diodeBarrel);
+
+    const emitterTip = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.005, 0.007, 0.008, 12)), matBrass)
+    );
+    emitterTip.position.y = -0.034;
+    laserGimbalTilt.add(emitterTip);
+
+    laserGimbalPan.add(laserGimbalTilt);
+    laserGroup.add(laserGimbalPan);
+
+    const beamUnitGeo = trackGeo(new THREE.CylinderGeometry(0.0024, 0.0024, 1, 8));
+    beamUnitGeo.translate(0, -0.5, 0);
+    laserBeamMesh = new THREE.Mesh(
+      beamUnitGeo,
+      trackMat(new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.92 }))
+    );
+    laserBeamMesh.visible = false;
+    g.add(laserBeamMesh);
+
+    laserImpactDot = new THREE.Mesh(
+      trackGeo(new THREE.SphereGeometry(0.01, 10, 10)),
+      trackMat(new THREE.MeshBasicMaterial({ color: 0x7dd3fc }))
+    );
+    laserImpactDot.visible = false;
+    g.add(laserImpactDot);
+
+    toolVariants.laser = laserGroup;
+    g.add(laserGroup);
+  }
+
+  // =========================================================================
+  // 10. SIPEED MAIXSENSE-A075V 3D ToF + RGB DEPTH MODULE (Front Corner Sensor)
+  // =========================================================================
+  {
+    const g = partGroups.maixsense_a075v;
+
+    // Aluminum anodized mounting bracket on front deck lip
+    const mountPlate = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.016, 0.066)), matBrushedSteel)
+    );
+    mountPlate.position.set(0.124, 0.129, 0);
+    g.add(mountPlate);
+
+    // Compact silver/black Sipeed MaixSense-A075V housing
+    const maixBody = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.022, 0.026, 0.056)), matDarkAnodized)
+    );
+    maixBody.position.set(0.136, 0.143, 0);
+    g.add(maixBody);
+
+    // Metallic front faceplate bezel
+    const facePlate = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.004, 0.022, 0.052)), matBrushedSteel)
+    );
+    facePlate.position.set(0.148, 0.143, 0);
+    g.add(facePlate);
+
+    // Dual IR VCSEL ToF emitters (crimson-tinted optics) + central RGB lens
+    const matIrWindow = trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.12, metalness: 0.35 })
+    );
+    for (const lz of [-0.017, 0.017]) {
+      const irOptic = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(0.0055, 0.0055, 0.004, 14)),
+        matIrWindow
+      );
+      irOptic.rotation.z = Math.PI / 2;
+      irOptic.position.set(0.151, 0.143, lz);
+      g.add(irOptic);
+    }
+    const rgbLens = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.0065, 0.0065, 0.005, 16)),
+      matLensGlass
+    );
+    rgbLens.rotation.z = Math.PI / 2;
+    rgbLens.position.set(0.151, 0.143, 0);
+    g.add(rgbLens);
+
+    // Clean USB-C cable routed back to Raspberry Pi 4
+    const maixCable = new THREE.Mesh(
+      trackGeo(
+        new THREE.TubeGeometry(
+          new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0.134, 0.143, -0.028),
+            new THREE.Vector3(0.08, 0.142, -0.068),
+            new THREE.Vector3(-0.02, 0.175, -0.045),
+          ]),
+          14,
+          0.002,
+          6,
+          false
+        )
+      ),
+      matWireDark
+    );
+    g.add(maixCable);
+  }
+
+  // =========================================================================
+  // 11. IR THERMAL & TEMPERATURE SENSOR ARRAY (MLX90614 / AMG8833 + Heatsink Probe)
+  // =========================================================================
+  {
+    const g = partGroups.thermal_sensor;
+
+    // Angled aluminum bracket under front-left deck aimed at flame strike zone
+    const arm = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.024, 0.006, 0.024)), matBrushedSteel)
+    );
+    arm.position.set(0.106, 0.118, -0.046);
+    g.add(arm);
+
+    const irPcb = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.022, 0.004, 0.02)), matWireRed)
+    );
+    irPcb.position.set(0.112, 0.112, -0.046);
+    irPcb.rotation.z = -0.58;
+    g.add(irPcb);
+
+    // Gold/steel TO-39 infrared thermopile barrel (MLX90614)
+    const irCan = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.006, 0.0065, 0.012, 16)), matCopperGold)
+    );
+    irCan.position.set(0.118, 0.106, -0.046);
+    irCan.rotation.z = -0.58;
+    g.add(irCan);
+
+    // Thermal sensing cone indicator (subtle warm infrared amber)
+    const irWindow = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.004, 0.004, 0.003, 12)),
+      matLensGlass
+    );
+    irWindow.position.set(0.123, 0.101, -0.046);
+    irWindow.rotation.z = -0.58;
+    g.add(irWindow);
+
+    // Rear heatsink temperature probe mounted against L298N / Pi bay
+    const tempProbe = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.003, 0.003, 0.022, 10)), matBrushedSteel)
+    );
+    tempProbe.rotation.z = Math.PI / 2;
+    tempProbe.position.set(-0.048, 0.156, 0.046);
+    g.add(tempProbe);
+
+    // Braided thermal lead wire
+    const thermWire = new THREE.Mesh(
+      trackGeo(
+        new THREE.TubeGeometry(
+          new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0.106, 0.116, -0.046),
+            new THREE.Vector3(0.03, 0.126, -0.056),
+            new THREE.Vector3(-0.038, 0.145, -0.024),
+          ]),
+          14,
+          0.0018,
+          6,
+          false
+        )
+      ),
+      matWireRed
+    );
+    g.add(thermWire);
+  }
+
+  // =========================================================================
+  // 12. SIDE CORNER ULTRASONIC PODS & FOLDING GNSS/RTK MAST
+  // =========================================================================
+  {
+    const g = partGroups.corner_guard;
+
+    // Dual 45°-angled Left & Right HC-SR04 / Corner Ultrasonic Guard Pods
+    for (const side of [-1, 1]) {
+      const pod = new THREE.Group();
+      pod.position.set(0.104, 0.105, side * 0.072);
+      pod.rotation.y = side * -0.52;
+
+      const board = makeShadowed(
+        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.006, 0.018, 0.038)), matDarkAnodized)
+      );
+      pod.add(board);
+
+      for (const tz of [-0.01, 0.01]) {
+        const transducer = makeShadowed(
+          new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.0065, 0.0065, 0.009, 14)), matBrushedSteel)
+        );
+        transducer.rotation.z = Math.PI / 2;
+        transducer.position.set(0.006, 0, tz);
+        pod.add(transducer);
+      }
+      g.add(pod);
+    }
+
+    // Rear folding GNSS / RTK ceramic antenna mast for Waypoint navigation
+    const mastPole = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.003, 0.0035, 0.115, 10)), matDarkAnodized)
+    );
+    mastPole.position.set(-0.104, 0.19, 0.052);
+    g.add(mastPole);
+
+    const gpsPuck = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.02, 0.022, 0.011, 20)), matWhite3DPrint)
+    );
+    gpsPuck.position.set(-0.104, 0.25, 0.052);
+    g.add(gpsPuck);
+
+    const gpsRing = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.017, 0.002, 8, 20)), matDarkAnodized)
+    );
+    gpsRing.rotation.x = Math.PI / 2;
+    gpsRing.position.set(-0.104, 0.256, 0.052);
+    g.add(gpsRing);
+  }
+
+  // =========================================================================
+  // 13. WHITE CANTILEVER CAMERA GANTRY & PILL-SHAPED VISION CAMERA (Signature Front Hood!)
   // =========================================================================
   let cameraFrustum: THREE.Group;
   {
     const g = partGroups.maixsense_cam;
 
-    // Mast base flange
-    const flange = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.032, 0.008, 0.032)), matDarkAnodized)
-    );
-    flange.position.set(-0.02, 0.133, 0.0);
-    g.add(flange);
+    // Signature twin white L-shaped forward overhang gantry walls (upgraded crisp beveled finish!)
+    const wallGeo = trackGeo(makeGantryWallGeometry());
+    for (const wz of [-0.058, 0.058]) {
+      const wall = makeShadowed(new THREE.Mesh(wallGeo, matWhite3DPrint));
+      wall.position.z = wz;
+      g.add(wall);
 
-    // Vertical 2020-style aluminum mast extrusion (height 210mm)
-    const mastPole = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.015, 0.21, 0.015)), matBrushedSteel)
-    );
-    mastPole.position.set(-0.02, 0.24, 0.0);
-    g.add(mastPole);
+      // Machined base mounting flange tabs
+      const tab = makeShadowed(
+        new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.056, 0.006, 0.022)), matWhite3DPrint)
+      );
+      tab.position.set(0.087, 0.132, wz + (wz > 0 ? 0.008 : -0.008));
+      g.add(tab);
+    }
 
-    // Forward cantilever arm
-    const arm = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.12, 0.013, 0.013)), matBrushedSteel)
+    // Horizontal top cross-bridge connecting left & right white cantilever arms
+    const crossbar = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.022, 0.01, 0.124)), matWhite3DPrint)
     );
-    arm.position.set(0.032, 0.34, 0.0);
-    g.add(arm);
+    crossbar.position.set(0.184, 0.258, 0);
+    g.add(crossbar);
 
-    // Diagonal gusset brace
-    const brace = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.07, 0.007, 0.007)), matDarkAnodized)
+    // Lower front brace bar
+    const braceBar = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.016, 0.008, 0.12)), matWhite3DPrint)
     );
-    brace.position.set(0.01, 0.312, 0.0);
-    brace.rotation.z = Math.PI / 4;
-    g.add(brace);
+    braceBar.position.set(0.116, 0.224, 0);
+    g.add(braceBar);
 
-    // Sipeed MaixSense-A075V aluminum camera body angled downward toward crop row
+    // Sleek black gimbal clamp bracket (clean upgrade replacing the rubber bands!)
+    const camClamp = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.028, 0.026, 0.036)), matDarkAnodized)
+    );
+    camClamp.position.set(0.184, 0.274, 0);
+    g.add(camClamp);
+
+    // Signature wide matte-black pill-shaped HD webcam / vision sensor pitched down-forward!
     const camHead = new THREE.Group();
-    camHead.position.set(0.088, 0.33, 0.0);
-    camHead.rotation.z = -0.35; // Pitched down forward
+    camHead.position.set(0.198, 0.282, 0);
+    camHead.rotation.z = -0.52; // Aimed right at the weed kill zone in front of the steel flame barrel!
 
-    const camBody = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.034, 0.026, 0.056)), matDarkAnodized)
+    const pillGeo = trackGeo(new THREE.CapsuleGeometry(0.016, 0.044, 10, 16));
+    pillGeo.rotateX(Math.PI / 2);
+    const pillBody = makeShadowed(new THREE.Mesh(pillGeo, matDarkAnodized));
+    camHead.add(pillBody);
+
+    // Recessed glossy optical lens ring facing forward-downward
+    const lensRing = makeShadowed(
+      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.011, 0.011, 0.006, 16)), matBrushedSteel)
     );
-    camHead.add(camBody);
+    lensRing.rotation.z = Math.PI / 2;
+    lensRing.position.set(0.015, 0, 0);
+    camHead.add(lensRing);
 
-    // Red Sipeed accent trim ring on camera faceplate
-    const accentTrim = makeShadowed(
-      new THREE.Mesh(
-        trackGeo(new THREE.BoxGeometry(0.036, 0.004, 0.058)),
-        trackMat(new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.35, metalness: 0.3 }))
-      )
+    const lensGlass = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.0085, 0.0085, 0.007, 16)),
+      matLensGlass
     );
-    accentTrim.position.y = -0.012;
-    camHead.add(accentTrim);
-
-    // RGB lens + ToF emitter lens on bottom face
-    const camLensGeo = trackGeo(new THREE.CylinderGeometry(0.0085, 0.0085, 0.006, 16));
-    const rgbLens = makeShadowed(new THREE.Mesh(camLensGeo, matLensGlass));
-    rgbLens.position.set(0, -0.015, -0.014);
-    camHead.add(rgbLens);
-
-    const tofLens = makeShadowed(new THREE.Mesh(camLensGeo, matLensGlass));
-    tofLens.position.set(0, -0.015, 0.014);
-    camHead.add(tofLens);
+    lensGlass.rotation.z = Math.PI / 2;
+    lensGlass.position.set(0.016, 0, 0);
+    camHead.add(lensGlass);
 
     g.add(camHead);
 
-    // Translucent ground scan footprint (40 x 30 cm ExG swath) shown during field run
+    // Neat curved black USB cable running smoothly from camera back to the Pi 4 enclosure!
+    const camCableCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0.18, 0.282, 0),
+      new THREE.Vector3(0.105, 0.278, -0.02),
+      new THREE.Vector3(0.02, 0.258, -0.038),
+      new THREE.Vector3(-0.025, 0.184, -0.02),
+    ]);
+    const camCable = new THREE.Mesh(
+      trackGeo(new THREE.TubeGeometry(camCableCurve, 18, 0.0024, 6, false)),
+      matWireDark
+    );
+    g.add(camCable);
+
+    // Ground ExG vision targeting reticle projected directly in front of the steel flame nozzle!
     cameraFrustum = new THREE.Group();
     const swathPlane = new THREE.Mesh(
-      trackGeo(new THREE.PlaneGeometry(0.36, 0.28)),
+      trackGeo(new THREE.PlaneGeometry(0.32, 0.28)),
       trackMat(
         new THREE.MeshBasicMaterial({
           color: 0x10b981,
@@ -814,17 +1510,17 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
       )
     );
     swathPlane.rotation.x = -Math.PI / 2;
-    swathPlane.position.set(0.05, 0.008, 0);
+    swathPlane.position.set(0.28, 0.008, 0);
     cameraFrustum.add(swathPlane);
 
-    const edges = new THREE.EdgesGeometry(trackGeo(new THREE.PlaneGeometry(0.36, 0.28)));
+    const edges = new THREE.EdgesGeometry(trackGeo(new THREE.PlaneGeometry(0.32, 0.28)));
     geometriesToDispose.push(edges);
     const swathOutline = new THREE.LineSegments(
       edges,
-      trackMat(new THREE.LineBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.72 }))
+      trackMat(new THREE.LineBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.78 }))
     );
     swathOutline.rotation.x = -Math.PI / 2;
-    swathOutline.position.set(0.05, 0.01, 0);
+    swathOutline.position.set(0.28, 0.01, 0);
     cameraFrustum.add(swathOutline);
 
     cameraFrustum.visible = false;
@@ -832,222 +1528,13 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   }
 
   // =========================================================================
-  // 10. GPIO 13 PHYSICAL E-STOP + MODULAR WEEDING ATTACHMENT (Grinder / Flame / Laser)
-  // =========================================================================
-  let estopCap: THREE.Mesh;
-  const toolVariants = {} as Record<TreatmentToolType, THREE.Group>;
-  let grinderDisc: THREE.Group;
-  let flameConeGroup: THREE.Group;
-  let laserGimbalPan: THREE.Group;
-  let laserGimbalTilt: THREE.Group;
-  let laserBeamMesh: THREE.Mesh;
-  let laserImpactDot: THREE.Mesh;
-
-  {
-    const g = partGroups.estop_tool;
-
-    // Yellow industrial E-Stop enclosure box on rear-left top deck
-    const estopBox = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.022, 0.036)), matSafetyYellow)
-    );
-    estopBox.position.set(-0.088, 0.14, -0.026);
-    g.add(estopBox);
-
-    const collar = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.012, 0.013, 0.006, 16)), matDarkAnodized)
-    );
-    collar.position.set(-0.088, 0.153, -0.026);
-    g.add(collar);
-
-    estopCap = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.016, 0.012, 0.012, 18)), matEstopRed)
-    );
-    estopCap.position.set(-0.088, 0.161, -0.026);
-    g.add(estopCap);
-
-    // Under-chassis modular tool mount plate (inside high-clearance arch at Y=0.102)
-    const mountPlate = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.054, 0.006, 0.054)), matDarkAnodized)
-    );
-    mountPlate.position.set(0.01, 0.118, 0);
-    g.add(mountPlate);
-
-    // --- Variant A: Mechanical Rotary Grinder (Simpla Bot) ---
-    const grinderGroup = new THREE.Group();
-    grinderGroup.position.set(0.01, 0.115, 0);
-
-    const gMotor = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.018, 0.018, 0.038, 16)), matDarkAnodized)
-    );
-    gMotor.position.y = -0.022;
-    grinderGroup.add(gMotor);
-
-    const gShaft = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.004, 0.004, 0.035, 10)), matBrushedSteel)
-    );
-    gShaft.position.y = -0.054;
-    grinderGroup.add(gShaft);
-
-    const guard = makeShadowed(
-      new THREE.Mesh(
-        trackGeo(new THREE.CylinderGeometry(0.038, 0.04, 0.014, 18, 1, true)),
-        matSafetyYellow
-      )
-    );
-    guard.position.y = -0.064;
-    grinderGroup.add(guard);
-
-    grinderDisc = new THREE.Group();
-    grinderDisc.position.y = -0.072;
-    const discBody = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 0.004, 18)), matBrushedSteel)
-    );
-    grinderDisc.add(discBody);
-
-    const toothGeo = trackGeo(new THREE.BoxGeometry(0.014, 0.006, 0.005));
-    for (let t = 0; t < 6; t++) {
-      const ang = (t * Math.PI * 2) / 6;
-      const tooth = makeShadowed(new THREE.Mesh(toothGeo, matCopperGold));
-      tooth.position.set(Math.cos(ang) * 0.03, -0.003, Math.sin(ang) * 0.03);
-      tooth.rotation.y = -ang;
-      grinderDisc.add(tooth);
-    }
-    grinderGroup.add(grinderDisc);
-    toolVariants.grinder = grinderGroup;
-    g.add(grinderGroup);
-
-    // --- Variant B: Precision Thermal Flame Weeder (Simpla Bot) ---
-    const flameGroup = new THREE.Group();
-    flameGroup.position.set(0.01, 0.115, 0);
-
-    const valve = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.024, 0.022, 0.024)), matBrass)
-    );
-    valve.position.y = -0.015;
-    flameGroup.add(valve);
-
-    const wand = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.006, 0.006, 0.042, 12)), matBrushedSteel)
-    );
-    wand.position.y = -0.042;
-    flameGroup.add(wand);
-
-    const nozzle = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.009, 0.013, 0.016, 14)), matDarkAnodized)
-    );
-    nozzle.position.y = -0.065;
-    flameGroup.add(nozzle);
-
-    flameConeGroup = new THREE.Group();
-    flameConeGroup.position.y = -0.073;
-    const outerFlame = new THREE.Mesh(
-      trackGeo(new THREE.ConeGeometry(0.022, 0.072, 14)),
-      trackMat(
-        new THREE.MeshBasicMaterial({
-          color: 0xf97316,
-          transparent: true,
-          opacity: 0.78,
-          depthWrite: false,
-        })
-      )
-    );
-    outerFlame.rotation.x = Math.PI;
-    outerFlame.position.y = -0.034;
-    flameConeGroup.add(outerFlame);
-
-    const innerFlame = new THREE.Mesh(
-      trackGeo(new THREE.ConeGeometry(0.011, 0.044, 12)),
-      trackMat(
-        new THREE.MeshBasicMaterial({
-          color: 0x38bdf8,
-          transparent: true,
-          opacity: 0.92,
-          depthWrite: false,
-        })
-      )
-    );
-    innerFlame.rotation.x = Math.PI;
-    innerFlame.position.y = -0.02;
-    flameConeGroup.add(innerFlame);
-
-    flameConeGroup.visible = false;
-    flameGroup.add(flameConeGroup);
-    toolVariants.flame = flameGroup;
-    g.add(flameGroup);
-
-    // --- Variant C: Pan-Tilt Precision Diode Laser (Weed_Detection / FieldSim) ---
-    const laserGroup = new THREE.Group();
-    laserGroup.position.set(0.01, 0.115, 0);
-
-    laserGimbalPan = new THREE.Group();
-    const panServo = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.024, 0.018, 0.022)), matDarkAnodized)
-    );
-    panServo.position.y = -0.011;
-    laserGimbalPan.add(panServo);
-
-    const uBracket = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.028, 0.018, 0.028)), matBrushedSteel)
-    );
-    uBracket.position.y = -0.026;
-    laserGimbalPan.add(uBracket);
-
-    laserGimbalTilt = new THREE.Group();
-    laserGimbalTilt.position.y = -0.036;
-
-    const diodeBarrel = makeShadowed(
-      new THREE.Mesh(
-        trackGeo(new THREE.CylinderGeometry(0.01, 0.01, 0.032, 14)),
-        trackMat(new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.25, metalness: 0.75 }))
-      )
-    );
-    diodeBarrel.position.y = -0.014;
-    laserGimbalTilt.add(diodeBarrel);
-
-    const emitterTip = makeShadowed(
-      new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.005, 0.007, 0.008, 12)), matBrass)
-    );
-    emitterTip.position.y = -0.032;
-    laserGimbalTilt.add(emitterTip);
-
-    laserGimbalPan.add(laserGimbalTilt);
-    laserGroup.add(laserGimbalPan);
-
-    // Dynamic laser beam (positioned in rover-local space)
-    const beamUnitGeo = trackGeo(new THREE.CylinderGeometry(0.0022, 0.0022, 1, 8));
-    beamUnitGeo.translate(0, -0.5, 0);
-    laserBeamMesh = new THREE.Mesh(
-      beamUnitGeo,
-      trackMat(
-        new THREE.MeshBasicMaterial({
-          color: 0x38bdf8,
-          transparent: true,
-          opacity: 0.92,
-        })
-      )
-    );
-    laserBeamMesh.visible = false;
-    g.add(laserBeamMesh);
-
-    laserImpactDot = new THREE.Mesh(
-      trackGeo(new THREE.SphereGeometry(0.009, 10, 10)),
-      trackMat(new THREE.MeshBasicMaterial({ color: 0x7dd3fc }))
-    );
-    laserImpactDot.visible = false;
-    g.add(laserImpactDot);
-
-    toolVariants.laser = laserGroup;
-    g.add(laserGroup);
-  }
-
-  // =========================================================================
-  // BUILD GLOWING GHOST SNAP TARGETS + LAYER-1 RAYCAST HITBOXES FOR EVERY PART
+  // BUILD GLOWING GHOST SNAP TARGETS + LAYER-1 RAYCAST HITBOXES
   // =========================================================================
   const ghostMat = trackMat(
     new THREE.MeshBasicMaterial({
       color: 0x34d399,
       transparent: true,
-      opacity: 0.22,
+      opacity: 0.24,
       wireframe: true,
       depthWrite: false,
     })
@@ -1065,6 +1552,10 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
   const tmpBox = new THREE.Box3();
   const tmpSize = new THREE.Vector3();
   const tmpCenter = new THREE.Vector3();
+  const hitboxMeta = {} as Record<
+    PartId,
+    { mesh: THREE.Mesh; baseCenter: THREE.Vector3; size: THREE.Vector3 }
+  >;
 
   for (const spec of ROVER_PARTS) {
     const pg = partGroups[spec.id];
@@ -1075,10 +1566,9 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     tmpBox.getSize(tmpSize);
     tmpBox.getCenter(tmpCenter);
 
-    // Ensure non-zero hitbox padding for crisp click picking
-    const sx = Math.max(0.055, tmpSize.x + 0.016);
-    const sy = Math.max(0.036, tmpSize.y + 0.016);
-    const sz = Math.max(0.055, tmpSize.z + 0.016);
+    const sx = Math.max(0.055, tmpSize.x + 0.014);
+    const sy = Math.max(0.036, tmpSize.y + 0.014);
+    const sz = Math.max(0.055, tmpSize.z + 0.014);
 
     const boxGeo = trackGeo(new THREE.BoxGeometry(sx, sy, sz));
     const ghostWire = new THREE.Mesh(boxGeo, ghostMat);
@@ -1095,12 +1585,76 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     hitMesh.layers.set(1);
     root.add(hitMesh);
     hitboxes.push(hitMesh);
+
+    hitboxMeta[spec.id] = {
+      mesh: hitMesh,
+      baseCenter: tmpCenter.clone(),
+      size: new THREE.Vector3(sx, sy, sz),
+    };
   }
 
-  // Default tool selection
+  // Crisp 3D selection & hover outline frames so clicked/hovered parts stand out cleanly
+  const unitBoxEdges = new THREE.EdgesGeometry(trackGeo(new THREE.BoxGeometry(1, 1, 1)));
+  geometriesToDispose.push(unitBoxEdges);
+
+  const selectionFrame = new THREE.LineSegments(
+    unitBoxEdges,
+    trackMat(new THREE.LineBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.92 }))
+  );
+  selectionFrame.visible = false;
+  root.add(selectionFrame);
+
+  const hoverFrame = new THREE.LineSegments(
+    unitBoxEdges,
+    trackMat(new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.85 }))
+  );
+  hoverFrame.visible = false;
+  root.add(hoverFrame);
+
+  const syncPartHighlights = (selectedId: PartId | null, hoveredId: PartId | null) => {
+    for (const spec of ROVER_PARTS) {
+      const meta = hitboxMeta[spec.id];
+      const pg = partGroups[spec.id];
+      meta.mesh.position.set(
+        meta.baseCenter.x + pg.position.x,
+        meta.baseCenter.y + pg.position.y,
+        meta.baseCenter.z + pg.position.z
+      );
+    }
+
+    if (selectedId && hitboxMeta[selectedId]) {
+      const meta = hitboxMeta[selectedId];
+      selectionFrame.visible = true;
+      selectionFrame.position.copy(meta.mesh.position);
+      selectionFrame.scale.set(meta.size.x + 0.008, meta.size.y + 0.008, meta.size.z + 0.008);
+    } else {
+      selectionFrame.visible = false;
+    }
+
+    if (hoveredId && hoveredId !== selectedId && hitboxMeta[hoveredId]) {
+      const meta = hitboxMeta[hoveredId];
+      hoverFrame.visible = true;
+      hoverFrame.position.copy(meta.mesh.position);
+      hoverFrame.scale.set(meta.size.x + 0.012, meta.size.y + 0.012, meta.size.z + 0.012);
+    } else {
+      hoverFrame.visible = false;
+    }
+  };
+
+  const getPartWorldCenter = (partId: PartId, outVec: THREE.Vector3) => {
+    const meta = hitboxMeta[partId];
+    if (!meta) {
+      outVec.copy(root.position);
+      return;
+    }
+    outVec.copy(meta.mesh.position);
+    root.localToWorld(outVec);
+  };
+
+  // Default to the real bot's iconic Flame Turret!
   const setToolType = (tool: TreatmentToolType) => {
-    toolVariants.grinder.visible = tool === 'grinder';
     toolVariants.flame.visible = tool === 'flame';
+    toolVariants.grinder.visible = tool === 'grinder';
     toolVariants.laser.visible = tool === 'laser';
     if (tool !== 'laser') {
       laserBeamMesh.visible = false;
@@ -1108,11 +1662,12 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     }
     if (tool !== 'flame') {
       flameConeGroup.visible = false;
+      sparkArcMesh.visible = false;
     }
   };
-  setToolType('grinder');
+  setToolType('flame');
 
-  const _origin = new THREE.Vector3(0.01, 0.075, 0);
+  const _origin = new THREE.Vector3(0.056, 0.08, 0);
   const _target = new THREE.Vector3();
   const _dir = new THREE.Vector3();
   const _down = new THREE.Vector3(0, -1, 0);
@@ -1122,25 +1677,57 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     firing: boolean,
     tool: TreatmentToolType,
     elapsed: number,
-    localTarget?: { x: number; z: number } | null
+    localTarget?: { x: number; z: number } | null,
+    sparkPhase = false,
+    manualAimRad: number | null = null
   ) => {
+    // Servo-driven turret yaw calculation: rotates the entire inverted butane tank + horizontal steel nozzle toward the weed!
+    let desiredTurretYaw = 0;
+    if (manualAimRad !== null) {
+      desiredTurretYaw = THREE.MathUtils.clamp(manualAimRad, -0.82, 0.82);
+    } else if (localTarget) {
+      // Rover local +X is forward, +Z is right, -Z is left; Three.js +Y rotation turns +X toward -Z (left)
+      const dx = Math.max(0.07, localTarget.x - 0.056);
+      const rawYaw = Math.atan2(-localTarget.z, dx);
+      desiredTurretYaw = THREE.MathUtils.clamp(rawYaw, -0.82, 0.82);
+    }
+
+    // Smoothly drive turret & meshing servo spur gear even while acquiring target BEFORE firing!
+    turretPivotGroup.rotation.y = THREE.MathUtils.lerp(
+      turretPivotGroup.rotation.y,
+      desiredTurretYaw,
+      0.18
+    );
+    servoGearMesh.rotation.y = -turretPivotGroup.rotation.y * (26 / 22);
+
     if (!firing) {
       flameConeGroup.visible = false;
+      sparkArcMesh.visible = false;
       laserBeamMesh.visible = false;
       laserImpactDot.visible = false;
-      grinderDisc.position.y = THREE.MathUtils.lerp(grinderDisc.position.y, -0.072, 0.2);
+      grinderDisc.position.y = THREE.MathUtils.lerp(grinderDisc.position.y, -0.084, 0.2);
       return;
     }
 
-    if (tool === 'grinder') {
-      grinderDisc.rotation.y += 0.55;
-      grinderDisc.position.y = -0.088 + Math.sin(elapsed * 42) * 0.002;
-    } else if (tool === 'flame') {
-      flameConeGroup.visible = true;
-      const flicker = 0.85 + Math.sin(elapsed * 55) * 0.16 + Math.cos(elapsed * 37) * 0.08;
-      flameConeGroup.scale.set(0.95 + Math.sin(elapsed * 40) * 0.12, flicker, 0.95 + Math.cos(elapsed * 44) * 0.12);
+    if (tool === 'flame') {
+      if (sparkPhase) {
+        sparkArcMesh.visible = true;
+        sparkArcMesh.scale.setScalar(0.75 + Math.abs(Math.sin(elapsed * 90)) * 0.75);
+        sparkArcMesh.rotation.set(elapsed * 30, elapsed * 45, 0);
+        flameConeGroup.visible = false;
+      } else {
+        sparkArcMesh.visible = Math.sin(elapsed * 70) > 0.65;
+        flameConeGroup.visible = true;
+        const lengthPulse = 0.92 + Math.sin(elapsed * 46) * 0.18 + Math.cos(elapsed * 31) * 0.1;
+        const widthPulse = 0.9 + Math.cos(elapsed * 52) * 0.14;
+        flameConeGroup.scale.set(lengthPulse, widthPulse, widthPulse);
+        flameConeGroup.rotation.z = Math.sin(elapsed * 38) * 0.06;
+      }
+    } else if (tool === 'grinder') {
+      grinderDisc.rotation.y += 0.62;
+      grinderDisc.position.y = -0.098 + Math.sin(elapsed * 44) * 0.002;
     } else if (tool === 'laser') {
-      const tx = localTarget ? localTarget.x : 0.01;
+      const tx = localTarget ? localTarget.x : 0.26;
       const tz = localTarget ? localTarget.z : 0;
       _target.set(tx, 0.012, tz);
       _dir.subVectors(_target, _origin);
@@ -1156,20 +1743,18 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
         laserImpactDot.scale.setScalar(0.85 + Math.sin(elapsed * 50) * 0.25);
         laserImpactDot.visible = true;
 
-        // Slew gimbal visibly toward target
-        laserGimbalPan.rotation.y = Math.atan2(tx - 0.01, tz || 0.001) * 0.35;
-        laserGimbalTilt.rotation.z = THREE.MathUtils.clamp((tx - 0.01) * 2.4, -0.6, 0.6);
-        laserGimbalTilt.rotation.x = THREE.MathUtils.clamp(-(tz) * 2.4, -0.6, 0.6);
+        laserGimbalPan.rotation.y = Math.atan2(tx - 0.056, tz || 0.001) * 0.35;
+        laserGimbalTilt.rotation.z = THREE.MathUtils.clamp((tx - 0.056) * 2.1, -0.65, 0.65);
+        laserGimbalTilt.rotation.x = THREE.MathUtils.clamp(-tz * 2.1, -0.65, 0.65);
       }
     }
   };
 
-  const setEstopPressed = (pressed: boolean) => {
-    estopCap.position.y = pressed ? 0.156 : 0.161;
-  };
+  const getTurretYawDeg = () => Math.round((turretPivotGroup.rotation.y * 180) / Math.PI);
 
-  // Validate PART_BY_ID referenced so tree shaking keeps metadata aligned
-  void PART_BY_ID;
+  const setEstopPressed = (pressed: boolean) => {
+    estopCap.position.y = pressed ? 0.148 : 0.152;
+  };
 
   return {
     root,
@@ -1181,6 +1766,10 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     toolVariants,
     grinderDisc,
     flameConeGroup,
+    sparkArcMesh,
+    servoGearMesh,
+    turretGearMesh,
+    turretPivotGroup,
     laserGimbalPan,
     laserGimbalTilt,
     laserBeamMesh,
@@ -1191,10 +1780,14 @@ export function buildRoverRig(textures: ProceduralTexturePack): RoverRig {
     contactShadow,
     setToolType,
     setFiringVisual,
+    getTurretYawDeg,
     setEstopPressed,
+    syncPartHighlights,
+    getPartWorldCenter,
     dispose() {
       geometriesToDispose.forEach((g) => g.dispose());
       materialsToDispose.forEach((m) => m.dispose());
+      localTexturesToDispose.forEach((t) => t.dispose());
     },
   };
 }

@@ -56,6 +56,17 @@ import {
   deriveMissionLifecycleState,
   missionControlService,
 } from '../services/MissionControlService';
+import {
+  FieldWaypoint,
+  MapClickMode,
+  NavRouteMode,
+  WaypointEditorPanel,
+} from './WaypointEditorPanel';
+import {
+  MaixSenseThermalCornerPanel,
+  MaixSenseThermalState,
+} from './MaixSenseThermalCornerPanel';
+import { MobileAppPreview } from './MobileAppPreview';
 
 interface Props {
   estopActive: boolean;
@@ -141,6 +152,45 @@ function makeInitialHookTargets(rowWidthM: number): HookTarget[] {
     }
   }
   return spots;
+}
+
+function makePresetWaypoints(
+  preset: 'weed_cycle' | 'corner_check' | 'spot_hotspots',
+  rowWidthM: number
+): FieldWaypoint[] {
+  const y0 = Number(rowCenterY(0, rowWidthM).toFixed(2));
+  const y1 = Number(rowCenterY(1, rowWidthM).toFixed(2));
+  const y2 = Number(rowCenterY(2, rowWidthM).toFixed(2));
+  const y3 = Number(rowCenterY(3, rowWidthM).toFixed(2));
+  const baseId = Date.now();
+
+  if (preset === 'corner_check') {
+    return [
+      { id: baseId + 1, x: 1.5, y: y0, label: 'NW Field Corner', treatWeed: false, visited: false },
+      { id: baseId + 2, x: 8.9, y: y0, label: 'NE Corner Check', treatWeed: true, visited: false },
+      { id: baseId + 3, x: 8.9, y: y3, label: 'SE Corner Check', treatWeed: true, visited: false },
+      { id: baseId + 4, x: 1.5, y: y3, label: 'SW Corner Check', treatWeed: true, visited: false },
+      { id: baseId + 5, x: 1.5, y: y0, label: 'Home Origin Return', treatWeed: false, visited: false },
+    ];
+  }
+  if (preset === 'spot_hotspots') {
+    return [
+      { id: baseId + 1, x: 2.8, y: y0, label: 'R1 Purslane Cluster', treatWeed: true, visited: false },
+      { id: baseId + 2, x: 5.9, y: y0, label: 'R1 Grass Patch', treatWeed: true, visited: false },
+      { id: baseId + 3, x: 6.4, y: y1, label: 'R2 Amaranth Spot', treatWeed: true, visited: false },
+      { id: baseId + 4, x: 3.1, y: y2, label: 'R3 Dandelion Spot', treatWeed: true, visited: false },
+      { id: baseId + 5, x: 7.4, y: y3, label: 'R4 Headland Weed', treatWeed: true, visited: false },
+    ];
+  }
+  // Default: 4-Row Weed-Clearing Cycle
+  return [
+    { id: baseId + 1, x: 2.4, y: y0, label: 'Row 1 · Weed Patch A', treatWeed: true, visited: false },
+    { id: baseId + 2, x: 6.8, y: y0, label: 'Row 1 · Weed Patch B', treatWeed: true, visited: false },
+    { id: baseId + 3, x: 8.8, y: y1, label: 'Row 2 · East Entry', treatWeed: false, visited: false },
+    { id: baseId + 4, x: 4.5, y: y1, label: 'Row 2 · Mid-Row Weed', treatWeed: true, visited: false },
+    { id: baseId + 5, x: 1.6, y: y2, label: 'Row 3 · West Entry', treatWeed: false, visited: false },
+    { id: baseId + 6, x: 5.8, y: y2, label: 'Row 3 · Broadleaf Clear', treatWeed: true, visited: false },
+  ];
 }
 
 interface VisionTelemetrySource {
@@ -315,6 +365,29 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     type: 'start_local' | 'start_webrtc' | 'start_ws' | 'stop_to_sim';
     seq: number;
   } | null>(null);
+  const [navRouteMode, setNavRouteMode] = useState<NavRouteMode>('rows');
+  const [mapClickMode, setMapClickMode] = useState<MapClickMode>('waypoint');
+  const [waypoints, setWaypoints] = useState<FieldWaypoint[]>(() =>
+    makePresetWaypoints('weed_cycle', 0.6)
+  );
+  const [activeWaypointIdx, setActiveWaypointIdx] = useState<number>(0);
+  const [maixDiagnostics, setMaixDiagnostics] = useState<MaixSenseThermalState | null>(null);
+
+  const waypointsRef = useRef<FieldWaypoint[]>(waypoints);
+  const activeWpIdxRef = useRef<number>(activeWaypointIdx);
+  const navRouteModeRef = useRef<NavRouteMode>(navRouteMode);
+
+  useEffect(() => {
+    waypointsRef.current = waypoints;
+  }, [waypoints]);
+
+  useEffect(() => {
+    activeWpIdxRef.current = activeWaypointIdx;
+  }, [activeWaypointIdx]);
+
+  useEffect(() => {
+    navRouteModeRef.current = navRouteMode;
+  }, [navRouteMode]);
 
   const [telemetry, setTelemetry] = useState({
     phase: 'FOLLOW_CROP_ROW' as MissionPhase,
@@ -1311,6 +1384,86 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     );
   };
 
+  const handleAddWaypoint = useCallback(
+    (x: number, y: number, treatWeed: boolean, label?: string) => {
+      setWaypoints((prev) => {
+        const nextNum = prev.length + 1;
+        const wp: FieldWaypoint = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          x,
+          y,
+          label: label || `WP ${nextNum}${treatWeed ? ' (Weed Clear)' : ' (Transit)'}`,
+          treatWeed,
+          visited: false,
+        };
+        return [...prev, wp];
+      });
+      onLogEvent(
+        `[Waypoint Editor] Added coordinate (${x.toFixed(2)} m, ${y.toFixed(2)} m) · ${
+          treatWeed ? 'Weed-Clear Stop' : 'Transit Point'
+        }.`
+      );
+    },
+    [onLogEvent]
+  );
+
+  const handleUpdateWaypoint = useCallback(
+    (id: number, patch: Partial<Omit<FieldWaypoint, 'id'>>) => {
+      setWaypoints((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+    },
+    []
+  );
+
+  const handleRemoveWaypoint = useCallback((id: number) => {
+    setWaypoints((prev) => prev.filter((w) => w.id !== id));
+    setActiveWaypointIdx(0);
+  }, []);
+
+  const handleMoveWaypoint = useCallback((index: number, delta: -1 | 1) => {
+    setWaypoints((prev) => {
+      const target = index + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const copy = [...prev];
+      const [item] = copy.splice(index, 1);
+      copy.splice(target, 0, item);
+      return copy;
+    });
+  }, []);
+
+  const handleClearWaypoints = useCallback(() => {
+    setWaypoints([]);
+    setActiveWaypointIdx(0);
+    onLogEvent('[Waypoint Editor] Cleared all custom waypoints.');
+  }, [onLogEvent]);
+
+  const handleLoadWaypointPreset = useCallback(
+    (preset: 'weed_cycle' | 'corner_check' | 'spot_hotspots') => {
+      const pts = makePresetWaypoints(preset, rowWidthCm / 100);
+      setWaypoints(pts);
+      setActiveWaypointIdx(0);
+      onLogEvent(`[Waypoint Editor] Loaded "${preset}" preset (${pts.length} waypoints).`);
+    },
+    [rowWidthCm, onLogEvent]
+  );
+
+  const handleRunWaypointCycle = useCallback(() => {
+    if (estopActive || faultReason !== null || sensorFaultInjected) return;
+    if (waypointsRef.current.length === 0) return;
+    setWaypoints((prev) => prev.map((w) => ({ ...w, visited: false })));
+    setActiveWaypointIdx(0);
+    activeWpIdxRef.current = 0;
+    setNavRouteMode('waypoints');
+    navRouteModeRef.current = 'waypoints';
+    setMissionMode('treatment_hook');
+    simRef.current.phase = 'FOLLOW_CROP_ROW';
+    simRef.current.phaseTimer = 0;
+    setMissionStarted(true);
+    setRunning(true);
+    onLogEvent(
+      `[Waypoint Cycle] Dispatched ${waypointsRef.current.length} custom coordinates for autonomous weed-clearing cycle.`
+    );
+  }, [estopActive, faultReason, sensorFaultInjected, onLogEvent]);
+
   const handleFieldCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = fieldCanvasRef.current;
     if (!canvas) return;
@@ -1321,8 +1474,13 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
     const rw = paramsRef.current.rowWidthM;
     const worldW = ROW_END_X + 1.2;
     const worldH = 1.8 + (NUM_ROWS - 1) * rw;
-    const wx = (px / canvas.width) * worldW;
-    const wy = (py / canvas.height) * worldH;
+    const wx = Number(Math.max(0.35, Math.min(worldW - 0.35, (px / canvas.width) * worldW)).toFixed(2));
+    const wy = Number(Math.max(0.35, Math.min(worldH - 0.35, (py / canvas.height) * worldH)).toFixed(2));
+
+    if (mapClickMode === 'waypoint') {
+      handleAddWaypoint(wx, wy, true);
+      return;
+    }
 
     const existing = obstacles.find((o) => Math.hypot(o.x - wx, o.y - wy) < 0.35);
     if (existing) {
@@ -1354,6 +1512,9 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
           rowWidthM: p.rowWidthM,
           obstacles: p.obstacles,
           missionMode: p.missionMode,
+          waypoints: waypointsRef.current,
+          activeWaypointIdx: activeWpIdxRef.current,
+          navRouteMode: navRouteModeRef.current,
         });
         drawForwardCamCanvas(camCanvasRef.current, s, { rowWidthM: p.rowWidthM });
         rafId = requestAnimationFrame(tick);
@@ -1426,6 +1587,70 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         if (s.collisionState === 'STOP') {
           vx = 0;
           wz = 0;
+        } else if (navRouteModeRef.current === 'waypoints' && waypointsRef.current.length > 0) {
+          // Custom Waypoint Weed-Clearing Cycle controller
+          if (s.phase === 'TREATMENT_HOOK_HOLD') {
+            s.phaseTimer -= dt;
+            if (s.phaseTimer <= 0) {
+              const finishedIdx = activeWpIdxRef.current;
+              const nextIdx = finishedIdx + 1;
+              activeWpIdxRef.current = nextIdx;
+              setActiveWaypointIdx(nextIdx);
+              if (nextIdx >= waypointsRef.current.length) {
+                s.phase = 'MISSION_COMPLETE';
+                onLogEventRef.current(
+                  `[Waypoint Cycle] Completed all ${waypointsRef.current.length} weed-clearing coordinates cleanly.`
+                );
+              } else {
+                s.phase = 'FOLLOW_CROP_ROW';
+              }
+            }
+          } else {
+            const idx = activeWpIdxRef.current;
+            const targetWp = waypointsRef.current[idx];
+            if (!targetWp) {
+              s.phase = 'MISSION_COMPLETE';
+            } else {
+              const dx = targetWp.x - s.x;
+              const dy = targetWp.y - s.y;
+              const dist = Math.hypot(dx, dy);
+              if (dist < 0.14) {
+                const reachedId = targetWp.id;
+                waypointsRef.current = waypointsRef.current.map((w) =>
+                  w.id === reachedId ? { ...w, visited: true } : w
+                );
+                setWaypoints(waypointsRef.current);
+
+                if (targetWp.treatWeed) {
+                  s.phase = 'TREATMENT_HOOK_HOLD';
+                  s.phaseTimer = 0.85;
+                  vx = 0;
+                  wz = 0;
+                  onLogEventRef.current(
+                    `[Waypoint #${idx + 1}] Reached (${targetWp.x.toFixed(2)}m, ${targetWp.y.toFixed(
+                      2
+                    )}m) — engaging butane flame weed-clearing pause.`
+                  );
+                } else {
+                  const nextIdx = idx + 1;
+                  activeWpIdxRef.current = nextIdx;
+                  setActiveWaypointIdx(nextIdx);
+                  if (nextIdx >= waypointsRef.current.length) {
+                    s.phase = 'MISSION_COMPLETE';
+                    onLogEventRef.current(
+                      `[Waypoint Cycle] Completed all ${waypointsRef.current.length} coordinates.`
+                    );
+                  }
+                }
+              } else {
+                const desiredYaw = Math.atan2(dy, dx);
+                const yawErr = wrapAngle(desiredYaw - s.yaw);
+                wz = Math.max(-0.95, Math.min(0.95, yawErr * 2.2));
+                vx = Math.abs(yawErr) > 0.65 ? 0.04 : Math.max(0.08, p.speedLimit * (1 - 0.35 * Math.min(1, Math.abs(yawErr))));
+                if (s.collisionState === 'SLOWDOWN') vx *= 0.45;
+              }
+            }
+          }
         } else if (s.phase === 'FOLLOW_CROP_ROW') {
           const progressFrac =
             s.dir > 0
@@ -1757,7 +1982,14 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         }
       }
 
-      drawFieldCanvas(fieldCanvasRef.current, s, p);
+      drawFieldCanvas(fieldCanvasRef.current, s, {
+        rowWidthM: p.rowWidthM,
+        obstacles: p.obstacles,
+        missionMode: p.missionMode,
+        waypoints: waypointsRef.current,
+        activeWaypointIdx: activeWpIdxRef.current,
+        navRouteMode: navRouteModeRef.current,
+      });
       if (p.visionSourceMode === 'sim') {
         drawForwardCamCanvas(camCanvasRef.current, s, p);
       }
@@ -2108,10 +2340,12 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         </div>
       </section>
 
-      {/* Asymmetric Split Console */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
-        {/* Left Control, Fault-Injection & Checkpoint Column */}
-        <aside className="xl:col-span-3 bg-white border border-emerald-900/10 rounded-lg p-5 flex flex-col justify-between gap-5">
+      {/* Asymmetric Split Console with Right-Side Android Mobile App Preview */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        <div className="xl:col-span-9 space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+            {/* Left Control, Fault-Injection & Checkpoint Column */}
+            <aside className="lg:col-span-4 bg-white border border-emerald-900/10 rounded-lg p-5 flex flex-col justify-between gap-5">
           <div className="space-y-5">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">Navigation Tuning</h3>
@@ -2402,7 +2636,35 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
         </aside>
 
         {/* Main Viewport Stage */}
-        <div className="xl:col-span-9 flex flex-col gap-5">
+        <div className="lg:col-span-8 flex flex-col gap-5">
+          {/* Interactive Weed-Clearing Waypoint Editor */}
+          <WaypointEditorPanel
+            waypoints={waypoints}
+            activeWaypointIdx={activeWaypointIdx}
+            navRouteMode={navRouteMode}
+            mapClickMode={mapClickMode}
+            maxX={ROW_END_X + 1.2}
+            maxY={1.8 + (NUM_ROWS - 1) * (rowWidthCm / 100)}
+            rowWidthM={rowWidthCm / 100}
+            disabled={estopActive || isFaulted}
+            onChangeNavRouteMode={(mode) => {
+              setNavRouteMode(mode);
+              onLogEvent(
+                mode === 'waypoints'
+                  ? '[Navigation] Switched controller to Custom Waypoint Weed-Clearing Cycle.'
+                  : '[Navigation] Switched controller to Standard Boustrophedon Row Follower.'
+              );
+            }}
+            onChangeMapClickMode={setMapClickMode}
+            onAddWaypoint={handleAddWaypoint}
+            onUpdateWaypoint={handleUpdateWaypoint}
+            onRemoveWaypoint={handleRemoveWaypoint}
+            onMoveWaypoint={handleMoveWaypoint}
+            onClearWaypoints={handleClearWaypoints}
+            onLoadPreset={handleLoadWaypointPreset}
+            onRunWaypointCycle={handleRunWaypointCycle}
+          />
+
           {/* Dedicated Vision Node Crop-Row Alignment Visualization Block (Prominent Top Band) */}
           <CropRowAlignmentGauge alignment={visionAlignment} />
 
@@ -2642,6 +2904,52 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
             disabled={estopActive || isFaulted}
           />
         </div>
+          </div>
+
+          {/* MaixSense-A075V Corner Verification, IR Thermal Safety & Hugging Face Model Cards */}
+          <MaixSenseThermalCornerPanel
+            roverX={telemetry.x}
+            roverY={telemetry.y}
+            roverYawDeg={telemetry.yawDeg}
+            roverPhase={telemetry.phase}
+            collisionState={telemetry.collisionState}
+            rowEndConf={telemetry.rowEndConf}
+            onDiagnosticsChange={setMaixDiagnostics}
+            onLogEvent={onLogEvent}
+          />
+        </div>
+
+        {/* Right-Side Sticky Android Mobile Companion App Preview */}
+        <div className="xl:col-span-3">
+          <MobileAppPreview
+            roverX={telemetry.x}
+            roverY={telemetry.y}
+            roverYawDeg={telemetry.yawDeg}
+            phase={telemetry.phase}
+            currentRow={telemetry.currentRow}
+            totalRows={NUM_ROWS}
+            coveragePct={telemetry.coveragePct}
+            running={running}
+            estopActive={estopActive}
+            piMode={piStatus?.mode ?? 'sim_only'}
+            waypoints={waypoints}
+            activeWaypointIdx={activeWaypointIdx}
+            navRouteMode={navRouteMode}
+            diagnostics={maixDiagnostics}
+            worldW={ROW_END_X + 1.2}
+            worldH={1.8 + (NUM_ROWS - 1) * (rowWidthCm / 100)}
+            onStartOrResume={() => {
+              if (!missionStarted) {
+                void handleMissionStart();
+              } else {
+                void handleMissionResume();
+              }
+            }}
+            onPause={() => void handleMissionPause()}
+            onStop={() => void handleMissionStop()}
+            onRunWaypoints={handleRunWaypointCycle}
+          />
+        </div>
       </div>
     </div>
   );
@@ -2652,7 +2960,14 @@ export const NavigationWorkbench: React.FC<Props> = ({ estopActive, onLogEvent }
 function drawFieldCanvas(
   canvas: HTMLCanvasElement | null,
   s: any,
-  p: { rowWidthM: number; obstacles: Obstacle[]; missionMode: string }
+  p: {
+    rowWidthM: number;
+    obstacles: Obstacle[];
+    missionMode: string;
+    waypoints?: FieldWaypoint[];
+    activeWaypointIdx?: number;
+    navRouteMode?: NavRouteMode;
+  }
 ) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -2817,6 +3132,55 @@ function drawFieldCanvas(
     ctx.strokeStyle = '#E11D48';
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+
+  // Custom Weed-Clearing Waypoint Path & Numbered Pins
+  if (p.waypoints && p.waypoints.length > 0) {
+    if (p.waypoints.length > 1) {
+      ctx.strokeStyle =
+        p.navRouteMode === 'waypoints' ? 'rgba(234, 88, 12, 0.85)' : 'rgba(14, 116, 144, 0.45)';
+      ctx.lineWidth = p.navRouteMode === 'waypoints' ? 2.4 : 1.5;
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      p.waypoints.forEach((wp, idx) => {
+        if (idx === 0) ctx.moveTo(toX(wp.x), toY(wp.y));
+        else ctx.lineTo(toX(wp.x), toY(wp.y));
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    p.waypoints.forEach((wp, idx) => {
+      const wx = toX(wp.x);
+      const wy = toY(wp.y);
+      const isActive = p.navRouteMode === 'waypoints' && idx === (p.activeWaypointIdx ?? 0) && !wp.visited;
+
+      if (isActive) {
+        ctx.beginPath();
+        ctx.arc(wx, wy, 13, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.25)';
+        ctx.fill();
+        ctx.strokeStyle = '#D97706';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.arc(wx, wy, 8.5, 0, Math.PI * 2);
+      ctx.fillStyle = wp.visited ? '#059669' : wp.treatWeed ? '#EA580C' : '#0284C7';
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(idx + 1), wx, wy + 0.5);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    });
   }
 
   // 2D LiDAR rays

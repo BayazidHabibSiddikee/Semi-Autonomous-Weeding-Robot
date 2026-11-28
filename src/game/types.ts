@@ -6,11 +6,24 @@ export type PartId =
   | 'power_driver'
   | 'esp32_mcu'
   | 'raspberry_pi'
-  | 'camera_gantry'
-  | 'fuel_valve_turret'
-  | 'igniter_torch';
+  | 'imu_tof'
+  | 'estop_tool'
+  | 'maixsense_a075v'
+  | 'thermal_sensor'
+  | 'corner_guard'
+  | 'maixsense_cam';
 
 export type TreatmentToolType = 'flame' | 'grinder' | 'laser';
+
+export type CropFieldId =
+  | 'tomato'
+  | 'chili'
+  | 'flower'
+  | 'eggplant'
+  | 'cabbage'
+  | 'corn'
+  | 'strawberry'
+  | 'lettuce';
 
 export type GamePhase = 'workshop' | 'field';
 
@@ -22,7 +35,6 @@ export type FieldRoverState =
   | 'IDLE'
   | 'NAVIGATING_ROW'
   | 'STOP_SCAN'
-  | 'VALVE_SPARK'
   | 'TREATMENT_HOOK'
   | 'HEADLAND_TURN'
   | 'OBSTACLE_HOLD'
@@ -30,14 +42,24 @@ export type FieldRoverState =
   | 'ESTOP'
   | 'DONE';
 
+export interface PartSpecItem {
+  label: string;
+  value: string;
+}
+
 export interface RoverPartSpec {
   id: PartId;
   step: number;
+  partNumber: string;
   name: string;
   shortName: string;
-  category: 'Structure' | 'Drivetrain' | 'Electronics' | 'Perception' | 'Thermal Tool';
+  category: 'Structure' | 'Drivetrain' | 'Electronics' | 'Perception' | 'Safety & Tool';
   specLine: string;
   description: string;
+  specs: PartSpecItem[];
+  assemblySteps: string[];
+  toolsRequired: string;
+  safetyNote?: string;
   requires: PartId[];
   requiredForDrive: boolean;
   explodeOffset: [number, number, number];
@@ -60,6 +82,7 @@ export interface FieldWeed3D {
   z: number;
   rowIndex: number;
   radius: number;
+  weedClass: string;
   eliminated: boolean;
   treatProgress: number; // 0..1
 }
@@ -73,23 +96,29 @@ export interface FieldObstacle3D {
 
 export interface GameHudSnapshot {
   phase: GamePhase;
+  fieldType: CropFieldId;
   controlMode: ControlMode;
   roverState: FieldRoverState;
   installedCount: number;
   totalParts: number;
   selectedTool: TreatmentToolType;
   canDeploy: boolean;
-  hasCameraGantry: boolean;
-  hasFuelTurret: boolean;
-  hasIgniterTorch: boolean;
+  hasImuTof: boolean;
+  hasCamera: boolean;
+  hasTool: boolean;
+  hasMaixSense: boolean;
+  hasThermal: boolean;
+  hasCornerGuard: boolean;
   // Field telemetry
   speedCmS: number;
   headingDeg: number;
   leftEncoderTicks: number;
   rightEncoderTicks: number;
   tofDistanceMm: number;
-  valveOpenPct: number;
-  sparkActive: boolean;
+  nozzleTempC: number;
+  piTempC: number;
+  cornerStatus: string;
+  turretYawDeg: number;
   currentRow: number;
   totalRows: number;
   weedsEliminated: number;

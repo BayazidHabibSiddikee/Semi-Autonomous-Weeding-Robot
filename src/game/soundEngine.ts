@@ -32,11 +32,10 @@ class RoverSoundEngine {
     if (!ctx) return;
     const now = ctx.currentTime;
 
-    // Mechanical bolt click + warm harmonic confirmation
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    const baseFreq = 240 + stepIndex * 36;
+    const baseFreq = 240 + stepIndex * 34;
     osc.frequency.setValueAtTime(baseFreq * 0.72, now);
     osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.45, now + 0.08);
     gain.gain.setValueAtTime(0.001, now);
@@ -69,6 +68,27 @@ class RoverSoundEngine {
     });
   }
 
+  playArcIgniter() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Rapid HV electric arc crackle (just like the real igniter in the field video!)
+    for (let i = 0; i < 4; i++) {
+      const t = now + i * 0.042;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1450 + i * 160, t);
+      osc.frequency.exponentialRampToValueAtTime(420, t + 0.028);
+      gain.gain.setValueAtTime(0.06, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.032);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.035);
+    }
+  }
+
   playTreatment(tool: TreatmentToolType) {
     const ctx = this.ensureContext();
     if (!ctx) return;
@@ -94,35 +114,38 @@ class RoverSoundEngine {
       const gain = ctx.createGain();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(140, now);
-      osc.frequency.linearRampToValueAtTime(210, now + 0.14);
-      osc.frequency.linearRampToValueAtTime(125, now + 0.32);
+      osc.frequency.linearRampToValueAtTime(215, now + 0.14);
+      osc.frequency.linearRampToValueAtTime(125, now + 0.34);
       gain.gain.setValueAtTime(0.08, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(now);
-      osc.stop(now + 0.35);
+      osc.stop(now + 0.38);
       return;
     }
 
-    // Flame whoosh (filtered white noise)
-    const bufferSize = Math.floor(ctx.sampleRate * 0.32);
+    // Flame jet whoosh (low-mid roaring butane torch after arc ignition)
+    const bufferSize = Math.floor(ctx.sampleRate * 0.42);
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.6));
+      const env = Math.min(1, i / (bufferSize * 0.12)) * Math.exp(-i / (bufferSize * 0.65));
+      data[i] = (Math.random() * 2 - 1) * env;
     }
     const noise = ctx.createBufferSource();
     noise.buffer = buffer;
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(380, now);
-    filter.Q.setValueAtTime(1.2, now);
+    filter.frequency.setValueAtTime(320, now);
+    filter.frequency.exponentialRampToValueAtTime(580, now + 0.14);
+    filter.frequency.exponentialRampToValueAtTime(240, now + 0.4);
+    filter.Q.setValueAtTime(0.95, now);
 
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.18, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+    gain.gain.setValueAtTime(0.24, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
 
     noise.connect(filter);
     filter.connect(gain);

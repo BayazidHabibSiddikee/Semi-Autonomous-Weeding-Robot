@@ -6,17 +6,18 @@ import { Ros2ToolsView } from './components/Ros2ToolsView';
 import { WeedVisionView } from './components/WeedVisionView';
 import { MobileCameraPublisher } from './components/MobileCameraPublisher';
 import { SimplaBotView } from './components/SimplaBotView';
+import { Rover3DGame } from './components/Rover3DGame';
 
-type TabId = 'navigation' | 'simpla_bot' | 'hardware' | 'ros2' | 'vision' | 'calibration';
+type TabId = 'game' | 'navigation' | 'simpla_bot' | 'hardware' | 'ros2' | 'vision' | 'calibration';
 type RobotLinkMode = 'sim_only' | 'pi_live' | 'pi_auth_error' | 'pi_unreachable';
 
 const NAV_ITEMS: Array<{ id: TabId; label: string }> = [
+  { id: 'game', label: '3D Rover Game' },
   { id: 'navigation', label: 'Navigation' },
   { id: 'simpla_bot', label: 'Simpla Bot' },
   { id: 'hardware', label: 'Sector Audit' },
   { id: 'ros2', label: 'ROS 2 Tools' },
   { id: 'vision', label: 'Weed Vision' },
-  { id: 'calibration', label: 'Calibration' },
 ];
 
 export default function App() {
@@ -25,14 +26,14 @@ export default function App() {
     return <MobileCameraPublisher initialRoom={urlParams.get('room') || 'rover-01'} />;
   }
 
-  const [activeTab, setActiveTab] = useState<TabId>('navigation');
+  const [activeTab, setActiveTab] = useState<TabId>('game');
   const [estopActive, setEstopActive] = useState<boolean>(false);
   const [estopBusy, setEstopBusy] = useState<boolean>(false);
   const [robotLinkMode, setRobotLinkMode] = useState<RobotLinkMode>('sim_only');
   const [eventLog, setEventLog] = useState<string[]>([
     '[System] Checking Raspberry Pi robot controller link (/api/robot/status)...',
     '[Safety] Browser Software E-Stop dispatches POST /api/robot/stop when Pi is connected; it is NOT a replacement for the physical GPIO 13 power cutoff switch.',
-    '[Decoupled] Navigation-only mode active by default (treatment actuators detached until real YOLO weights and homography calibration are loaded).',
+    '[3D Game] Interactive agricultural rover assembly & field mission ready.',
   ]);
 
   const appendLog = useCallback((msg: string) => {
@@ -45,7 +46,11 @@ export default function App() {
     const pollRobotStatus = async (isInitial: boolean) => {
       try {
         const res = await fetch('/api/robot/status');
-        if (!res.ok) return;
+        const ct = res.headers.get('content-type') || '';
+        if (!res.ok || !ct.includes('application/json')) {
+          if (active) setRobotLinkMode('sim_only');
+          return;
+        }
         const data = await res.json();
         if (!active) return;
         const nextMode: RobotLinkMode =
@@ -79,18 +84,18 @@ export default function App() {
       active = false;
       window.clearInterval(id);
     };
-  }, []);
+  }, [appendLog]);
 
   const toggleEstop = async () => {
     if (estopBusy) return;
     setEstopBusy(true);
 
     if (!estopActive) {
-      // Immediately halt local UI simulation regardless of network latency
       setEstopActive(true);
       try {
         const res = await fetch('/api/robot/stop', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
+        const ct = res.headers.get('content-type') || '';
+        const data = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
         if (res.ok && data.ackVerified) {
           appendLog(
             `[SAFETY] Software E-Stop ACK verified by Pi/ESP32 (${data.esp32Response || 'OK:ESTOP_LATCHED'}${
@@ -114,7 +119,6 @@ export default function App() {
       return;
     }
 
-    // Resetting Software E-Stop: if connected to live Pi, require explicit operator-authorized /api/robot/recover
     if (robotLinkMode === 'pi_live') {
       try {
         const res = await fetch('/api/robot/recover', {
@@ -149,16 +153,16 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F7FAF8] text-slate-900 flex flex-col">
       {/* Strict 3-Zone Top Bar Contract */}
-      <header className="sticky top-0 z-50 bg-white/95 backdrop-blur border-b border-emerald-900/10 px-6 h-14 flex items-center justify-between gap-8">
+      <header className="sticky top-0 z-50 bg-white border-b border-emerald-900/10 px-6 h-14 flex items-center justify-between gap-8">
         {/* Zone 1: Single-line brand wordmark */}
         <button
-          onClick={() => setActiveTab('navigation')}
+          onClick={() => setActiveTab('game')}
           className="text-base font-semibold tracking-tight text-emerald-950 whitespace-nowrap shrink-0 cursor-pointer"
         >
-          Weeding Rover Nav
+          AgriRover 3D
         </button>
 
-        {/* Zone 2: 5 concise single-line navigation links */}
+        {/* Zone 2: Clean single-line navigation links */}
         <nav className="flex items-center gap-6 overflow-x-auto">
           {NAV_ITEMS.map((item) => {
             const active = activeTab === item.id;
@@ -178,12 +182,12 @@ export default function App() {
           })}
         </nav>
 
-        {/* Zone 3: 1 primary action (Honest Software E-Stop dispatching POST /api/robot/stop) */}
+        {/* Zone 3: 1 primary action (Software E-Stop) */}
         <div className="shrink-0">
           <button
             onClick={() => void toggleEstop()}
             disabled={estopBusy}
-            title="Sends POST /api/robot/stop to the Raspberry Pi when connected. Browser UI is NOT a replacement for the physical GPIO 13 emergency-stop cutoff."
+            title="Sends POST /api/robot/stop to the Raspberry Pi when connected, and latches the 3D rover GPIO 13 E-stop."
             className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-60 ${
               estopActive
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
@@ -193,7 +197,7 @@ export default function App() {
             {estopActive ? (
               <>
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>{robotLinkMode === 'pi_live' ? 'Recover Stop' : 'Clear Sim Halt'}</span>
+                <span>{robotLinkMode === 'pi_live' ? 'Recover Stop' : 'Clear E-Stop'}</span>
               </>
             ) : (
               <>
@@ -206,66 +210,72 @@ export default function App() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 py-6 space-y-6">
-        {activeTab === 'navigation' && (
-          <NavigationWorkbench estopActive={estopActive} onLogEvent={appendLog} />
-        )}
-        {activeTab === 'simpla_bot' && (
-          <SimplaBotView estopActive={estopActive} onLogEvent={appendLog} />
-        )}
-        {activeTab === 'hardware' && <HardwareAuditView />}
-        {activeTab === 'ros2' && (
-          <Ros2ToolsView estopActive={estopActive} onLogEvent={appendLog} />
-        )}
-        {activeTab === 'vision' && (
-          <WeedVisionView mode="vision" estopActive={estopActive} onLogEvent={appendLog} />
-        )}
-        {activeTab === 'calibration' && (
-          <WeedVisionView mode="calibration" estopActive={estopActive} onLogEvent={appendLog} />
-        )}
+      {activeTab === 'game' ? (
+        <main className="flex-1 w-full">
+          <Rover3DGame estopActive={estopActive} onLogEvent={appendLog} />
+        </main>
+      ) : (
+        <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 py-6 space-y-6">
+          {activeTab === 'navigation' && (
+            <NavigationWorkbench estopActive={estopActive} onLogEvent={appendLog} />
+          )}
+          {activeTab === 'simpla_bot' && (
+            <SimplaBotView estopActive={estopActive} onLogEvent={appendLog} />
+          )}
+          {activeTab === 'hardware' && <HardwareAuditView />}
+          {activeTab === 'ros2' && (
+            <Ros2ToolsView estopActive={estopActive} onLogEvent={appendLog} />
+          )}
+          {activeTab === 'vision' && (
+            <WeedVisionView mode="vision" estopActive={estopActive} onLogEvent={appendLog} />
+          )}
+          {activeTab === 'calibration' && (
+            <WeedVisionView mode="calibration" estopActive={estopActive} onLogEvent={appendLog} />
+          )}
 
-        {/* Shared Engineering Event Console */}
-        <section className="bg-white border border-emerald-900/10 rounded-lg p-4 space-y-2.5">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 text-xs font-mono text-slate-700">
-              <Terminal className="w-4 h-4 text-emerald-600" />
-              <span>Mission &amp; Hardware Event Log</span>
-              <span
-                className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
-                  robotLinkMode === 'pi_live'
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+          {/* Shared Engineering Event Console */}
+          <section className="bg-white border border-emerald-900/10 rounded-lg p-4 space-y-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 text-xs font-mono text-slate-700">
+                <Terminal className="w-4 h-4 text-emerald-600" />
+                <span>Mission &amp; Hardware Event Log</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                    robotLinkMode === 'pi_live'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : robotLinkMode === 'pi_auth_error'
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : robotLinkMode === 'pi_unreachable'
+                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}
+                >
+                  {robotLinkMode === 'pi_live'
+                    ? 'PI LIVE'
                     : robotLinkMode === 'pi_auth_error'
-                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                    ? 'PI AUTH ERROR'
                     : robotLinkMode === 'pi_unreachable'
-                    ? 'bg-amber-50 text-amber-800 border-amber-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
-                }`}
-              >
-                {robotLinkMode === 'pi_live'
-                  ? 'PI LIVE'
-                  : robotLinkMode === 'pi_auth_error'
-                  ? 'PI AUTH ERROR'
-                  : robotLinkMode === 'pi_unreachable'
-                  ? 'PI UNREACHABLE'
-                  : 'SIM ONLY'}
-              </span>
-            </div>
-            <button
-              onClick={() => setEventLog([`[${new Date().toLocaleTimeString()}] [Log] Cleared.`])}
-              className="text-xs text-slate-500 hover:text-emerald-700 cursor-pointer"
-            >
-              Clear
-            </button>
-          </div>
-          <div className="bg-[#F4F8F5] border border-emerald-900/10 rounded p-3 h-28 overflow-y-auto font-mono text-xs text-slate-700 space-y-1">
-            {eventLog.map((line, i) => (
-              <div key={i} className="leading-relaxed">
-                {line}
+                    ? 'PI UNREACHABLE'
+                    : 'SIM ONLY'}
+                </span>
               </div>
-            ))}
-          </div>
-        </section>
-      </main>
+              <button
+                onClick={() => setEventLog([`[${new Date().toLocaleTimeString()}] [Log] Cleared.`])}
+                className="text-xs text-slate-500 hover:text-emerald-700 cursor-pointer"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="bg-[#F4F8F5] border border-emerald-900/10 rounded p-3 h-28 overflow-y-auto font-mono text-xs text-slate-700 space-y-1">
+              {eventLog.map((line, i) => (
+                <div key={i} className="leading-relaxed">
+                  {line}
+                </div>
+              ))}
+            </div>
+          </section>
+        </main>
+      )}
     </div>
   );
 }
